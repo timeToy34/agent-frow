@@ -773,6 +773,184 @@ fn a_denial_after_the_turn_ended_changes_nothing() {
 }
 
 #[test]
+fn promoting_an_off_keyboard_session_swaps_with_the_bottom_lane() {
+    let mut tracker = tracker(3);
+    send(
+        &mut tracker,
+        "claude-wsl",
+        "a",
+        "UserPromptSubmit",
+        "/home/j/alpha",
+        10,
+    );
+    send(
+        &mut tracker,
+        "claude-wsl",
+        "b",
+        "UserPromptSubmit",
+        "/home/j/beta",
+        11,
+    );
+    send(
+        &mut tracker,
+        "claude-wsl",
+        "c",
+        "UserPromptSubmit",
+        "/home/j/gamma",
+        12,
+    );
+    send(
+        &mut tracker,
+        "claude-wsl",
+        "d",
+        "UserPromptSubmit",
+        "/home/j/delta",
+        13,
+    );
+
+    tracker.promote("claude-wsl", "d");
+    assert_eq!(lane_project(&tracker, 0), Some("alpha".to_owned()));
+    assert_eq!(lane_project(&tracker, 1), Some("beta".to_owned()));
+    assert_eq!(lane_project(&tracker, 2), Some("delta".to_owned()));
+    let overflow = tracker.overflow();
+    assert_eq!(overflow.len(), 1, "the incumbent steps off the keyboard");
+    assert_eq!(overflow[0].project(), Some("gamma".to_owned()));
+
+    // Promoting a session that already holds a lane is a no-op.
+    tracker.promote("claude-wsl", "a");
+    assert_eq!(lane_project(&tracker, 0), Some("alpha".to_owned()));
+    assert_eq!(lane_project(&tracker, 2), Some("delta".to_owned()));
+}
+
+#[test]
+fn dismissing_an_off_keyboard_session_touches_no_lane() {
+    let mut tracker = tracker(3);
+    send(
+        &mut tracker,
+        "claude-wsl",
+        "a",
+        "UserPromptSubmit",
+        "/home/j/alpha",
+        10,
+    );
+    send(
+        &mut tracker,
+        "claude-wsl",
+        "b",
+        "UserPromptSubmit",
+        "/home/j/beta",
+        11,
+    );
+    send(
+        &mut tracker,
+        "claude-wsl",
+        "c",
+        "UserPromptSubmit",
+        "/home/j/gamma",
+        12,
+    );
+    send(
+        &mut tracker,
+        "claude-wsl",
+        "d",
+        "UserPromptSubmit",
+        "/home/j/delta",
+        13,
+    );
+
+    tracker.dismiss_session("claude-wsl", "d");
+    assert!(tracker.overflow().is_empty());
+    assert_eq!(lane_project(&tracker, 0), Some("alpha".to_owned()));
+    assert_eq!(lane_project(&tracker, 1), Some("beta".to_owned()));
+    assert_eq!(lane_project(&tracker, 2), Some("gamma".to_owned()));
+}
+
+#[test]
+fn growing_the_layout_promotes_the_oldest_waiters_first() {
+    let mut tracker = tracker(3);
+    send(
+        &mut tracker,
+        "claude-wsl",
+        "a",
+        "UserPromptSubmit",
+        "/home/j/alpha",
+        10,
+    );
+    send(
+        &mut tracker,
+        "claude-wsl",
+        "b",
+        "UserPromptSubmit",
+        "/home/j/beta",
+        11,
+    );
+    send(
+        &mut tracker,
+        "claude-wsl",
+        "c",
+        "UserPromptSubmit",
+        "/home/j/gamma",
+        12,
+    );
+    send(
+        &mut tracker,
+        "claude-wsl",
+        "d",
+        "UserPromptSubmit",
+        "/home/j/delta",
+        13,
+    );
+    send(
+        &mut tracker,
+        "claude-wsl",
+        "e",
+        "UserPromptSubmit",
+        "/home/j/echo",
+        14,
+    );
+    assert_eq!(tracker.overflow().len(), 2);
+
+    tracker.set_lane_count(4);
+    assert_eq!(lane_project(&tracker, 3), Some("delta".to_owned()));
+    assert_eq!(tracker.overflow().len(), 1);
+
+    tracker.set_lane_count(6);
+    assert_eq!(lane_project(&tracker, 4), Some("echo".to_owned()));
+    assert!(tracker.overflow().is_empty());
+}
+
+#[test]
+fn summoning_an_off_keyboard_session_uses_its_project_name() {
+    let mut tracker = tracker(3);
+    for (id, folder) in [("a", "alpha"), ("b", "beta"), ("c", "gamma")] {
+        send(
+            &mut tracker,
+            "claude-wsl",
+            id,
+            "UserPromptSubmit",
+            &format!("/home/j/{folder}"),
+            10,
+        );
+    }
+    let with_ancestry: Value = json!({
+        "src": "claude-wsl",
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": "d",
+        "cwd": "/home/j/delta",
+        "ancestors": [700],
+        "ancestor_names": ["WindowsTerminal.exe"],
+    });
+    tracker.accept(Event::parse(&with_ancestry, 20), 20);
+
+    let (ancestors, names) = tracker.summon_session("claude-wsl", "d").unwrap();
+    assert_eq!(ancestors.len(), 1);
+    assert_eq!(names, vec!["delta".to_owned()], "no lane, so no lane name");
+
+    let reason = tracker.summon_session("claude-wsl", "zz").unwrap_err();
+    assert!(reason.contains("gone"), "{reason}");
+}
+
+#[test]
 fn summoning_an_empty_lane_says_so_in_words() {
     let tracker = tracker(4);
     let reason = tracker.summon_target(2).unwrap_err();

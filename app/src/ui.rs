@@ -178,7 +178,7 @@ impl eframe::App for App {
         let mut rescan = false;
         let mut action: Option<(usize, bool)> = None;
         let mut settings_changed = false;
-        let mut focus: Option<usize> = None;
+        let mut focus: Option<FocusRequest> = None;
         let mut autostart_error: Option<String> = None;
 
         {
@@ -267,12 +267,12 @@ impl eframe::App for App {
         // quarter of a second of frozen window; and UI Automation needs a COM
         // apartment, which the window's own thread has already been put into a
         // different mode of by the windowing library.
-        if let Some(lane) = focus {
+        if let Some(request) = focus {
             let tracker = Arc::clone(&self.tracker);
-            let target = tracker
-                .lock()
-                .ok()
-                .map(|tracker| tracker.summon_target(lane));
+            let target = tracker.lock().ok().map(|tracker| match &request {
+                FocusRequest::Lane(lane) => tracker.summon_target(*lane),
+                FocusRequest::Session(source, id) => tracker.summon_session(source, id),
+            });
             let ctx = ctx.clone();
             std::thread::spawn(move || {
                 let report = match target {
@@ -359,10 +359,18 @@ impl App {
 
 /// What one lane shows. Copied out of the tracker first, so the settings for
 /// the same lane can be edited in place without borrowing it twice.
+/// What the user asked to bring forward: a lane's session, or one named by
+/// identity because it has no lane (the off-keyboard cards).
+enum FocusRequest {
+    Lane(usize),
+    Session(String, String),
+}
+
 struct LaneView {
     state: State,
     since: u64,
     note: String,
+    session_id: String,
     project: Option<String>,
     cwd: Option<PathBuf>,
     agent: Option<agents::Agent>,
@@ -376,6 +384,7 @@ fn view_of(session: &tracker::Session) -> LaneView {
         state: session.state,
         since: session.since,
         note: session.note.clone(),
+        session_id: session.session_id.clone(),
         project: session.project(),
         cwd: session.cwd.clone(),
         agent: session.agent,
@@ -389,7 +398,7 @@ fn lanes_panel(
     ui: &mut egui::Ui,
     tracker: &mut Tracker,
     now: u64,
-    focus: &mut Option<usize>,
+    focus: &mut Option<FocusRequest>,
 ) -> bool {
     let mut changed = false;
 
@@ -443,8 +452,8 @@ fn lanes_panel(
         });
         ui.add_space(4.0);
     }
-    if actions.focus.is_some() {
-        *focus = actions.focus;
+    if let Some(lane) = actions.focus {
+        *focus = Some(FocusRequest::Lane(lane));
     }
     if let Some(lane) = actions.dismiss {
         tracker.dismiss(lane);
@@ -457,38 +466,44 @@ fn lanes_panel(
         tracker.rebind();
     }
 
-    let overflow = tracker.overflow();
-    if !overflow.is_empty() {
-        ui.add_space(4.0);
+    // Off the keyboard: sessions that arrived after every lane was taken.
+    // Full cards, because an agent without a key is still an agent — tracked,
+    // focusable, dismissible — just unlit. The board never runs out of room:
+    // when every lane is occupied, the landing spot for the next agent is
+    // drawn before it arrives.
+    let overflow: Vec<LaneView> = tracker.overflow().into_iter().map(view_of).collect();
+    let every_lane_taken = views.iter().all(Option::is_some);
+    if !overflow.is_empty() || every_lane_taken {
+        ui.add_space(6.0);
         ui.label(
-            egui::RichText::new(format!(
-                "{} more session{} than lanes — nothing here takes a lane away from a session \
-                 that already has one",
-                overflow.len(),
-                if overflow.len() == 1 { "" } else { "s" }
-            ))
+            egui::RichText::new(
+                "Off the keyboard — fully tracked, no key or light. Nothing here takes a \
+                 lane away from a session that already has one; the ⏶ you press is the \
+                 exception.",
+            )
             .small()
             .weak(),
         );
-        for session in overflow {
-            ui.horizontal(|ui| {
-                state_pill(ui, session.state);
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{} · {} · {}",
-                        session
-                            .project()
-                            .unwrap_or_else(|| "unknown project".to_owned()),
-                        session
-                            .agent
-                            .map(|agent| agent.label())
-                            .unwrap_or("unknown agent"),
-                        agents::host_label(&session.source),
-                    ))
-                    .small(),
-                );
-            });
-        }
+        ui.add_space(2.0);
+    }
+    let mut off = OverflowActions::default();
+    for view in &overflow {
+        ui.push_id(("off-keyboard", &view.source, &view.session_id), |ui| {
+            overflow_card(ui, view, now, &mut off);
+        });
+        ui.add_space(4.0);
+    }
+    if every_lane_taken {
+        empty_overflow_slot(ui);
+    }
+    if let Some((source, id)) = off.focus {
+        *focus = Some(FocusRequest::Session(source, id));
+    }
+    if let Some((source, id)) = off.promote {
+        tracker.promote(&source, &id);
+    }
+    if let Some((source, id)) = off.dismiss {
+        tracker.dismiss_session(&source, &id);
     }
 
     footnotes(ui, tracker);
@@ -744,6 +759,122 @@ fn bind_controls(
         }
     }
     changed
+}
+
+/// What an off-keyboard card asked for. Sessions there have no lane index, so
+/// everything is named by identity.
+#[derive(Default)]
+struct OverflowActions {
+    promote: Option<(String, String)>,
+    dismiss: Option<(String, String)>,
+    focus: Option<(String, String)>,
+}
+
+/// One off-keyboard session: the same card as a lane, minus the colour and the
+/// number — this session has no key, and the tag says so in their place.
+fn overflow_card(ui: &mut egui::Ui, view: &LaneView, now: u64, actions: &mut OverflowActions) {
+    let key = || (view.source.clone(), view.session_id.clone());
+    let tint = {
+        let [r, g, b] = view.state.tint();
+        egui::Color32::from_rgb(r, g, b).gamma_multiply(0.10)
+    };
+    egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(8, 6))
+        .corner_radius(6.0)
+        .fill(tint)
+        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("off keyboard").small().weak());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add(egui::Button::new("❌").small())
+                        .on_hover_text(
+                            "Remove this session. If the agent is actually still \
+                             alive, its next event brings it back.",
+                        )
+                        .clicked()
+                    {
+                        actions.dismiss = Some(key());
+                    }
+                    if ui
+                        .add(egui::Button::new("⏶").small())
+                        .on_hover_text(
+                            "Take the bottom lane. Its session steps off the keyboard; \
+                             the lane arrows move this one up from there.",
+                        )
+                        .clicked()
+                    {
+                        actions.promote = Some(key());
+                    }
+                    ui.label(egui::RichText::new(tracker::elapsed(view.since, now)).monospace());
+                    state_pill(ui, view.state);
+                    if view.subagents > 0 {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} subagent{} busy",
+                                view.subagents,
+                                if view.subagents == 1 { "" } else { "s" }
+                            ))
+                            .small()
+                            .color(egui::Color32::from_rgb(80, 170, 255)),
+                        );
+                    }
+                });
+            });
+            let identity = ui.label(
+                egui::RichText::new(format!(
+                    "{} · {} · {}",
+                    view.project
+                        .clone()
+                        .unwrap_or_else(|| "unknown project".to_owned()),
+                    view.agent
+                        .map(|agent| agent.label())
+                        .unwrap_or("unknown agent"),
+                    agents::host_label(&view.source),
+                ))
+                .small(),
+            );
+            if let Some(cwd) = &view.cwd {
+                identity.on_hover_text(cwd.display().to_string());
+            }
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(&view.note).small().weak().monospace());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .small_button("Focus")
+                        .on_hover_text(
+                            "Bring this agent's window forward. Off the keyboard there \
+                             is no marker key; this button is it.",
+                        )
+                        .clicked()
+                    {
+                        actions.focus = Some(key());
+                    }
+                });
+            });
+        });
+}
+
+/// The landing spot for the next agent, drawn whenever every lane is taken —
+/// the board visibly never runs out of room.
+fn empty_overflow_slot(ui: &mut egui::Ui) {
+    egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(8, 6))
+        .corner_radius(6.0)
+        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("off keyboard").small().weak());
+                ui.label(
+                    egui::RichText::new("empty — the next agent lands here")
+                        .weak()
+                        .small(),
+                );
+            });
+        });
 }
 
 fn state_pill(ui: &mut egui::Ui, state: State) {

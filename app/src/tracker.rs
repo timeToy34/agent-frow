@@ -333,14 +333,36 @@ impl Tracker {
         let Some(session) = self.on_lane(lane) else {
             return Err(format!("lane {} is empty — nothing to focus", lane + 1));
         };
+        Ok(self.summon_of(session, Some(lane)))
+    }
+
+    /// [`Self::summon_target`] for a session named by identity rather than by
+    /// lane — the off-keyboard cards use it. Without a lane there is no lane
+    /// name, so the project is the only tab worth trying.
+    pub fn summon_session(
+        &self,
+        source: &str,
+        session_id: &str,
+    ) -> Result<(Vec<Ancestor>, Vec<String>), String> {
+        let Some(index) = self.find(source, session_id) else {
+            return Err("that session is gone — nothing to focus".to_owned());
+        };
+        let session = &self.sessions[index];
+        Ok(self.summon_of(session, session.lane))
+    }
+
+    fn summon_of(&self, session: &Session, lane: Option<usize>) -> (Vec<Ancestor>, Vec<String>) {
         let project = session.project();
-        let mut names = vec![self.settings.display_name(lane, project.as_deref())];
+        let mut names = Vec::new();
+        if let Some(lane) = lane {
+            names.push(self.settings.display_name(lane, project.as_deref()));
+        }
         if let Some(project) = project
             && !names.contains(&project)
         {
             names.push(project);
         }
-        Ok((session.ancestors.clone(), names))
+        (session.ancestors.clone(), names)
     }
 
     /// Swaps two lanes: name, colour, binding, and whatever session is on
@@ -371,6 +393,42 @@ impl Tracker {
     pub fn dismiss(&mut self, lane: usize) {
         let before = self.sessions.len();
         self.sessions.retain(|session| session.lane != Some(lane));
+        if self.sessions.len() != before {
+            self.fill_lanes();
+        }
+    }
+
+    /// Gives an off-keyboard session the bottom lane, at the user's request.
+    ///
+    /// The incumbent, if any, steps off the keyboard — with ⏶⏷ this is the
+    /// second sanctioned exception to "nothing takes a lane away from a
+    /// session that already has one": the user did it, deliberately. No
+    /// reassignment runs afterwards: whenever a session is off the keyboard
+    /// every lane is occupied, so re-running it would only re-seat the
+    /// session that just stepped down.
+    pub fn promote(&mut self, source: &str, session_id: &str) {
+        let Some(index) = self.find(source, session_id) else {
+            return;
+        };
+        if self.sessions[index].lane.is_some() || self.settings.lane_count == 0 {
+            return;
+        }
+        let bottom = self.settings.lane_count - 1;
+        for session in &mut self.sessions {
+            if session.lane == Some(bottom) {
+                session.lane = None;
+            }
+        }
+        self.sessions[index].lane = Some(bottom);
+    }
+
+    /// [`Self::dismiss`] for a session named by identity rather than by lane —
+    /// how an off-keyboard card is dismissed. Same safety: if the agent is
+    /// actually still alive, its next event re-adopts it.
+    pub fn dismiss_session(&mut self, source: &str, session_id: &str) {
+        let before = self.sessions.len();
+        self.sessions
+            .retain(|session| !(session.source == source && session.session_id == session_id));
         if self.sessions.len() != before {
             self.fill_lanes();
         }

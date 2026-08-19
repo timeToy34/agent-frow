@@ -131,11 +131,18 @@ show.
 
 Twelve F-row keys, in 3, 4 or 6 lanes. A session takes the lane bound to its
 `(agent, project folder)` if that lane is free, else the first free lane; the
-rest are listed as overflow. **Nothing ever takes a lane away from a session
+rest live **off the keyboard**: full cards in the window — state, note, timer,
+Focus, dismiss — just no key and no light. An off-keyboard session stays fully
+tracked, is promoted oldest-first the moment a lane frees or the layout grows,
+and the landing spot for the next agent is drawn whenever every lane is taken,
+so the board never runs out of room.
+
+**Nothing ever takes a lane away from a session
 that already has one** — lane position is identity, and a display you glance at
-teaches you nothing if lane 2 moves while you are looking at it. The ⏶⏷ buttons
-on a lane are the one sanctioned exception: the *user* may reorder lanes, and
-everything — session, name, colour, binding, keys — travels together.
+teaches you nothing if lane 2 moves while you are looking at it. The *user* has
+two sanctioned exceptions: the ⏶⏷ buttons reorder lanes (everything — session,
+name, colour, binding, keys — travels together), and an off-keyboard card's ⏶
+takes the bottom lane, its incumbent stepping off the keyboard in trade.
 
 A session's **project folder** is the *main* agent's launch directory: it is
 taken from `SessionStart`'s `cwd` (authoritative) and, until that arrives, from
