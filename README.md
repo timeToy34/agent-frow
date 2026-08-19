@@ -1,5 +1,7 @@
 # Agent F-Row
 
+[![CI](https://github.com/timeToy34/agent-frow/actions/workflows/ci.yml/badge.svg)](https://github.com/timeToy34/agent-frow/actions/workflows/ci.yml)
+
 Shows what your coding agents are doing, on your keyboard's RGB F-row — and
 one press on a lane's key brings that agent's window forward: its terminal,
 desktop app, or IDE.
@@ -255,7 +257,7 @@ Three things it must keep doing (the histories are in
 
 ## Taking it to another machine
 
-`cargo build --release` produces everything the zip needs; the release profile
+`dist.ps1` builds the zip from a fresh release build; the release profile
 links the C runtime statically, so nothing has to be installed first.
 
 ```
@@ -264,6 +266,7 @@ dist/agent-frow-win64.zip
   agent-frow-hook.exe     the shim the agents run
   iCUESDK.x64_2019.dll    Corsair lighting; the app runs without it
   README.txt              the three steps below
+  LICENSE.txt             MIT — the notice travels with every copy
 ```
 
 `iCUESDK.x64_2019.dll` is Corsair's, carried in the zip from the iCUE SDK's
