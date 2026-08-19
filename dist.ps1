@@ -5,7 +5,9 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
 
-cargo build --release
+# cargo writes progress to stderr, which Stop-preference PowerShell would
+# treat as a terminating error; let cmd merge the streams first.
+cmd /c "cargo build --release 2>&1"
 if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 
 $stage = Join-Path $root 'target\dist-stage'
