@@ -79,78 +79,16 @@ is no component inside WSL, no host-only address, and no firewall rule.
 Detection works the same way in reverse: `\\wsl.localhost\<distro>\home\<user>\`
 is readable from Windows, so WSL agents are found and configured from here.
 
-## Things worth knowing before changing anything
-
-These were measured against real sessions, not read from documentation — in two
-cases the documentation is wrong.
-
-- **`PermissionRequest` and `Notification` carry no `tool_use_id`.** Only
-  `session_id` and `prompt_id`, which are turn-level while a turn holds dozens
-  of tool calls. Nothing can correlate a permission prompt to the tool call it
-  belongs to. Do not build anything that needs to.
-- **Claude prompts the user itself about six seconds after `PermissionRequest`.**
-  Blocking that hook to collect an answer does not work; the tool proceeds
-  regardless.
-- **Every Codex hook blocks, and `async` is not usable.** Codex documents an
-  `"async": true` flag and 0.148 accepts it, but 0.147 *skips any hook carrying
-  it* — "async hooks are not supported yet" — so five of six events would
-  silently never fire. We register plain synchronous hooks. That is safe: ours
-  connects to loopback, writes a few hundred bytes and exits. What made the
-  previous version unusable with Codex was the broker holding a hook open for
-  ninety seconds, not the hook being synchronous.
-- **Codex clamps `SessionEnd` to 3 seconds**, so we ask for exactly 3 rather
-  than collecting a warning on its hooks screen.
-- **Codex has no error and no interrupt event, and emits no `Notification` at
-  all.** Its only "needs you" signal is `PermissionRequest`. Say so rather than
-  guessing.
-- **`PreToolUse` is 46% of all hook traffic and tells a lane nothing**, because
-  agents auto-approve nearly every tool call. It is deliberately not registered.
-- **Background subagents outlive the turn that spawned them.** `Stop` honestly
-  means the main turn is done while subagents may still be at work, so the
-  tracker keeps a per-session roster: `SubagentStart` enrols an `agent_id`,
-  every event carrying it is its heartbeat, `SubagentStop` retires it, and 30
-  minutes of silence retires one that died unannounced. A resting lane with a
-  non-empty roster shows the Running pattern and "N subagents busy" — but
-  Waiting, Error and Interrupted always win, because those need the user.
-  Subagent events never change the lane's state itself: they carry the
-  *parent's* `session_id`, and acting on them is how the old app cleared a
-  Waiting nobody had answered.
-- **Claude's `StopFailure` is how a lane can show an error.** An earlier version
-  handled it but never registered it, so that state was unreachable.
-- **Focus raises a window only after checking it is still what it was.**
-  Matching any window an ancestor pid owned was subtly wrong: it could raise a
-  transient Terminal helper (`PopupHost`), an unrelated app whose pid an
-  ancestor's had been recycled into (a summon once raised iCUE), or — the tell
-  — the F-row app's own window, which made the summon do nothing *only when
-  the app was focused*, because the "already in front, leave it" shortcut then
-  matched. The first guard was a terminal-class allowlist, which also ruled
-  out agents living in a desktop app or an IDE. The guard now is identity: the
-  hook records each ancestor's exe name at event time, and a window counts
-  only while its pid still resolves to that name. When nothing qualifies it
-  refuses and says so. Every summon raises the window; it skips only
-  re-selecting an already-selected tab, which would move keyboard focus into
-  the tab strip. A topmost/not-topmost Z-order move makes the
-  terminal visibly frontmost without foreground permission, while an attached
-  `SetForegroundWindow` still requests keyboard activation. Success is checked
-  with the root window at the terminal's centre, not the foreground flag.
-- **The hook must never print to stdout.** It is registered on `PermissionRequest`,
-  which is a decision hook on both agents: anything it prints that parses could
-  approve a real tool call. `hook/tests/silence.rs` asserts zero bytes.
-- **The registered command string must never change.** Codex records trust
-  against a hash of it. That is why it names `%LOCALAPPDATA%` rather than a build
-  directory, and why the token lives in a file rather than in the command.
-
 ## What a lane shows
 
 Six states: **Connected** (alive, nothing run yet), **Running**, **Waiting**
 (needs you), **Done**, **Error**, **Interrupted**. The transition table is
 `app/src/state.rs` and it is a total function over (state, event) — no request
 ids, no queues, no tombstones, no timers. **Activity clears Waiting**, so
-nothing has to be correlated to anything, so nothing can fail to correlate.
-That is the whole fix for the lane that used to stick.
+nothing has to be correlated to anything.
 
-Four of its conditions are not stylistic. Each prevents a failure that was
-actually observed, and each has a test named after it:
+None of its conditions are stylistic — each prevents an observed failure and
+has a test named after it:
 
 - `SessionStart{source: "compact"}` changes nothing. Claude compacts *mid-turn*;
   without the guard a live turn drops to Connected until the next `Stop`.
@@ -165,8 +103,7 @@ actually observed, and each has a test named after it:
 - `PermissionDenied` promotes Waiting to Running: the prompt was answered with
   a no — by the user, a rule, or an interrupt — so it is no longer pending,
   and the turn is formally still open. If the interrupt killed the turn, the
-  idle notification says so a minute later. Without this event a rejected
-  prompt's lane sat on Waiting forever.
+  idle notification says so a minute later.
 - `PostToolUse` promotes **only from Waiting**. Hook processes post
   concurrently, so one emitted before `Stop` can arrive after it.
 
@@ -214,12 +151,11 @@ The lane name is load-bearing: focus finds a terminal tab by it.
 
 ## The keyboard
 
-Corsair, through the iCUE SDK. Two constraints, both learned by breaking them:
+Corsair, through the iCUE SDK. Two constraints:
 
-- **Only ever the twelve LEDs we own.** An earlier version returned an entry for
-  every LED the device reported and then overwrote twelve of them, which is a
-  way of spelling "black out the whole keyboard". The SDK sets only the LEDs it
-  is handed, so naming twelve leaves every other key to the user's own profile.
+- **Only ever the twelve LEDs we own.** The SDK sets only the LEDs it is
+  handed, so naming twelve leaves every other key to the user's own profile —
+  and touching more is a way of spelling "black out the whole keyboard".
 - **Shared layer priority 128, never exclusive control.** Exclusivity is per
   *device*, not per LED, so asking for it stops iCUE rendering the keyboard and
   every key outside the F-row goes dark whether we paint it or not.
@@ -287,8 +223,8 @@ action in the product** — no approvals, no arrows, no key capture.
   sharing one window are indistinguishable to every window-level API Windows
   offers.
 
-The exe-name check is what stops a recycled pid raising a bystander (a summon
-once raised iCUE that way), and this app's own window is excluded outright.
+The exe-name check is what stops a recycled pid raising a bystander, and this
+app's own window is excluded outright.
 Within a matching pid a terminal-class window is preferred — that keeps
 Windows Terminal's transient `PopupHost` out — else the topmost window that is
 not a tool window, which keeps Electron splash screens and palettes out.
@@ -299,23 +235,19 @@ why naming a lane is a feature. When neither matches it says so and lists the
 tabs that are there, rather than quietly leaving you looking at the right
 terminal showing the wrong agent.
 
-Three things it must keep doing, each learned by breaking it:
+Three things it must keep doing (the histories are in
+[docs/lessons.md](docs/lessons.md)):
 
-- **Get foreground permission from the input, not by force.** Windows only lets a
-  process change the foreground window if the user just gave input *to it*. The
-  summon key arrives as a `WM_HOTKEY` posted to this app (see The keyboard), so
-  the input *is* ours and the raise is allowed. This is why the fix was to
-  register the keys rather than swallow them in a low-level hook — a swallowed
-  key reaches no window, so Windows grants no permission, and the summon fails
-  only when this app is the focused window (while a click on the Focus button,
-  being real input to us, always worked). No synthetic input, no foreground-lock
-  tricks.
+- **Get foreground permission from the input, not by force.** Windows only lets
+  a process change the foreground window if the user just gave input *to it*.
+  The summon key arrives as a `WM_HOTKEY` posted to this app (see The
+  keyboard), so the input *is* ours and the raise is allowed. No synthetic
+  input, no foreground-lock tricks.
 - **Activation and Z-order are separate.** `SetForegroundWindow` can leave a
   window the "foreground window" per the API while it is still drawn *behind*
-  another — the summon reported success while nothing visibly moved. A
-  topmost/not-topmost `SetWindowPos` pair forces the window physically to the top
-  of the stack. Believe **what is visually on top** (`WindowFromPoint` at the
-  window's centre), never `GetForegroundWindow`.
+  another. A topmost/not-topmost `SetWindowPos` pair forces the window
+  physically to the top of the stack. Believe **what is visually on top**
+  (`WindowFromPoint` at the window's centre), never `GetForegroundWindow`.
 - **Run off the window's thread.** It needs its own COM apartment — the
   windowing library has already put the UI thread into the other one, and UI
   Automation then reads no tabs at all — and it can spend a quarter of a second
@@ -353,24 +285,15 @@ Run-key entry pointing at the installed copy, visible and disableable in Task
 Manager's Startup tab like any other. Not done: code signing (SmartScreen will
 warn on a downloaded zip).
 
-## State of the work
-
-- **M1 — tray app, agent detection, hook installation.** Done.
-- **M2 — connect the hooks, state logic.** Done.
-- **M3 — Corsair lighting**, plus its setup UI. Done.
-- **M4 — click a lane to focus that agent's window and terminal tab.** Done.
-
-`app/src/surface/corsair/` and `app/src/focus/` are the only code carried over
-from the previous version, because they were the only parts that demonstrably
-worked. Both were rewritten around this application's own types on the way in.
-
 ## Contributing
 
-Issues and pull requests are welcome. CI checks formatting and lints/tests the
+Issues and pull requests are welcome. **Before changing the state machine,
+focus, the hook, or the lighting, read [docs/lessons.md](docs/lessons.md)** —
+the constraints there were measured against real sessions, and in two cases
+the agent documentation is wrong. CI checks formatting and lints/tests the
 hook crate on Linux, and builds the whole workspace on Windows; the GUI only
 compiles on Windows. If a change touches summon keys, focus, or lighting, say
-what hardware you verified it on — much of this code exists because the obvious
-approach did not survive contact with a real keyboard.
+what hardware you verified it on.
 
 ## License
 
