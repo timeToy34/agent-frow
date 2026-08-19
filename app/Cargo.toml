@@ -1,0 +1,51 @@
+[package]
+name = "agent-frow"
+description = "Shows what your coding agents are doing on your keyboard's RGB F-row; one press summons that agent's window"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[lib]
+name = "agent_frow"
+path = "src/lib.rs"
+
+[[bin]]
+name = "agent-frow"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = { workspace = true }
+eframe = { workspace = true }
+tray-icon = { workspace = true }
+# Only to name the window-handle types eframe already hands out; the version
+# must stay in step with eframe's or the trait is a different trait.
+raw-window-handle = "0.6"
+
+# Raising a window and selecting a terminal tab. The window half could be hand
+# written like the rest of our FFI; UI Automation could not — it is COM, and
+# hand-rolled vtables for four interfaces would be a lot of unsafe code to get
+# subtly wrong. Windows-only, so nothing else in the tree pays for it.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Ole",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# Embeds the icon and the authorship strings as a Windows resource. Build-time
+# only, and only when building for Windows.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[lints]
+workspace = true

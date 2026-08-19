@@ -1,0 +1,18 @@
+# Corsair iCUE SDK (redistributable; obtained per-machine, not committed)
+/iCUESDK/
+
+# Local environment and secrets
+*.local
+.env
+.env.*
+
+# Editor and OS noise
+.DS_Store
+
+# Build output.
+/target
+# Built packages.
+/dist
+# Development scratch: a screenshot and the script that takes it.
+/window.png
+/shot.ps1

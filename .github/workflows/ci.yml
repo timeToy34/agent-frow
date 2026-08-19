@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# The application is Windows-only. The Linux job checks what a Linux runner
+# honestly can: formatting for the whole workspace, and the hook — which is
+# pure std, builds everywhere, and carries the one safety property worth
+# automating (its stdout is empty, always; anything it printed that parses
+# could approve a real tool call). The Windows job proves the app that
+# actually ships compiles.
+jobs:
+  checks:
+    name: Formatting and the hook
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Formatting
+        run: cargo fmt --all --check
+      - name: Hook lints (warnings are errors)
+        run: cargo clippy -p agent-frow-hook --all-targets -- -D warnings
+      - name: Hook tests, including the silence property
+        run: cargo test -p agent-frow-hook
+
+  windows:
+    name: Windows build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the workspace (release)
+        run: cargo build --release --workspace

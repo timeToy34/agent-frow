@@ -1,0 +1,9 @@
+# Normalize all text files to LF in the repository and on checkout.
+# The WSL and native Windows checkouts must see identical bytes; the
+# toolchain (rustc, vite, tauri) handles LF on every platform.
+* text=auto eol=lf
+
+# Binary assets
+*.png binary
+*.ico binary
+*.icns binary

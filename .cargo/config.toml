@@ -1,0 +1,4 @@
+# Static CRT, so the shipped executables run on a machine that never installed
+# the Visual C++ redistributables.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

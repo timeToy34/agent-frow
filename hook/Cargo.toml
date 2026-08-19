@@ -1,0 +1,23 @@
+[package]
+name = "agent-frow-hook"
+description = "The silent hook shim coding agents spawn to relay events to Agent F-Row"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[[bin]]
+name = "agent-frow-hook"
+path = "src/main.rs"
+
+# One dependency, on purpose. This binary is spawned thousands of times a day by
+# every agent, and is registered on decision hooks, so its virtues are being
+# small, being fast, and being incapable of saying anything.
+[dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
