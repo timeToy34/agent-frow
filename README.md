@@ -130,8 +130,11 @@ show.
 ## Lanes
 
 Twelve F-row keys, in 3, 4 or 6 lanes. A session takes the lane bound to its
-`(agent, project folder)` if that lane is free, else the first free lane; the
-rest live **off the keyboard**: full cards in the window — state, note, timer,
+`(agent, project folder)` if that lane is free, else the first free unbound
+lane; a bound lane is borrowed only when nothing else is free, and never by a
+session that has not yet reported its working directory — a bind match cannot
+be proven without one, and the session claims properly the moment it arrives.
+The rest live **off the keyboard**: full cards in the window — state, note, timer,
 Focus, dismiss — just no key and no light. An off-keyboard session stays fully
 tracked, is promoted oldest-first the moment a lane frees or the layout grows,
 and the landing spot for the next agent is drawn whenever every lane is taken,

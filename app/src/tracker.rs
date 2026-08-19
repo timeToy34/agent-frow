@@ -200,6 +200,7 @@ impl Tracker {
 
     fn update(&mut self, index: usize, event: &Event) {
         let step = state::step(self.sessions[index].state, event);
+        let mut learned_cwd = false;
         {
             let session = &mut self.sessions[index];
             session.last_event = event.at;
@@ -216,7 +217,14 @@ impl Tracker {
                 && event.cwd.is_some()
                 && (event.kind == Kind::SessionStart || session.cwd.is_none())
             {
+                let first_cwd = session.cwd.is_none();
                 session.cwd.clone_from(&event.cwd);
+                // A session adopted from a subagent's event started without a
+                // cwd, so it could not prove a bind match and may be waiting
+                // off the keyboard. Now it can: give assignment another look.
+                if first_cwd && session.lane.is_none() {
+                    learned_cwd = true;
+                }
             }
             // Other fields fill in whenever they show up, and are never cleared
             // by an event that omits them.
@@ -238,6 +246,8 @@ impl Tracker {
         }
         if step == Step::Release {
             self.sessions.remove(index);
+            self.fill_lanes();
+        } else if learned_cwd {
             self.fill_lanes();
         }
     }
@@ -519,7 +529,22 @@ fn claim(settings: &Settings, taken: &[usize], session: &Session) -> Option<usiz
             return Some(index);
         }
     }
-    lanes().map(|(index, _)| index).find(|index| free(*index))
+    // No match, so first the lanes nobody has claims on.
+    if let Some((index, _)) = lanes().find(|(index, lane)| free(*index) && lane.bind.is_none()) {
+        return Some(index);
+    }
+    // Borrowing a bound lane is deliberate policy under scarcity — a bound
+    // lane standing empty while its session waits off the keyboard is worse
+    // than a lane used by the wrong project for a while. But only a session
+    // whose working directory is known may borrow: hooks post concurrently,
+    // and one adopted from a subagent's event carries no cwd yet — granting
+    // it someone's reserved lane is how two agents once came up reversed
+    // after an app restart, summoning each other's windows. It waits off the
+    // keyboard instead; the moment its cwd arrives, assignment reruns.
+    if session.cwd.is_some() {
+        return lanes().map(|(index, _)| index).find(|index| free(*index));
+    }
+    None
 }
 
 /// "3s", "1m 20s", "2h 5m" — how long a lane has been in its state.

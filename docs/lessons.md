@@ -99,6 +99,16 @@ cases the documentation is wrong.
     the other one, and UIA then reads no tabs at all — and because it can
     spend a quarter of a second waiting for the terminal to agree which tab
     is in front.
+- **Two agents once came up reversed** — Agent A on B's bound lane and B on
+  A's, each summon raising the other's window. Cause: lanes are claimed at
+  first sight, hooks post concurrently, and a session adopted from a
+  *subagent's* event deliberately carries no cwd (a subfolder must not bind
+  the lane) — so it matched no bind and the fallback handed it the first free
+  lane, bound or not. Restarting the app made it likely: every live session
+  re-adopts from whatever event lands first. Hence the rules in `claim()`:
+  unbound lanes first, bound lanes borrowed only under scarcity, never
+  without a proven cwd — and a laneless session re-enters assignment the
+  moment its cwd arrives.
 - **A summon once raised iCUE.** A dead ancestor's pid had been recycled onto
   iCUE's process, and pid-only matching believed it. That is why every
   ancestor now carries its exe name from the hook's process snapshot, and a

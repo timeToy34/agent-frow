@@ -146,9 +146,9 @@ fn a_binding_can_name_the_agent_as_well_as_the_folder() {
 
 #[test]
 fn nothing_takes_a_lane_away_from_a_session_that_already_has_one() {
-    // The unbound session got there first. Moving it now would be the display
-    // rearranging itself under somebody who is looking at it, which is worse
-    // than a binding not applying today.
+    // The borrowing session got there first, under scarcity. Moving it now
+    // would be the display rearranging itself under somebody who is looking
+    // at it, which is worse than a binding not applying today.
     let mut settings = Settings::default();
     settings.set_lane_count(3);
     settings.lanes[0].bind = Some(Bind {
@@ -157,6 +157,7 @@ fn nothing_takes_a_lane_away_from_a_session_that_already_has_one() {
     });
     let mut tracker = Tracker::new(settings, Default::default());
 
+    // Strangers fill the unbound lanes first…
     send(
         &mut tracker,
         "claude-win",
@@ -165,8 +166,29 @@ fn nothing_takes_a_lane_away_from_a_session_that_already_has_one() {
         r"C:\dev\alpha",
         10,
     );
-    assert_eq!(lane_project(&tracker, 0).as_deref(), Some("alpha"));
+    send(
+        &mut tracker,
+        "claude-win",
+        "g",
+        "UserPromptSubmit",
+        r"C:\dev\gamma",
+        11,
+    );
+    assert_eq!(lane_project(&tracker, 1).as_deref(), Some("alpha"));
+    assert_eq!(lane_project(&tracker, 2).as_deref(), Some("gamma"));
 
+    // …and only scarcity lets one borrow the bound lane.
+    send(
+        &mut tracker,
+        "claude-win",
+        "d",
+        "UserPromptSubmit",
+        r"C:\dev\delta",
+        12,
+    );
+    assert_eq!(lane_project(&tracker, 0).as_deref(), Some("delta"));
+
+    // The lane's own project arriving does not evict the borrower.
     send(
         &mut tracker,
         "claude-win",
@@ -175,8 +197,112 @@ fn nothing_takes_a_lane_away_from_a_session_that_already_has_one() {
         r"C:\dev\beta",
         20,
     );
-    assert_eq!(lane_project(&tracker, 0).as_deref(), Some("alpha"));
-    assert_eq!(lane_project(&tracker, 1).as_deref(), Some("beta"));
+    assert_eq!(lane_project(&tracker, 0).as_deref(), Some("delta"));
+    assert_eq!(tracker.overflow().len(), 1);
+}
+
+#[test]
+fn a_session_without_a_cwd_never_takes_a_bound_lane() {
+    // Hooks post concurrently; a session adopted from a subagent's event has
+    // no cwd and so cannot prove a bind match. Granting it a reserved lane is
+    // how two agents once came up reversed after an app restart, summoning
+    // each other's windows.
+    let mut settings = Settings::default();
+    settings.set_lane_count(3);
+    settings.lanes[0].bind = Some(Bind {
+        agent: BindAgent::Any,
+        folder: PathBuf::from("/home/j/beta"),
+    });
+    settings.lanes[1].bind = Some(Bind {
+        agent: BindAgent::Any,
+        folder: PathBuf::from("/home/j/gamma"),
+    });
+    let mut tracker = Tracker::new(settings, Default::default());
+
+    // Adopted from a subagent event: the cwd is deliberately not believed.
+    let subagent: Value = json!({
+        "src": "claude-wsl",
+        "hook_event_name": "SubagentStart",
+        "session_id": "b",
+        "cwd": "/home/j/beta/frontend",
+        "agent_id": "sub-1",
+    });
+    tracker.accept(Event::parse(&subagent, 10), 10);
+
+    // Both bound lanes are free, but only the unbound lane 2 is claimable.
+    let session = tracker.on_lane(2);
+    assert!(session.is_some(), "an unbound lane is fine without a cwd");
+    assert!(tracker.on_lane(0).is_none());
+    assert!(tracker.on_lane(1).is_none());
+}
+
+#[test]
+fn a_late_cwd_claims_the_bound_lane_it_could_not_prove_before() {
+    let mut settings = Settings::default();
+    settings.set_lane_count(3);
+    settings.lanes[0].bind = Some(Bind {
+        agent: BindAgent::Any,
+        folder: PathBuf::from("/home/j/beta"),
+    });
+    settings.lanes[1].bind = Some(Bind {
+        agent: BindAgent::Any,
+        folder: PathBuf::from("/home/j/gamma"),
+    });
+    settings.lanes[2].bind = Some(Bind {
+        agent: BindAgent::Any,
+        folder: PathBuf::from("/home/j/delta"),
+    });
+    let mut tracker = Tracker::new(settings, Default::default());
+
+    // Every lane is bound, so a cwd-less adoption waits off the keyboard…
+    let subagent: Value = json!({
+        "src": "claude-wsl",
+        "hook_event_name": "SubagentStart",
+        "session_id": "b",
+        "cwd": "/home/j/beta/frontend",
+        "agent_id": "sub-1",
+    });
+    tracker.accept(Event::parse(&subagent, 10), 10);
+    assert_eq!(tracker.overflow().len(), 1);
+
+    // …until the main agent's first event proves where it lives.
+    send(
+        &mut tracker,
+        "claude-wsl",
+        "b",
+        "PostToolUse",
+        "/home/j/beta",
+        20,
+    );
+    assert_eq!(lane_project(&tracker, 0).as_deref(), Some("beta"));
+    assert!(tracker.overflow().is_empty());
+}
+
+#[test]
+fn bindings_survive_layouts_where_their_lane_does_not_exist() {
+    let mut settings = Settings::default();
+    settings.set_lane_count(4);
+    settings.lanes[3].bind = Some(Bind {
+        agent: BindAgent::Any,
+        folder: PathBuf::from("/home/j/beta"),
+    });
+    let mut tracker = Tracker::new(settings, Default::default());
+
+    tracker.set_lane_count(3);
+    tracker.set_lane_count(4);
+    assert!(
+        tracker.settings.lanes[3].bind.is_some(),
+        "a binding outlives layouts that hide its lane"
+    );
+    send(
+        &mut tracker,
+        "claude-wsl",
+        "b",
+        "UserPromptSubmit",
+        "/home/j/beta",
+        10,
+    );
+    assert_eq!(lane_project(&tracker, 3).as_deref(), Some("beta"));
 }
 
 #[test]
