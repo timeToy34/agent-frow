@@ -284,10 +284,7 @@ impl KeyboardStatus {
             connected: true,
             driven,
             detail: if driven == palette::KEYS {
-                format!(
-                    "{}: driving the {driven} F-row keys, and nothing else",
-                    device.model
-                )
+                format!("{}: driving the {driven} F-row keys", device.model)
             } else {
                 format!(
                     "{}: only {driven} of the {} F-row keys exist here, so the lanes are incomplete",
