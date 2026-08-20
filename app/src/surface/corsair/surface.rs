@@ -111,7 +111,7 @@ fn render(tracker: Arc<Mutex<Tracker>>, running: Arc<AtomicBool>) {
     // (re)connect; the settings clone is kept so it is re-made only when the
     // settings actually change — it carries every lane-name String.
     let mut last_states: Vec<Option<State>> = Vec::new();
-    let mut settings_cache: Option<Settings> = None;
+    let mut settings_cache: Option<crate::settings::Settings> = None;
     let mut dirty = true;
 
     while running.load(Ordering::SeqCst) {
