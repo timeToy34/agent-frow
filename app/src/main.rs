@@ -373,7 +373,16 @@ fn bootstrap(install_dir: &std::path::Path, installed_exe: &std::path::Path) -> 
             let _ = install::apply(&plan);
         }
     }
+    // Null stdio and no console window: this process freed its console at
+    // the top of `launch()`, and letting the child inherit those now-invalid
+    // handles fails the spawn itself ("The handle is invalid", os error 6).
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     std::process::Command::new(installed_exe)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|error| format!("relaunching the installed copy: {error}"))?;
     Ok(())
