@@ -970,6 +970,33 @@ fn keyboard_panel(ui: &mut egui::Ui, tracker: &mut Tracker) -> bool {
                 changed = true;
             }
             ui.label(egui::RichText::new("Brightness").weak());
+            ui.add_space(10.0);
+            // Calibration, rightmost after brightness: B, G, R added
+            // right-to-left so they read R G B left-to-right.
+            for (label, slot) in ["B", "G", "R"]
+                .into_iter()
+                .zip(tracker.settings.color_gain.iter_mut().rev())
+            {
+                if ui
+                    .add(
+                        egui::DragValue::new(slot)
+                            .range(settings::COLOR_GAIN_RANGE.0..=settings::COLOR_GAIN_RANGE.1)
+                            .speed(0.01)
+                            .fixed_decimals(2),
+                    )
+                    .on_hover_text(
+                        "Multiplies what the keys are sent — for a keyboard whose LEDs \
+                         do not match the screen. Above 1.00 clips on full channels, so \
+                         prefer pulling the strong channels down; the window is never \
+                         corrected. Tune with a Preview pattern playing.",
+                    )
+                    .changed()
+                {
+                    changed = true;
+                }
+                ui.label(egui::RichText::new(label).weak());
+            }
+            ui.label(egui::RichText::new("Color balance").weak());
         });
     });
 

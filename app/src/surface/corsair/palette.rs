@@ -50,6 +50,20 @@ const SCANNER_PERIOD_MS: u64 = 1400;
 /// the beats read as urgent, which nothing else on the board is allowed to.
 const PULSE_PERIOD_MS: u64 = 1200;
 
+/// Per-channel calibration, last thing before the wire: some keyboards render
+/// a colour completely differently from the screen (blue too strong, red too
+/// weak), and a gain is the honest model for that — black stays black, dim
+/// colours correct in proportion, and it composes with brightness. The window
+/// is never corrected; this exists to make the keys match it.
+fn corrected(color: Rgb, gain: [f32; 3]) -> Rgb {
+    let channel = |value: u8, gain: f32| (f32::from(value) * gain).round().clamp(0.0, 255.0) as u8;
+    Rgb::new(
+        channel(color.r, gain[0]),
+        channel(color.g, gain[1]),
+        channel(color.b, gain[2]),
+    )
+}
+
 fn scale(color: Rgb, factor: f32) -> Rgb {
     let f = factor.clamp(0.0, 1.0);
     let channel = |value: u8| (f32::from(value) * f).round().clamp(0.0, 255.0) as u8;
@@ -187,7 +201,7 @@ pub fn frame(
         {
             let id = luid(lane * keys + offset);
             if available.contains(&id) {
-                frame.push((id, scale(color, brightness)));
+                frame.push((id, corrected(scale(color, brightness), settings.color_gain)));
             }
         }
     }
@@ -207,6 +221,30 @@ mod tests {
     }
 
     const LANE: Rgb = Rgb::new(80, 170, 255);
+
+    #[test]
+    fn colour_gain_corrects_each_channel_and_clamps() {
+        let gain = [0.5, 1.0, 2.0];
+        assert_eq!(
+            corrected(Rgb::new(100, 100, 100), gain),
+            Rgb::new(50, 100, 200)
+        );
+        assert_eq!(
+            corrected(Rgb::new(200, 0, 200), gain),
+            Rgb::new(100, 0, 255),
+            "clamps at full rather than wrapping"
+        );
+        assert_eq!(
+            corrected(Rgb::new(80, 170, 255), [1.0, 1.0, 1.0]),
+            Rgb::new(80, 170, 255),
+            "unity gain is identity"
+        );
+        assert_eq!(
+            corrected(OFF, [2.0, 2.0, 2.0]),
+            OFF,
+            "black stays black under any gain"
+        );
+    }
 
     #[test]
     fn idle_is_one_dim_key_and_darkness() {

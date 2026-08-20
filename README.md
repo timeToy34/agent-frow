@@ -184,6 +184,13 @@ Corsair, through the iCUE SDK. Two constraints:
   *device*, not per LED, so asking for it stops iCUE rendering the keyboard and
   every key outside the F-row goes dark whether we paint it or not.
 
+Not every keyboard renders colour honestly — on some, blue overpowers and red
+undershoots until a colour set on screen is unrecognisable on the keys.
+**Color balance** (next to Brightness) is a per-channel gain, 0.25–2.00,
+multiplied into what the keys are sent and nothing else — the window is never
+corrected. Calibrate with a **Preview** pattern playing; above 1.00 clips on
+already-full channels, so prefer pulling the strong channels down.
+
 F13–F24 are registered as global hotkeys with `MOD_NOREPEAT`. That both keeps
 the remapped keys out of other applications and makes Windows deliver the
 physical input to Agent F-Row before it raises a terminal. A low-level keyboard

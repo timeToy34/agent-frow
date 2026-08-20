@@ -149,12 +149,20 @@ impl Lane {
 /// broken, and the way to turn the lighting off is to quit.
 pub const MIN_BRIGHTNESS: f32 = 0.05;
 
+/// How far a colour-gain channel may go. Above 1.0 clips on already-full
+/// channels, so the range leaves headroom without pretending it is free.
+pub const COLOR_GAIN_RANGE: (f32, f32) = (0.25, 2.0);
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     pub lane_count: usize,
     /// Always [`MAX_LANES`] long; `lane_count` says how many are live.
     pub lanes: Vec<Lane>,
     pub brightness: f32,
+    /// Per-channel gain (R, G, B) multiplied into what the keys are sent —
+    /// calibration for a keyboard whose LEDs do not match the screen. Unity
+    /// is untouched; the window is never corrected.
+    pub color_gain: [f32; 3],
 }
 
 impl Default for Settings {
@@ -163,6 +171,7 @@ impl Default for Settings {
             lane_count: 4,
             lanes: (0..MAX_LANES).map(Lane::default_at).collect(),
             brightness: 0.8,
+            color_gain: [1.0, 1.0, 1.0],
         }
     }
 }
@@ -217,6 +226,13 @@ pub fn parse(text: &str) -> Result<Settings, String> {
     if let Some(brightness) = object.get("brightness").and_then(Value::as_f64) {
         settings.brightness = (brightness as f32).clamp(MIN_BRIGHTNESS, 1.0);
     }
+    if let Some(gain) = object.get("color_gain").and_then(Value::as_object) {
+        for (key, slot) in ["r", "g", "b"].into_iter().zip(&mut settings.color_gain) {
+            if let Some(value) = gain.get(key).and_then(Value::as_f64) {
+                *slot = (value as f32).clamp(COLOR_GAIN_RANGE.0, COLOR_GAIN_RANGE.1);
+            }
+        }
+    }
     if let Some(lanes) = object.get("lanes").and_then(Value::as_array) {
         for (index, lane) in lanes.iter().take(MAX_LANES).enumerate() {
             let Some(lane) = lane.as_object() else {
@@ -257,6 +273,11 @@ pub fn to_json(settings: &Settings) -> String {
     let mut root = Map::new();
     root.insert("lane_count".to_owned(), Value::from(settings.lane_count));
     root.insert("brightness".to_owned(), Value::from(settings.brightness));
+    let mut gain = Map::new();
+    for (key, value) in ["r", "g", "b"].into_iter().zip(settings.color_gain) {
+        gain.insert(key.to_owned(), Value::from(value));
+    }
+    root.insert("color_gain".to_owned(), Value::Object(gain));
     let lanes: Vec<Value> = settings
         .lanes
         .iter()
@@ -303,6 +324,21 @@ pub fn save(path: &Path, settings: &Settings) -> Result<(), String> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn colour_gain_round_trips_and_clamps() {
+        let mut settings = Settings::default();
+        settings.color_gain = [0.8, 1.0, 0.6];
+        let text = to_json(&settings);
+        assert_eq!(parse(&text).unwrap().color_gain, [0.8, 1.0, 0.6]);
+
+        // Out of range clamps; a missing channel stays at unity.
+        let parsed = parse(r#"{"color_gain": {"r": 99.0, "b": -3}}"#).unwrap();
+        assert_eq!(parsed.color_gain, [2.0, 1.0, 0.25]);
+
+        // A settings file from before the field existed is untouched.
+        assert_eq!(parse("{}").unwrap().color_gain, [1.0, 1.0, 1.0]);
+    }
 
     #[test]
     fn settings_survive_a_round_trip() {
