@@ -109,6 +109,16 @@ cases the documentation is wrong.
   unbound lanes first, bound lanes borrowed only under scarcity, never
   without a proven cwd — and a laneless session re-enters assignment the
   moment its cwd arrives.
+- **The tray burned a full core doing nothing.** Hiding the window with
+  `SW_HIDE` (`ViewportCommand::Visible(false)`) clears `WS_VISIBLE`, Windows
+  then never delivers `WM_PAINT`, and eframe's scheduler — which drops a
+  repaint deadline into `ControlFlow::Poll` and relies on the resulting paint
+  to re-arm `WaitUntil` — spins the event loop forever waiting for a paint
+  that cannot come. Measured: ~5% total CPU hidden, ~0.1% open, with the
+  hidden process's working set trimmed to 5 MB so it looked "small but busy".
+  The fix is to never clear `WS_VISIBLE`: hide to tray = minimize +
+  `WS_EX_TOOLWINDOW` (no taskbar button, no Alt-Tab entry), which keeps
+  paints flowing and the loop paced.
 - **"Just unzip and run" silently did nothing** when any instance was already
   running: the app frees its console at the top of `run()`, and the port bind
   — which is also the single-instance lock — failed *after* that, printing

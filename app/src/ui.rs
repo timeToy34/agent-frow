@@ -54,8 +54,9 @@ pub struct App {
     /// Kept alive for the life of the app: dropping it removes the icon.
     tray: Option<TrayIcon>,
     /// The window's Win32 handle, published for the tray thread: reopening a
-    /// hidden window cannot go through the UI loop, because a hidden window
-    /// receives no redraws and that loop is exactly what is asleep.
+    /// tray-hidden window cannot go through the UI loop — restore and
+    /// foreground need to come from real input on the tray's own thread —
+    /// and the hide/reveal style flips need the raw handle too.
     hwnd: Arc<AtomicIsize>,
     quitting: bool,
     /// Whether the Run-key startup entry exists. Read once and kept, so the
@@ -121,9 +122,9 @@ impl App {
 
         // The tray's receivers are global and blocking, so they get their own
         // thread — and that thread acts for itself rather than messaging the
-        // UI loop. It has to: a window hidden to the tray receives no redraws,
-        // so the loop it would message is asleep until the window is visible
-        // again — which is precisely what the message would have asked for.
+        // UI loop: bringing the window back needs Win32 calls made with the
+        // user's click as the foreground permission, on the thread that
+        // received it.
         let ctx = ctx.clone();
         let hwnd = Arc::clone(&self.hwnd);
         std::thread::spawn(move || {
@@ -172,7 +173,15 @@ impl eframe::App for App {
         // so the app cannot be shut down by the reflex of closing a window.
         if ctx.input(|i| i.viewport().close_requested()) && !self.quitting {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            // Never SW_HIDE: Windows delivers no WM_PAINT to a hidden window,
+            // and eframe's scheduler then spins the event loop in Poll forever
+            // waiting for a paint that cannot come — a full core burned doing
+            // nothing (measured: ~5% total CPU in the tray, ~0.1% open).
+            // Minimizing keeps WS_VISIBLE, so paints keep pacing the loop; the
+            // toolwindow style is what removes the taskbar button and the
+            // Alt-Tab entry while the window lives in the tray.
+            set_toolwindow(&self.hwnd, true);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
         }
 
         let now = crate::now_ms();
@@ -1306,6 +1315,9 @@ impl App {
 /// is visible again, because a hidden window gets no redraws and a loop that
 /// is not redrawing is not listening.
 fn reopen(hwnd: &Arc<AtomicIsize>, ctx: &egui::Context) {
+    // The taskbar button and the Alt-Tab entry come back before the window
+    // does, so the restore lands on a window the shell already lists.
+    set_toolwindow(hwnd, false);
     #[cfg(windows)]
     {
         let raw = hwnd.load(Ordering::Relaxed);
@@ -1315,20 +1327,66 @@ fn reopen(hwnd: &Arc<AtomicIsize>, ctx: &egui::Context) {
                 fn ShowWindow(hwnd: isize, cmd: i32) -> i32;
                 fn SetForegroundWindow(hwnd: isize) -> i32;
             }
-            const SW_SHOW: i32 = 5;
+            const SW_RESTORE: i32 = 9;
             // SAFETY: plain user32 calls; a stale handle makes them no-ops.
             unsafe {
-                ShowWindow(raw, SW_SHOW);
+                ShowWindow(raw, SW_RESTORE);
                 SetForegroundWindow(raw);
             }
         }
     }
     #[cfg(not(windows))]
     let _ = hwnd;
+    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     ctx.request_repaint();
 }
+
+/// The tray's idea of "hidden": `WS_EX_TOOLWINDOW` on, so the minimized
+/// window has no taskbar button and no Alt-Tab entry. It stays `WS_VISIBLE`
+/// throughout, deliberately — see the close-intercept for why a truly hidden
+/// window would spin the event loop.
+#[cfg(windows)]
+fn set_toolwindow(hwnd: &Arc<AtomicIsize>, on: bool) {
+    let raw = hwnd.load(Ordering::Relaxed);
+    if raw == 0 {
+        return;
+    }
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
+        fn SetWindowLongPtrW(hwnd: isize, index: i32, value: isize) -> isize;
+        #[allow(clippy::too_many_arguments)]
+        fn SetWindowPos(
+            hwnd: isize,
+            after: isize,
+            x: i32,
+            y: i32,
+            cx: i32,
+            cy: i32,
+            flags: u32,
+        ) -> i32;
+    }
+    const GWL_EXSTYLE: i32 = -20;
+    const WS_EX_TOOLWINDOW: isize = 0x0000_0080;
+    // NOSIZE | NOMOVE | NOZORDER | NOACTIVATE | FRAMECHANGED
+    const SWP_FLAGS: u32 = 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020;
+    // SAFETY: plain user32 calls; a stale handle makes them no-ops.
+    unsafe {
+        let style = GetWindowLongPtrW(raw, GWL_EXSTYLE);
+        let style = if on {
+            style | WS_EX_TOOLWINDOW
+        } else {
+            style & !WS_EX_TOOLWINDOW
+        };
+        SetWindowLongPtrW(raw, GWL_EXSTYLE, style);
+        SetWindowPos(raw, 0, 0, 0, 0, 0, SWP_FLAGS);
+    }
+}
+
+#[cfg(not(windows))]
+fn set_toolwindow(_hwnd: &Arc<AtomicIsize>, _on: bool) {}
 
 /// The tray icon: the same four-key cluster as everywhere else, from
 /// [`crate::icon`], so the tray, the window and the executable cannot drift

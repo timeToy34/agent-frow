@@ -106,6 +106,13 @@ fn render(tracker: Arc<Mutex<Tracker>>, running: Arc<AtomicBool>) {
     let start = Instant::now();
     let mut device: Option<Device> = None;
     let mut next_attempt = Instant::now();
+    // What the keys were last told, so a motionless board is written once,
+    // not thirty times a second. `dirty` forces the first frame after any
+    // (re)connect; the settings clone is kept so it is re-made only when the
+    // settings actually change — it carries every lane-name String.
+    let mut last_states: Vec<Option<State>> = Vec::new();
+    let mut settings_cache: Option<Settings> = None;
+    let mut dirty = true;
 
     while running.load(Ordering::SeqCst) {
         // The clock. Doing it here rather than only when the window draws is
@@ -124,6 +131,7 @@ fn render(tracker: Arc<Mutex<Tracker>>, running: Arc<AtomicBool>) {
                 Ok(ready) => {
                     report(&tracker, KeyboardStatus::connected(&ready));
                     device = Some(ready);
+                    dirty = true;
                 }
                 Err(reason) => {
                     report(&tracker, KeyboardStatus::unavailable(reason));
@@ -147,7 +155,7 @@ fn render(tracker: Arc<Mutex<Tracker>>, running: Arc<AtomicBool>) {
             continue;
         }
 
-        let (states, settings) = match tracker.lock() {
+        let states = match tracker.lock() {
             Ok(mut tracker) => {
                 // A preview overrides every lane while it lasts, and this
                 // thread is what retires it — the window may be closed, and a
@@ -169,14 +177,35 @@ fn render(tracker: Arc<Mutex<Tracker>>, running: Arc<AtomicBool>) {
                         })
                         .collect::<Vec<Option<State>>>(),
                 };
-                (states, tracker.settings.clone())
+                if settings_cache
+                    .as_ref()
+                    .is_none_or(|cached| *cached != tracker.settings)
+                {
+                    settings_cache = Some(tracker.settings.clone());
+                    dirty = true;
+                }
+                states
             }
             Err(_) => break,
+        };
+        if states != last_states {
+            last_states = states.clone();
+            dirty = true;
+        }
+        // A motionless, unchanged board needs no frame. The wake stays at
+        // FRAME so the sweep above keeps being the application's clock.
+        if !dirty && !palette::animated(&states) {
+            std::thread::sleep(FRAME);
+            continue;
+        }
+        let Some(settings) = settings_cache.as_ref() else {
+            std::thread::sleep(FRAME);
+            continue;
         };
 
         let elapsed = start.elapsed().as_millis() as u64;
         let colors: Vec<CorsairLedColor> =
-            palette::frame(&states, &settings, elapsed, &ready.available)
+            palette::frame(&states, settings, elapsed, &ready.available)
                 .into_iter()
                 .map(|(id, color)| CorsairLedColor {
                     id,
@@ -186,6 +215,7 @@ fn render(tracker: Arc<Mutex<Tracker>>, running: Arc<AtomicBool>) {
                     a: 255,
                 })
                 .collect();
+        dirty = false;
         if sdk.set_led_colors(&ready.id, &colors) != CE_SUCCESS {
             report(
                 &tracker,

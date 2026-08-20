@@ -168,6 +168,17 @@ pub fn lane_colors(
     }
 }
 
+/// Whether any of these states needs a fresh frame every tick. Everything
+/// else is motionless, and a motionless board is repainted only when it
+/// changes — the difference between a resting app and one that allocates and
+/// writes the SDK thirty times a second to say nothing.
+pub fn animated(states: &[Option<State>]) -> bool {
+    states
+        .iter()
+        .flatten()
+        .any(|state| matches!(state, State::Running | State::Waiting))
+}
+
 /// One frame: which LED gets which colour.
 ///
 /// **Only ever the twelve.** An earlier version of this returned an entry for
@@ -221,6 +232,17 @@ mod tests {
     }
 
     const LANE: Rgb = Rgb::new(80, 170, 255);
+
+    #[test]
+    fn only_running_and_waiting_animate() {
+        use State::*;
+        assert!(animated(&[None, Some(Idle), Some(Running)]));
+        assert!(animated(&[Some(Waiting)]));
+        for still in [Connected, Done, Error, Idle] {
+            assert!(!animated(&[Some(still), None]), "{still:?}");
+        }
+        assert!(!animated(&[]));
+    }
 
     #[test]
     fn colour_gain_corrects_each_channel_and_clamps() {
