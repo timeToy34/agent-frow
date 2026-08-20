@@ -21,17 +21,23 @@ pub enum State {
     Done,
     Error,
     Interrupted,
+    /// Nothing heard for a while. Not a guess about the agent — a fact about
+    /// the wire. Set only by the tracker's sweep, never by an event, and the
+    /// session keeps its lane: the user who stepped away comes back to the
+    /// board they left.
+    Idle,
 }
 
 impl State {
     /// Every state, in the order the window and the settings file list them.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Connected,
         Self::Running,
         Self::Waiting,
         Self::Done,
         Self::Error,
         Self::Interrupted,
+        Self::Idle,
     ];
 
     pub fn label(self) -> &'static str {
@@ -42,6 +48,7 @@ impl State {
             Self::Done => "Done",
             Self::Error => "Error",
             Self::Interrupted => "Interrupted",
+            Self::Idle => "Idle",
         }
     }
 
@@ -56,6 +63,7 @@ impl State {
             Self::Done => [90, 210, 130],
             Self::Error => [235, 90, 90],
             Self::Interrupted => [200, 120, 230],
+            Self::Idle => [110, 115, 125],
         }
     }
 
@@ -133,9 +141,11 @@ pub fn step(current: State, event: &Event) -> Step {
         // interrupt. Either way it is no longer pending, and the turn is
         // formally still open: Running until Stop says otherwise, or until the
         // idle notification says the turn died with the prompt. From Waiting
-        // only, like tool activity — a denial arriving after Stop must not
+        // or Idle, like tool activity — a denial arriving after Stop must not
         // resurrect a finished turn.
-        Kind::PermissionDenied if current == State::Waiting => Step::Set(State::Running),
+        Kind::PermissionDenied if matches!(current, State::Waiting | State::Idle) => {
+            Step::Set(State::Running)
+        }
         Kind::PermissionDenied => Step::Stay,
 
         Kind::Notification => match event.notification.as_deref().map(classify) {
@@ -147,10 +157,14 @@ pub fn step(current: State, event: &Event) -> Step {
             _ => Step::Stay,
         },
 
-        // Activity clears Waiting, and only Waiting. Several hook processes post
-        // concurrently, so a PostToolUse emitted before Stop can arrive after
-        // it; promoting from anything else would resurrect a finished turn.
-        Kind::PostToolUse | Kind::PostToolUseFailure if current == State::Waiting => {
+        // Activity clears Waiting — and revives Idle: the concurrency guard
+        // exists for events racing seconds apart (a PostToolUse emitted before
+        // Stop can arrive after it), but after half an hour of silence an
+        // event is genuine activity, not a straggler. Promoting from Done or
+        // Error would still resurrect a finished turn.
+        Kind::PostToolUse | Kind::PostToolUseFailure
+            if matches!(current, State::Waiting | State::Idle) =>
+        {
             Step::Set(State::Running)
         }
         Kind::PostToolUse | Kind::PostToolUseFailure => Step::Stay,

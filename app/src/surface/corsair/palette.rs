@@ -152,6 +152,11 @@ pub fn lane_colors(
         State::Interrupted => (0..keys)
             .map(|index| if index == 0 { full } else { BRIGHT_RED })
             .collect(),
+        // Nothing heard for a while: the lane keeps its seat but stops taking
+        // the eye — one dim key says "still here", the rest go dark.
+        State::Idle => (0..keys)
+            .map(|index| if index == 0 { base } else { OFF })
+            .collect(),
     }
 }
 
@@ -208,6 +213,15 @@ mod tests {
     }
 
     const LANE: Rgb = Rgb::new(80, 170, 255);
+
+    #[test]
+    fn idle_is_one_dim_key_and_darkness() {
+        let colors = lane_colors(Some(State::Idle), LANE, 4, 0);
+        assert_eq!(colors[0], scale(LANE, BASE), "leftmost holds the seat");
+        for color in &colors[1..] {
+            assert_eq!(*color, OFF, "the rest go dark");
+        }
+    }
 
     #[test]
     fn a_frame_never_names_a_key_that_is_not_ours() {

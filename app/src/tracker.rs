@@ -12,16 +12,15 @@ use crate::event::{Ancestor, Event, Kind, Parsed};
 use crate::settings::Settings;
 use crate::state::{self, Note, State, Step};
 
-/// How long a resting session is kept after its last event.
-///
-/// Eviction is what replaces `SessionEnd` where it never comes — Codex's
-/// desktop app does not send one, so without this a lane it left behind stays
-/// on the keyboard until the app is restarted.
+/// How long a Done or Connected session stays lit after its last event before
+/// silence is worth reporting. Nothing is evicted — the lane demotes to
+/// [`State::Idle`] and waits for its user, however long the lunch break.
 pub const RESTING_IDLE_MS: u64 = 30 * 60 * 1000;
 
-/// How long a Running or Waiting session is kept. Much longer, deliberately:
-/// dropping a Waiting lane deletes the one fact this product exists to show,
-/// and a turn can legitimately be quiet for a long time while a tool runs.
+/// How long a silent Running session keeps glowing before demoting to Idle.
+/// Much longer, deliberately: a turn can legitimately be quiet for a long
+/// time while a tool runs. Waiting never demotes at all — dropping or dimming
+/// a Waiting lane hides the one fact this product exists to show.
 pub const ACTIVE_IDLE_MS: u64 = 2 * 60 * 60 * 1000;
 
 /// How long a subagent stays on the roster with no events and no
@@ -88,11 +87,21 @@ impl Session {
         self.state
     }
 
-    fn idle_allowance(&self) -> u64 {
-        if self.effective_state().is_active() {
-            ACTIVE_IDLE_MS
-        } else {
-            RESTING_IDLE_MS
+    /// How long this session's silence takes to become worth reporting, or
+    /// `None` for the states that hold regardless: Waiting, Error and
+    /// Interrupted are exactly what a user stepped away from and comes back
+    /// to, and Idle is already the report.
+    fn demotes_after(&self) -> Option<u64> {
+        match self.state {
+            State::Done | State::Connected => Some(if self.effective_state().is_active() {
+                // Subagents still on the roster keep the lane reading busy;
+                // give them the long allowance before calling it quiet.
+                ACTIVE_IDLE_MS
+            } else {
+                RESTING_IDLE_MS
+            }),
+            State::Running => Some(ACTIVE_IDLE_MS),
+            State::Waiting | State::Error | State::Interrupted | State::Idle => None,
         }
     }
 }
@@ -288,7 +297,11 @@ impl Tracker {
         self.fill_lanes();
     }
 
-    /// Drops sessions that have gone quiet for longer than their state allows.
+    /// Demotes sessions that have gone quiet for longer than their state
+    /// allows. Demotes, never drops: eviction was a timer guessing "probably
+    /// dead", while [`State::Idle`] states a fact — nothing heard for this
+    /// long — and the session keeps its lane for whenever its user returns.
+    /// Only `SessionEnd` and the user's ✕ remove a session.
     ///
     /// Called from the window every frame rather than from a timer: there is no
     /// clock in this application, only "what time is it now, given that I am
@@ -301,11 +314,15 @@ impl Tracker {
                 .subagents
                 .retain(|_, last| now.saturating_sub(*last) < SUBAGENT_IDLE_MS);
         }
-        let before = self.sessions.len();
-        self.sessions
-            .retain(|session| now.saturating_sub(session.last_event) < session.idle_allowance());
-        if self.sessions.len() != before {
-            self.fill_lanes();
+        for index in 0..self.sessions.len() {
+            let session = &self.sessions[index];
+            if let Some(allowance) = session.demotes_after()
+                && now.saturating_sub(session.last_event) >= allowance
+            {
+                let session = &mut self.sessions[index];
+                session.state = State::Idle;
+                session.since = now;
+            }
         }
     }
 

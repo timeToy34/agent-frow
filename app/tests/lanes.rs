@@ -358,10 +358,9 @@ fn shrinking_the_layout_moves_only_the_lanes_that_stopped_existing() {
 }
 
 #[test]
-fn a_quiet_session_is_dropped_but_a_waiting_one_is_given_far_longer() {
-    // Eviction is what replaces SessionEnd where it never comes — Codex's
-    // desktop app does not send one. Dropping a Waiting lane on the same
-    // schedule would delete the one fact this product exists to show.
+fn a_quiet_session_goes_idle_and_keeps_its_lane() {
+    // Silence is reported, never punished: the user who stepped away comes
+    // back to the board they left. Only SessionEnd and ✕ remove a session.
     let mut tracker = tracker(4);
     send(
         &mut tracker,
@@ -381,20 +380,63 @@ fn a_quiet_session_is_dropped_but_a_waiting_one_is_given_far_longer() {
     );
 
     tracker.sweep(1_000 + RESTING_IDLE_MS - 1);
-    assert_eq!(tracker.sessions.len(), 2);
+    assert_eq!(tracker.on_lane(0).unwrap().state, State::Done);
 
     tracker.sweep(1_000 + RESTING_IDLE_MS + 1);
-    assert_eq!(tracker.sessions.len(), 1);
-    assert_eq!(tracker.sessions[0].state, State::Waiting);
-    // And it did *not* move up into the lane the finished one left. A lane a
-    // session already holds is its address for as long as it lives; sliding
-    // everything up whenever a neighbour ends is how a glanceable display stops
-    // being glanceable.
-    assert!(tracker.on_lane(0).is_none());
-    assert_eq!(lane_project(&tracker, 1).as_deref(), Some("beta"));
+    assert_eq!(tracker.sessions.len(), 2, "nothing is ever evicted");
+    assert_eq!(tracker.on_lane(0).unwrap().state, State::Idle);
+    assert_eq!(lane_project(&tracker, 0).as_deref(), Some("alpha"));
 
+    // A Waiting lane holds through every threshold — it is the one fact this
+    // product exists to show.
+    tracker.sweep(1_000 + ACTIVE_IDLE_MS * 10);
+    assert_eq!(tracker.on_lane(1).unwrap().state, State::Waiting);
+    assert_eq!(tracker.sessions.len(), 2);
+}
+
+#[test]
+fn a_silent_running_lane_dims_to_idle_after_the_long_allowance() {
+    let mut tracker = tracker(4);
+    send(
+        &mut tracker,
+        "claude-win",
+        "a",
+        "UserPromptSubmit",
+        r"C:\dev\alpha",
+        1_000,
+    );
+    tracker.sweep(1_000 + ACTIVE_IDLE_MS - 1);
+    assert_eq!(tracker.on_lane(0).unwrap().state, State::Running);
     tracker.sweep(1_000 + ACTIVE_IDLE_MS + 1);
-    assert!(tracker.sessions.is_empty());
+    assert_eq!(tracker.on_lane(0).unwrap().state, State::Idle);
+
+    // The agent speaking again revives the lane where it stood.
+    send(
+        &mut tracker,
+        "claude-win",
+        "a",
+        "PostToolUse",
+        r"C:\dev\alpha",
+        1_000 + ACTIVE_IDLE_MS + 60_000,
+    );
+    assert_eq!(tracker.on_lane(0).unwrap().state, State::Running);
+}
+
+#[test]
+fn an_outcome_is_never_dimmed_by_time() {
+    // Error and Interrupted are what the user stepped away from; elapsed time
+    // does not change how a turn ended.
+    let mut tracker = tracker(4);
+    send(
+        &mut tracker,
+        "claude-win",
+        "failed",
+        "StopFailure",
+        r"C:\dev\alpha",
+        1_000,
+    );
+    tracker.sweep(1_000 + ACTIVE_IDLE_MS * 100);
+    assert_eq!(tracker.on_lane(0).unwrap().state, State::Error);
 }
 
 #[test]

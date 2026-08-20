@@ -88,8 +88,10 @@ is readable from Windows, so WSL agents are found and configured from here.
 
 ## What a lane shows
 
-Six states: **Connected** (alive, nothing run yet), **Running**, **Waiting**
-(needs you), **Done**, **Error**, **Interrupted**. The transition table is
+Seven states: **Connected** (alive, nothing run yet), **Running**, **Waiting**
+(needs you), **Done**, **Error**, **Interrupted**, and **Idle** — nothing heard
+for a while. Idle is the one state no event sets: it reports silence, a fact
+about the wire, not a guess about the agent. The transition table is
 `app/src/state.rs` and it is a total function over (state, event) — no request
 ids, no queues, no tombstones, no timers. **Activity clears Waiting**, so
 nothing has to be correlated to anything.
@@ -127,10 +129,13 @@ event when you *answer* a prompt. The next observable event is that tool
 finishing, so a lane can read Waiting while the approved tool already runs —
 seconds usually, up to about a minute. Bounded and self-clearing.
 
-Sessions are released on `SessionEnd`, or evicted after silence: 30 minutes at
-rest, 2 hours while Running or Waiting. Codex's desktop app never sends
-`SessionEnd`, and dropping a Waiting lane deletes the one fact this exists to
-show.
+**Silence is reported, never punished.** A session leaves only on `SessionEnd`
+or the ✕ — never on a timer, because the user who stepped away comes back to
+the board they left. Instead, silence demotes: Done and Connected dim to Idle
+after 30 minutes, Running after 2 hours (a killed terminal stops glowing
+blue). Waiting, Error and Interrupted hold through any amount of time — they
+are exactly what you left to come back to. Any event from the agent revives
+its lane where it stood.
 
 ## Lanes
 
@@ -199,6 +204,7 @@ The patterns (n = keys per lane):
 | Done | leftmost key 100%; the rest 20% |
 | Error | leftmost key base 100%; the rest dark red, steady |
 | Interrupted | leftmost key base 100%; the rest bright red, steady |
+| Idle | leftmost key base 20%; the rest off |
 
 The leftmost key at full brightness marks "this lane has something to say" and
 names the lane by colour while saying it. The **Preview** row in the Keyboard

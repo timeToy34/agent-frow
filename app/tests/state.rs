@@ -69,6 +69,38 @@ fn activity_never_resurrects_a_finished_turn() {
 }
 
 #[test]
+fn an_idle_lane_is_revived_by_genuine_activity() {
+    // The only-from-Waiting concurrency guard exists for events racing
+    // seconds apart; anything arriving after half an hour of silence is real.
+    assert_eq!(
+        state::step(
+            State::Idle,
+            &event("PostToolUse", json!({ "tool_name": "Bash" }))
+        ),
+        Step::Set(State::Running)
+    );
+    assert_eq!(
+        state::step(State::Idle, &event("PermissionDenied", json!({}))),
+        Step::Set(State::Running)
+    );
+    assert_eq!(
+        state::step(State::Idle, &event("UserPromptSubmit", json!({}))),
+        Step::Set(State::Running)
+    );
+    // An idle notification on an already-idle lane says nothing new.
+    assert_eq!(
+        state::step(
+            State::Idle,
+            &event(
+                "Notification",
+                json!({ "notification_type": "idle_prompt" })
+            )
+        ),
+        Step::Stay
+    );
+}
+
+#[test]
 fn mid_turn_compaction_does_not_demote_a_live_turn() {
     // Claude fires SessionStart when it compacts mid-turn. Without the guard a
     // running lane drops to Connected and stays there until Stop.
