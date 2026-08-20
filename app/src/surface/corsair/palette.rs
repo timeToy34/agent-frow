@@ -5,8 +5,8 @@
 //! SDK boundary.
 //!
 //! **The lane's colour is the base for everything**, and a change of colour
-//! only ever means trouble: bright red is Interrupted, dark red is Error, and
-//! nothing else on the row is allowed to be red. Everything ordinary — idle,
+//! only ever means trouble: red is Error, and nothing else on the row is
+//! allowed to be red. Everything ordinary — idle,
 //! working, finished, being asked a question — is the lane's own colour at some
 //! brightness and in some motion, which is what lets a glance answer "which
 //! lane" and "how bad" as two separate questions.
@@ -35,12 +35,9 @@ pub fn our_led_ids() -> impl Iterator<Item = u32> {
 /// how the row says nothing is there.
 const OFF: Rgb = Rgb::new(0, 0, 0);
 
-/// Interrupted: something stopped part-way and is waiting to be resumed.
-/// Fixed, not a setting — red only means anything if nothing else may use it,
-/// which is also why lane colours are asked to stay away from it.
-const BRIGHT_RED: Rgb = Rgb::new(255, 40, 40);
-
-/// Error. The deeper red of the two, by the owner's eye on the real keys.
+/// Error. Fixed, not a setting — red only means anything if nothing else may
+/// use it, which is also why lane colours are asked to stay away from it. The
+/// deep shade, by the owner's eye on the real keys.
 const DARK_RED: Rgb = Rgb::new(110, 0, 0);
 
 /// The resting glow: how bright "present, nothing to report" sits.
@@ -148,9 +145,6 @@ pub fn lane_colors(
             .collect(),
         State::Error => (0..keys)
             .map(|index| if index == 0 { full } else { DARK_RED })
-            .collect(),
-        State::Interrupted => (0..keys)
-            .map(|index| if index == 0 { full } else { BRIGHT_RED })
             .collect(),
         // Nothing heard for a while: the lane keeps its seat but stops taking
         // the eye — one dim key says "still here", the rest go dark.
@@ -261,12 +255,7 @@ mod tests {
 
     #[test]
     fn reporting_states_mark_the_leftmost_key_at_full_and_quiet_states_do_not() {
-        for state in [
-            State::Waiting,
-            State::Done,
-            State::Error,
-            State::Interrupted,
-        ] {
+        for state in [State::Waiting, State::Done, State::Error] {
             let colors = lane_colors(Some(state), LANE, 4, 0);
             assert_eq!(colors[0], LANE, "{state:?} leftmost");
         }
@@ -282,16 +271,11 @@ mod tests {
     }
 
     #[test]
-    fn error_is_dark_red_and_interrupted_is_bright_red_whatever_the_lane_colour() {
+    fn error_is_dark_red_whatever_the_lane_colour() {
         for lane_color in [LANE, Rgb::new(250, 190, 60), Rgb::new(90, 210, 130)] {
             let error = lane_colors(Some(State::Error), lane_color, 4, 333);
             assert!(error[1..].iter().all(|c| *c == DARK_RED), "{error:?}");
-            let interrupted = lane_colors(Some(State::Interrupted), lane_color, 4, 333);
-            assert!(
-                interrupted[1..].iter().all(|c| *c == BRIGHT_RED),
-                "{interrupted:?}"
-            );
-            // And both are steady: trouble does not need to move to be seen.
+            // And steady: trouble does not need to move to be seen.
             assert_eq!(error, lane_colors(Some(State::Error), lane_color, 4, 999));
         }
     }

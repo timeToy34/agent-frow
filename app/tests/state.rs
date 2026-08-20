@@ -51,12 +51,7 @@ fn activity_never_resurrects_a_finished_turn() {
     // Several hook processes post concurrently, so a PostToolUse emitted before
     // Stop can arrive after it. Promoting from anything but Waiting would put a
     // finished lane back to Running and leave it there until the next Stop.
-    for finished in [
-        State::Done,
-        State::Error,
-        State::Interrupted,
-        State::Connected,
-    ] {
+    for finished in [State::Done, State::Error, State::Connected] {
         assert_eq!(
             state::step(
                 finished,
@@ -143,7 +138,7 @@ fn an_idle_notification_never_clears_a_waiting_lane() {
                 json!({ "notification_type": "idle_prompt" })
             )
         ),
-        Step::Set(State::Interrupted)
+        Step::Set(State::Idle)
     );
 }
 
@@ -163,7 +158,7 @@ fn a_subagents_events_are_liveness_and_nothing_else() {
         State::Connected,
         State::Done,
         State::Error,
-        State::Interrupted,
+        State::Idle,
     ] {
         assert_eq!(state::step(current, &subagent), Step::Stay);
     }

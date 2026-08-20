@@ -68,18 +68,18 @@ impl Session {
             .map(|name| name.to_string_lossy().into_owned())
     }
 
-    /// Whether this agent can report Error and Interrupted at all. Codex has
-    /// neither event and emits no `Notification`, so those states are not
-    /// "not happening" — they are unobservable, and the window says so rather
-    /// than letting their absence read as good news.
+    /// Whether this agent can report Error at all. Codex has no failure event
+    /// and emits no `Notification`, so that state is not "not happening" — it
+    /// is unobservable, and the window says so rather than letting its
+    /// absence read as good news.
     pub fn reports_failure(&self) -> bool {
         self.agent != Some(Agent::Codex)
     }
 
     /// What the lane should *look like*: the main agent's state, except that a
     /// resting state with subagents still at work shows as Running — work is
-    /// genuinely happening on this lane. Waiting, Error and Interrupted always
-    /// win: they are the states that need the user.
+    /// genuinely happening on this lane. Waiting and Error always win: they
+    /// are the states that need the user.
     pub fn effective_state(&self) -> State {
         if !self.subagents.is_empty() && matches!(self.state, State::Connected | State::Done) {
             return State::Running;
@@ -88,9 +88,9 @@ impl Session {
     }
 
     /// How long this session's silence takes to become worth reporting, or
-    /// `None` for the states that hold regardless: Waiting, Error and
-    /// Interrupted are exactly what a user stepped away from and comes back
-    /// to, and Idle is already the report.
+    /// `None` for the states that hold regardless: Waiting and Error are
+    /// exactly what a user stepped away from and comes back to, and Idle is
+    /// already the report.
     fn demotes_after(&self) -> Option<u64> {
         match self.state {
             State::Done | State::Connected => Some(if self.effective_state().is_active() {
@@ -101,7 +101,7 @@ impl Session {
                 RESTING_IDLE_MS
             }),
             State::Running => Some(ACTIVE_IDLE_MS),
-            State::Waiting | State::Error | State::Interrupted | State::Idle => None,
+            State::Waiting | State::Error | State::Idle => None,
         }
     }
 }

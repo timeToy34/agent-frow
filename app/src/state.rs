@@ -20,7 +20,6 @@ pub enum State {
     Waiting,
     Done,
     Error,
-    Interrupted,
     /// Nothing heard for a while. Not a guess about the agent — a fact about
     /// the wire. Set only by the tracker's sweep, never by an event, and the
     /// session keeps its lane: the user who stepped away comes back to the
@@ -30,13 +29,12 @@ pub enum State {
 
 impl State {
     /// Every state, in the order the window and the settings file list them.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 6] = [
         Self::Connected,
         Self::Running,
         Self::Waiting,
         Self::Done,
         Self::Error,
-        Self::Interrupted,
         Self::Idle,
     ];
 
@@ -47,7 +45,6 @@ impl State {
             Self::Waiting => "Waiting",
             Self::Done => "Done",
             Self::Error => "Error",
-            Self::Interrupted => "Interrupted",
             Self::Idle => "Idle",
         }
     }
@@ -62,7 +59,6 @@ impl State {
             Self::Waiting => [250, 190, 60],
             Self::Done => [90, 210, 130],
             Self::Error => [235, 90, 90],
-            Self::Interrupted => [200, 120, 230],
             Self::Idle => [110, 115, 125],
         }
     }
@@ -150,10 +146,13 @@ pub fn step(current: State, event: &Event) -> Step {
 
         Kind::Notification => match event.notification.as_deref().map(classify) {
             Some(Note::NeedsUser) => Step::Set(State::Waiting),
-            // "A prompt has sat unanswered" is equally true of a permission
-            // dialog nobody has answered. Firing it from Waiting would clear the
-            // lane at exactly the moment nobody is at the desk.
-            Some(Note::Idle) if current == State::Running => Step::Set(State::Interrupted),
+            // The agent has sat at its prompt for a while during an open turn
+            // — the user interrupted, or simply walked away mid-run. Either
+            // way the honest word is Idle; an interrupt is something the user
+            // did, not an alarm. From Waiting it must change nothing: "a
+            // prompt has sat unanswered" is equally true of a permission
+            // dialog nobody has answered.
+            Some(Note::Idle) if current == State::Running => Step::Set(State::Idle),
             _ => Step::Stay,
         },
 

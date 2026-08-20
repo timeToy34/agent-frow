@@ -424,8 +424,8 @@ fn a_silent_running_lane_dims_to_idle_after_the_long_allowance() {
 
 #[test]
 fn an_outcome_is_never_dimmed_by_time() {
-    // Error and Interrupted are what the user stepped away from; elapsed time
-    // does not change how a turn ended.
+    // An Error is what the user stepped away from; elapsed time does not
+    // change how a turn ended.
     let mut tracker = tracker(4);
     send(
         &mut tracker,
@@ -835,9 +835,11 @@ fn a_session_keeps_ancestor_identities_and_replaces_them_wholesale() {
 }
 
 #[test]
-fn an_interrupted_turn_shows_interrupted_once_claude_idles() {
+fn an_interrupted_turn_goes_idle_once_claude_idles() {
     // No hook fires at the moment of an interrupt; Claude only reveals one by
-    // idling with the turn still open, about a minute later.
+    // idling with the turn still open, about a minute later — and an
+    // interrupt is something the user did, so the lane goes quietly Idle
+    // rather than raising an alarm.
     let mut tracker = tracker(4);
     send(
         &mut tracker,
@@ -855,14 +857,11 @@ fn an_interrupted_turn_shows_interrupted_once_claude_idles() {
         "notification_type": "idle_prompt",
     });
     tracker.accept(Event::parse(&idle, 20), 20);
-    assert_eq!(
-        tracker.on_lane(0).unwrap().effective_state(),
-        State::Interrupted
-    );
+    assert_eq!(tracker.on_lane(0).unwrap().effective_state(), State::Idle);
 }
 
 #[test]
-fn an_interrupted_prompt_becomes_running_then_interrupted() {
+fn an_interrupted_prompt_becomes_running_then_idle() {
     // The owner's exact scenario: a pending permission prompt rejected by an
     // interrupt. PermissionDenied clears Waiting on the spot; the idle
     // notification a minute later is what says the turn died with it.
@@ -909,10 +908,7 @@ fn an_interrupted_prompt_becomes_running_then_interrupted() {
         "notification_type": "idle_prompt",
     });
     tracker.accept(Event::parse(&idle, 40), 40);
-    assert_eq!(
-        tracker.on_lane(0).unwrap().effective_state(),
-        State::Interrupted
-    );
+    assert_eq!(tracker.on_lane(0).unwrap().effective_state(), State::Idle);
 }
 
 #[test]

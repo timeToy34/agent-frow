@@ -914,10 +914,7 @@ fn footnotes(ui: &mut egui::Ui, tracker: &Tracker) {
         .iter()
         .any(|session| !session.reports_failure())
     {
-        note(
-            "Codex has no error or interrupt event, so those two states cannot be shown for it."
-                .to_owned(),
-        );
+        note("Codex has no error event, so that state cannot be shown for it.".to_owned());
     }
     if !tracker.unknown_notifications.is_empty() {
         let list: Vec<String> = tracker
@@ -990,8 +987,8 @@ fn keyboard_panel(ui: &mut egui::Ui, tracker: &mut Tracker) -> bool {
     ui.add_space(4.0);
     ui.label(
         egui::RichText::new(
-            "Every pattern is the lane's own colour; red only ever means Error (dark) or \
-             Interrupted (bright), so keep lane colours away from red.",
+            "Every pattern is the lane's own colour; red only ever means Error, so keep \
+             lane colours away from red.",
         )
         .small()
         .weak(),

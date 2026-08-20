@@ -88,10 +88,12 @@ is readable from Windows, so WSL agents are found and configured from here.
 
 ## What a lane shows
 
-Seven states: **Connected** (alive, nothing run yet), **Running**, **Waiting**
-(needs you), **Done**, **Error**, **Interrupted**, and **Idle** — nothing heard
-for a while. Idle is the one state no event sets: it reports silence, a fact
-about the wire, not a guess about the agent. The transition table is
+Six states: **Connected** (alive, nothing run yet), **Running**, **Waiting**
+(needs you), **Done**, **Error**, and **Idle** — nothing heard for a while.
+Idle is the one state no event sets: it reports silence, a fact about the
+wire, not a guess about the agent. An interrupt lands here too — the agent
+sits back at its prompt, and interrupting is something *you* did, not an
+alarm. The transition table is
 `app/src/state.rs` and it is a total function over (state, event) — no request
 ids, no queues, no tombstones, no timers. **Activity clears Waiting**, so
 nothing has to be correlated to anything.
@@ -104,11 +106,11 @@ has a test named after it:
 - An event carrying `agent_id` or `agent_type` is **liveness only**. Subagent
   events carry the *parent's* `session_id`, so acting on one lets a subagent
   finishing a tool clear a Waiting another one raised.
-- `idle_prompt` only means Interrupted **from Running**. It means "a prompt has
+- `idle_prompt` demotes to Idle only **from Running**. It means "a prompt has
   sat unanswered", which is equally true of a permission dialog nobody has
-  answered. It is also why **Interrupted appears about a minute late**: no hook
-  fires at the moment of an interrupt — Claude only reveals one by idling with
-  a turn still open (~60 s).
+  answered, so from Waiting it changes nothing. It is also why an interrupted
+  turn dims about a minute late: no hook fires at the moment of an interrupt —
+  Claude only reveals one by idling with a turn still open (~60 s).
 - `PermissionDenied` promotes Waiting to Running: the prompt was answered with
   a no — by the user, a rule, or an interrupt — so it is no longer pending,
   and the turn is formally still open. If the interrupt killed the turn, the
@@ -133,8 +135,8 @@ seconds usually, up to about a minute. Bounded and self-clearing.
 or the ✕ — never on a timer, because the user who stepped away comes back to
 the board they left. Instead, silence demotes: Done and Connected dim to Idle
 after 30 minutes, Running after 2 hours (a killed terminal stops glowing
-blue). Waiting, Error and Interrupted hold through any amount of time — they
-are exactly what you left to come back to. Any event from the agent revives
+blue). Waiting and Error hold through any amount of time — they are exactly
+what you left to come back to. Any event from the agent revives
 its lane where it stood.
 
 ## Lanes
@@ -191,8 +193,8 @@ when the Agent F-Row window is focused even though the Focus button works.
 
 **The lane's colour is the base for everything, and colour change means
 trouble.** Every ordinary state is the lane's own colour at some brightness and
-motion; red is reserved — dark red is Error, bright red is Interrupted, and
-nothing else may be red, which is why lane colours should stay away from it.
+motion; red is reserved for Error and nothing else may be red, which is why
+lane colours should stay away from it.
 The patterns (n = keys per lane):
 
 | State | Pattern |
@@ -203,7 +205,6 @@ The patterns (n = keys per lane):
 | Waiting | leftmost key 100%; the rest double-pulse base up to 100% |
 | Done | leftmost key 100%; the rest 20% |
 | Error | leftmost key base 100%; the rest dark red, steady |
-| Interrupted | leftmost key base 100%; the rest bright red, steady |
 | Idle | leftmost key base 20%; the rest off |
 
 The leftmost key at full brightness marks "this lane has something to say" and
