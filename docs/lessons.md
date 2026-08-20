@@ -109,6 +109,12 @@ cases the documentation is wrong.
   unbound lanes first, bound lanes borrowed only under scarcity, never
   without a proven cwd — and a laneless session re-enters assignment the
   moment its cwd arrives.
+- **Delete the taskbar tab after the minimize lands, not before.** The shell
+  (re-)adds a window's taskbar button as part of minimizing it, so
+  `ITaskbarList::DeleteTab` issued before `Minimized(true)` is undone a frame
+  later. Keying the tab off the observed minimized state — eframe keeps
+  running `update()` while minimized, its "guard" is just a 10 ms nap — makes
+  minimized ⇔ trayed, for the X and the minimize button alike.
 - **Never flip window styles behind winit's back.** Setting
   `WS_EX_TOOLWINDOW` directly to hide the taskbar button did not remove the
   button and left the restored window with a toolwindow caption — one lone

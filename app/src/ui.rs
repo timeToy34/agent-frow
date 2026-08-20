@@ -59,11 +59,10 @@ pub struct App {
     /// and the hide/reveal style flips need the raw handle too.
     hwnd: Arc<AtomicIsize>,
     quitting: bool,
-    /// Whether the window is living in the tray (minimized, taskbar button
-    /// removed). Owned here so exactly one place puts the button back — the
-    /// heal in `update` — whichever way the window comes back (tray click,
-    /// Alt-Tab, anything).
-    tray_hidden: bool,
+    /// Whether the taskbar button is currently removed. Minimized IS "in the
+    /// tray": one state check in `update` keeps the button in lockstep with
+    /// the window, whichever way it was minimized or brought back.
+    tray_tabless: bool,
     /// Whether the Run-key startup entry exists. Read once and kept, so the
     /// registry is not asked twice a second for something only a click changes.
     autostart: bool,
@@ -86,7 +85,7 @@ impl App {
             tray: None,
             hwnd: Arc::new(AtomicIsize::new(0)),
             quitting: false,
-            tray_hidden: false,
+            tray_tabless: false,
             autostart: crate::autostart::enabled(),
         }
     }
@@ -183,20 +182,20 @@ impl eframe::App for App {
             // and eframe's scheduler then spins the event loop in Poll forever
             // waiting for a paint that cannot come — a full core burned doing
             // nothing (measured: ~5% total CPU in the tray, ~0.1% open).
-            // Minimizing keeps WS_VISIBLE, so paints keep pacing the loop; the
-            // taskbar button goes via ITaskbarList, the documented way — and
-            // never via WS_EX_TOOLWINDOW, which winit's cached styles fight
-            // (the button stayed and the restored frame came back with a
-            // toolwindow caption).
-            taskbar_tab(&self.hwnd, false);
-            self.tray_hidden = true;
+            // Minimizing keeps WS_VISIBLE, so paints keep pacing the loop.
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
         }
-        // The one place the button comes back, however the window returned —
-        // the tray's reopen, Alt-Tab onto the minimized window, anything.
-        if self.tray_hidden && ctx.input(|i| i.viewport().minimized) != Some(true) {
-            taskbar_tab(&self.hwnd, true);
-            self.tray_hidden = false;
+        // Minimized IS "in the tray": whichever control got it there — the X
+        // above or the title bar's own minimize — the taskbar button comes
+        // off, and only once the minimize has actually landed: deleting the
+        // tab first is a race the shell wins by re-adding it with the
+        // minimize. Brought back by any route (tray click, Alt-Tab), the
+        // button returns the same frame. ITaskbarList, never a style flip —
+        // winit reapplies its cached styles and hands back a broken frame.
+        let minimized = ctx.input(|i| i.viewport().minimized) == Some(true);
+        if minimized != self.tray_tabless {
+            taskbar_tab(&self.hwnd, !minimized);
+            self.tray_tabless = minimized;
         }
 
         let now = crate::now_ms();
