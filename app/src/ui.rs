@@ -59,6 +59,11 @@ pub struct App {
     /// and the hide/reveal style flips need the raw handle too.
     hwnd: Arc<AtomicIsize>,
     quitting: bool,
+    /// Whether the window is living in the tray (minimized, taskbar button
+    /// removed). Owned here so exactly one place puts the button back — the
+    /// heal in `update` — whichever way the window comes back (tray click,
+    /// Alt-Tab, anything).
+    tray_hidden: bool,
     /// Whether the Run-key startup entry exists. Read once and kept, so the
     /// registry is not asked twice a second for something only a click changes.
     autostart: bool,
@@ -81,6 +86,7 @@ impl App {
             tray: None,
             hwnd: Arc::new(AtomicIsize::new(0)),
             quitting: false,
+            tray_hidden: false,
             autostart: crate::autostart::enabled(),
         }
     }
@@ -178,10 +184,19 @@ impl eframe::App for App {
             // waiting for a paint that cannot come — a full core burned doing
             // nothing (measured: ~5% total CPU in the tray, ~0.1% open).
             // Minimizing keeps WS_VISIBLE, so paints keep pacing the loop; the
-            // toolwindow style is what removes the taskbar button and the
-            // Alt-Tab entry while the window lives in the tray.
-            set_toolwindow(&self.hwnd, true);
+            // taskbar button goes via ITaskbarList, the documented way — and
+            // never via WS_EX_TOOLWINDOW, which winit's cached styles fight
+            // (the button stayed and the restored frame came back with a
+            // toolwindow caption).
+            taskbar_tab(&self.hwnd, false);
+            self.tray_hidden = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        }
+        // The one place the button comes back, however the window returned —
+        // the tray's reopen, Alt-Tab onto the minimized window, anything.
+        if self.tray_hidden && ctx.input(|i| i.viewport().minimized) != Some(true) {
+            taskbar_tab(&self.hwnd, true);
+            self.tray_hidden = false;
         }
 
         let now = crate::now_ms();
@@ -1315,9 +1330,9 @@ impl App {
 /// is visible again, because a hidden window gets no redraws and a loop that
 /// is not redrawing is not listening.
 fn reopen(hwnd: &Arc<AtomicIsize>, ctx: &egui::Context) {
-    // The taskbar button and the Alt-Tab entry come back before the window
-    // does, so the restore lands on a window the shell already lists.
-    set_toolwindow(hwnd, false);
+    // The taskbar button is restored by the heal in `App::update` on the
+    // first frame after the restore — one owner, whichever way the window
+    // comes back.
     #[cfg(windows)]
     {
         let raw = hwnd.load(Ordering::Relaxed);
@@ -1343,50 +1358,49 @@ fn reopen(hwnd: &Arc<AtomicIsize>, ctx: &egui::Context) {
     ctx.request_repaint();
 }
 
-/// The tray's idea of "hidden": `WS_EX_TOOLWINDOW` on, so the minimized
-/// window has no taskbar button and no Alt-Tab entry. It stays `WS_VISIBLE`
-/// throughout, deliberately — see the close-intercept for why a truly hidden
-/// window would spin the event loop.
+/// Adds or removes the window's taskbar button — the tray's idea of hidden is
+/// "minimized, and not on the taskbar". `ITaskbarList` is the documented API
+/// for exactly this, and unlike a `WS_EX_TOOLWINDOW` style flip it does not
+/// touch the window frame, so winit's cached styles have nothing to fight
+/// (the style flip left the button in place and rebuilt the restored frame
+/// with a toolwindow caption — one lone close button, no minimize/maximize).
 #[cfg(windows)]
-fn set_toolwindow(hwnd: &Arc<AtomicIsize>, on: bool) {
+fn taskbar_tab(hwnd: &Arc<AtomicIsize>, show: bool) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::Com::{
+        CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+        CoUninitialize,
+    };
+    use windows::Win32::UI::Shell::{ITaskbarList, TaskbarList};
+
     let raw = hwnd.load(Ordering::Relaxed);
     if raw == 0 {
         return;
     }
-    #[link(name = "user32")]
-    unsafe extern "system" {
-        fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
-        fn SetWindowLongPtrW(hwnd: isize, index: i32, value: isize) -> isize;
-        #[allow(clippy::too_many_arguments)]
-        fn SetWindowPos(
-            hwnd: isize,
-            after: isize,
-            x: i32,
-            y: i32,
-            cx: i32,
-            cy: i32,
-            flags: u32,
-        ) -> i32;
-    }
-    const GWL_EXSTYLE: i32 = -20;
-    const WS_EX_TOOLWINDOW: isize = 0x0000_0080;
-    // NOSIZE | NOMOVE | NOZORDER | NOACTIVATE | FRAMECHANGED
-    const SWP_FLAGS: u32 = 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020;
-    // SAFETY: plain user32 calls; a stale handle makes them no-ops.
+    // SAFETY: COM init/uninit are balanced (S_FALSE still needs the uninit;
+    // RPC_E_CHANGED_MODE means the thread already has an apartment and the
+    // create below works in it). The handle is this window's own.
     unsafe {
-        let style = GetWindowLongPtrW(raw, GWL_EXSTYLE);
-        let style = if on {
-            style | WS_EX_TOOLWINDOW
-        } else {
-            style & !WS_EX_TOOLWINDOW
-        };
-        SetWindowLongPtrW(raw, GWL_EXSTYLE, style);
-        SetWindowPos(raw, 0, 0, 0, 0, 0, SWP_FLAGS);
+        let inited = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+        if let Ok(list) =
+            CoCreateInstance::<_, ITaskbarList>(&TaskbarList, None, CLSCTX_INPROC_SERVER)
+        {
+            let _ = list.HrInit();
+            let window = HWND(raw as *mut core::ffi::c_void);
+            let _ = if show {
+                list.AddTab(window)
+            } else {
+                list.DeleteTab(window)
+            };
+        }
+        if inited {
+            CoUninitialize();
+        }
     }
 }
 
 #[cfg(not(windows))]
-fn set_toolwindow(_hwnd: &Arc<AtomicIsize>, _on: bool) {}
+fn taskbar_tab(_hwnd: &Arc<AtomicIsize>, _show: bool) {}
 
 /// The tray icon: the same four-key cluster as everywhere else, from
 /// [`crate::icon`], so the tray, the window and the executable cannot drift

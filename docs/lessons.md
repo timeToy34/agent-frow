@@ -109,6 +109,12 @@ cases the documentation is wrong.
   unbound lanes first, bound lanes borrowed only under scarcity, never
   without a proven cwd — and a laneless session re-enters assignment the
   moment its cwd arrives.
+- **Never flip window styles behind winit's back.** Setting
+  `WS_EX_TOOLWINDOW` directly to hide the taskbar button did not remove the
+  button and left the restored window with a toolwindow caption — one lone
+  close button — because winit caches window styles and reapplies its own
+  idea of them. `ITaskbarList::DeleteTab/AddTab` removes the button without
+  touching the frame.
 - **The tray burned a full core doing nothing.** Hiding the window with
   `SW_HIDE` (`ViewportCommand::Visible(false)`) clears `WS_VISIBLE`, Windows
   then never delivers `WM_PAINT`, and eframe's scheduler — which drops a
