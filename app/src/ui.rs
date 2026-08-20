@@ -68,13 +68,14 @@ impl App {
         tracker: Arc<Mutex<Tracker>>,
         install_dir: PathBuf,
         settings_path: Option<PathBuf>,
+        notice: Option<String>,
     ) -> Self {
         Self {
             tracker,
             rows: agents::detect().into_iter().map(Row::scan).collect(),
             install_dir,
             settings_path,
-            status: None,
+            status: notice,
             card_height: 0.0,
             tray: None,
             hwnd: Arc::new(AtomicIsize::new(0)),

@@ -415,10 +415,15 @@ pub fn install_binaries(install_dir: &Path) -> Result<Vec<PathBuf>, Error> {
             )));
         }
         let target = install_dir.join(name);
+        // Not a textual compare: the same file spelled two ways (case, an 8.3
+        // short path) must count as the same file, or installing from the
+        // installed copy renames the live executable aside and then fails to
+        // copy a source that no longer exists.
+        let same_file = same_file(&source, &target);
         // Copying over a running executable fails on Windows, which is exactly
         // what happens when you install from the installed copy. Renaming the
         // old one out of the way first is what Windows itself does.
-        if target.exists() && target != source {
+        if target.exists() && !same_file {
             // `name.old`, not `with_extension`, which would turn
             // `iCUESDK.x64_2019.dll` into `iCUESDK.x64_2019.old` and lose which
             // file it had been.
@@ -426,7 +431,7 @@ pub fn install_binaries(install_dir: &Path) -> Result<Vec<PathBuf>, Error> {
             let _ = std::fs::remove_file(&aside);
             let _ = std::fs::rename(&target, &aside);
         }
-        if target != source {
+        if !same_file {
             std::fs::copy(&source, &target).map_err(|error| {
                 Error::Write(format!(
                     "{} -> {}: {error}",
@@ -437,5 +442,62 @@ pub fn install_binaries(install_dir: &Path) -> Result<Vec<PathBuf>, Error> {
         }
         copied.push(target);
     }
+    // The marker is what lets a bare launch from a foreign folder decide
+    // whether the installed copy is current — see `launch_decision`.
+    write_version_marker(install_dir).map_err(|error| Error::Write(error.to_string()))?;
     Ok(copied)
+}
+
+/// Whether two paths name the same file on disk, however they spell it.
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        // A path that does not resolve is a file that is not there; it cannot
+        // be the same file as anything.
+        _ => false,
+    }
+}
+
+/// Records which version the installed copy is, next to it.
+pub fn write_version_marker(install_dir: &Path) -> std::io::Result<()> {
+    std::fs::write(install_dir.join("version"), env!("CARGO_PKG_VERSION"))
+}
+
+/// The version the installed copy says it is, if it says.
+pub fn installed_version(install_dir: &Path) -> Option<String> {
+    std::fs::read_to_string(install_dir.join("version"))
+        .ok()
+        .map(|text| text.trim().to_owned())
+        .filter(|text| !text.is_empty())
+}
+
+/// What a bare launch should do, given where it runs from and what is
+/// installed. Pure, so the reasoning is testable without a filesystem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Launch {
+    /// This is the installed copy, or an equal twin of it: just run.
+    Run,
+    /// Foreign copy, and the install is absent or another version: install
+    /// everything and relaunch from the installed location.
+    Install,
+}
+
+pub fn launch_decision(
+    running_from_install_dir: bool,
+    installed_exe_present: bool,
+    installed_version: Option<&str>,
+    own_version: &str,
+) -> Launch {
+    if running_from_install_dir {
+        return Launch::Run;
+    }
+    if !installed_exe_present {
+        return Launch::Install;
+    }
+    match installed_version {
+        Some(version) if version == own_version => Launch::Run,
+        // No marker (an install from before markers existed) reads as "another
+        // version": one reinstall heals it.
+        _ => Launch::Install,
+    }
 }

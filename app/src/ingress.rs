@@ -28,15 +28,33 @@ pub struct Request {
     pub body: Vec<u8>,
 }
 
-pub fn bind() -> Result<TcpListener, String> {
+/// Why the port could not be taken. `Busy` is its own case because it is not
+/// really an error — binding the port is how a single instance is enforced,
+/// and the caller wants to tell the user "already running", not fail.
+pub enum BindError {
+    Busy,
+    Other(String),
+}
+
+impl std::fmt::Display for BindError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Busy => write!(
+                f,
+                "port {PORT} is already in use — agent-frow is probably already running"
+            ),
+            Self::Other(reason) => write!(f, "{reason}"),
+        }
+    }
+}
+
+pub fn bind() -> Result<TcpListener, BindError> {
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), PORT);
     TcpListener::bind(addr).map_err(|error| match error.kind() {
         // Binding the port is also how we enforce a single instance: the thing
         // that must not be duplicated is the listener, so let it be the lock.
-        std::io::ErrorKind::AddrInUse => {
-            format!("port {PORT} is already in use — agent-frow is probably already running")
-        }
-        _ => format!("could not bind 127.0.0.1:{PORT}: {error}"),
+        std::io::ErrorKind::AddrInUse => BindError::Busy,
+        _ => BindError::Other(format!("could not bind 127.0.0.1:{PORT}: {error}")),
     })
 }
 

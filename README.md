@@ -39,6 +39,11 @@ target\debug\agent-frow.exe install --dry-run
   the only path an agent's hook ever names. Nothing but `install` copies a build
   there.
 
+A bare **release** exe launched from anywhere else installs itself there and
+hands over (that is the zip's whole setup story). Debug builds and the
+explicit `agent-frow.exe run` subcommand never self-install — running a build
+in place is the developer's move, and it stays theirs.
+
 So after every rebuild, `install` is the step that actually deploys it:
 `agent-frow.exe install` copies `agent-frow.exe`, `agent-frow-hook.exe`, and
 `iCUESDK.x64_2019.dll` into `%LOCALAPPDATA%\agent-frow\` (renaming the running
@@ -283,12 +288,14 @@ dist/agent-frow-win64.zip
 `redist` folder and covered by [Corsair's EULA](https://corsairofficial.github.io/cue-sdk/#end-user-license-agreement),
 not by this project's license; everything else in the zip is MIT.
 
-On the new machine: unzip anywhere, run `agent-frow.exe`, press **Install** on
-each agent (this copies the binaries to `%LOCALAPPDATA%\agent-frow` and
-registers the hooks — the unzipped folder can be deleted afterwards), then
-restart the agents; for Codex, trust the hook entry (and re-trust after an
-upgrade that changes the registered command — moving to forward-slash paths
-was one; Codex trusts the exact string). For the keyboard: iCUE
+On the new machine: unzip anywhere and run `agent-frow.exe` **once**. It
+installs itself — binaries to `%LOCALAPPDATA%\agent-frow`, hooks registered
+with every agent it finds — and hands over to the installed copy; the unzipped
+folder can then be deleted. Restart the agents; for Codex, run `/hooks` inside
+it and trust the entry. **Upgrading is the same gesture** with a newer zip: the
+running copy is retired, replaced, and relaunched (Codex re-trusts only if the
+registered command string itself changed). The window's Install/Remove buttons
+remain for adding or removing individual agents later. For the keyboard: iCUE
 with a Corsair board, and the F-row remapped to F13–F24 — put that remap in
 the **default** profile, or a profile switch will silently take the summon
 keys with it.

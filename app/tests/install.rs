@@ -161,6 +161,48 @@ fn codex_hooks_are_never_async_and_claude_gets_a_matcher() {
 }
 
 #[test]
+fn a_bare_launch_knows_when_to_install_itself() {
+    use install::Launch;
+    // The installed copy itself always just runs.
+    assert_eq!(
+        install::launch_decision(true, true, Some("0.1.0"), "9.9.9"),
+        Launch::Run
+    );
+    // Nothing installed yet: first run installs.
+    assert_eq!(
+        install::launch_decision(false, false, None, "0.3.0"),
+        Launch::Install
+    );
+    // Installed before markers existed: reads as another version, one
+    // reinstall heals it.
+    assert_eq!(
+        install::launch_decision(false, true, None, "0.3.0"),
+        Launch::Install
+    );
+    // A newer zip run from anywhere is an upgrade.
+    assert_eq!(
+        install::launch_decision(false, true, Some("0.2.0"), "0.3.0"),
+        Launch::Install
+    );
+    // The same version run from a foreign folder is deliberate: run in place.
+    assert_eq!(
+        install::launch_decision(false, true, Some("0.3.0"), "0.3.0"),
+        Launch::Run
+    );
+}
+
+#[test]
+fn the_version_marker_round_trips() {
+    let dir = scratch("version-marker");
+    assert_eq!(install::installed_version(&dir), None);
+    install::write_version_marker(&dir).unwrap();
+    assert_eq!(
+        install::installed_version(&dir).as_deref(),
+        Some(env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[test]
 fn a_windows_agent_gets_a_bash_safe_forward_slash_command() {
     let flavor = Flavor {
         agent: Agent::Claude,

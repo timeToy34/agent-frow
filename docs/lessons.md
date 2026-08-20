@@ -109,6 +109,16 @@ cases the documentation is wrong.
   unbound lanes first, bound lanes borrowed only under scarcity, never
   without a proven cwd — and a laneless session re-enters assignment the
   moment its cwd arrives.
+- **"Just unzip and run" silently did nothing** when any instance was already
+  running: the app frees its console at the top of `run()`, and the port bind
+  — which is also the single-instance lock — failed *after* that, printing
+  "already in use" into a console that no longer existed. A double-click
+  produced no window, no message, exit code 1. Hence the message box on a busy
+  port, and the first-run bootstrap that made "unzip and run" true.
+- **`install_binaries` compared paths textually.** The same file spelled two
+  ways (case, an 8.3 short path) counted as different, so installing *from
+  the installed copy* could rename the live exe aside and then fail to copy a
+  source that no longer existed. Compare canonicalized paths.
 - **A summon once raised iCUE.** A dead ancestor's pid had been recycled onto
   iCUE's process, and pid-only matching believed it. That is why every
   ancestor now carries its exe name from the hook's process snapshot, and a

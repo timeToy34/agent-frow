@@ -29,11 +29,11 @@ Copy-Item (Join-Path $root 'LICENSE') (Join-Path $stage 'LICENSE.txt')
 Agent F-Row - your coding agents on the keyboard's RGB F-row.
 https://github.com/timeToy34/agent-frow
 
-1. Unzip anywhere and run agent-frow.exe.
-2. Press Install on each agent you use. This copies the binaries to
-   %LOCALAPPDATA%\agent-frow and registers the hooks; the unzipped folder
-   can be deleted afterwards.
-3. Restart your agents. For Codex, also run /hooks inside it and trust the
+1. Unzip anywhere and run agent-frow.exe once. It installs itself to
+   %LOCALAPPDATA%\agent-frow, registers its hooks with every agent it
+   finds, and continues from the installed copy; this folder can then be
+   deleted. Upgrading is the same gesture with a newer zip.
+2. Restart your agents. For Codex, also run /hooks inside it and trust the
    entry, or its hooks will never run.
 
 Keyboard (optional): iCUE with a Corsair board, and the F-row remapped to

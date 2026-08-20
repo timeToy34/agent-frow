@@ -21,7 +21,11 @@ fn main() {
         Some("doctor") => doctor(),
         Some("install") => install_command(&flags),
         Some("remove") => remove_command(&flags),
-        Some("run") | None => run(),
+        // Explicit `run` never self-installs — the developer's way to run a
+        // build in place. A bare launch (a double-click on the zip's exe) is
+        // the user's way, and takes the first-run path.
+        Some("run") => run(false, None),
+        None => launch(),
         Some(other) => {
             eprintln!("agent-frow: unknown command `{other}`");
             usage();
@@ -38,7 +42,7 @@ fn usage() {
     println!(
         "agent-frow — coding-agent status on the F-row\n\
          \n\
-           run                 receive events (default)\n\
+           run                 receive events in place, never self-install\n\
            doctor              what is installed, and whether it is working\n\
            install [--dry-run] register the hook with every agent found\n\
            remove              remove our hook from every agent\n\
@@ -309,7 +313,188 @@ fn log_event(value: &serde_json::Value) {
     }
 }
 
-fn run() -> Result<(), String> {
+/// A bare launch: decide whether this copy should run, or install itself and
+/// hand over to the installed one. Unzip anywhere, run once — the app moves
+/// itself to `%LOCALAPPDATA%\agent-frow`, registers hooks with every agent it
+/// finds, and continues from there; the unzipped folder can be deleted. The
+/// same gesture with a newer zip is an upgrade.
+fn launch() -> Result<(), String> {
+    // First, so a double-click never flashes a console while installing.
+    hide_own_console();
+    if cfg!(debug_assertions) {
+        // A debug build is a developer running from target/ — never hijack it.
+        return run(true, None);
+    }
+    let Some(install_dir) = paths::install_dir() else {
+        return run(true, None);
+    };
+    let Ok(own) = std::env::current_exe().and_then(|path| path.canonicalize()) else {
+        return run(true, None);
+    };
+    let from_install_dir = install_dir
+        .canonicalize()
+        .is_ok_and(|dir| own.parent() == Some(dir.as_path()));
+    let installed_exe = install_dir.join("agent-frow.exe");
+    let decision = install::launch_decision(
+        from_install_dir,
+        installed_exe.exists(),
+        install::installed_version(&install_dir).as_deref(),
+        env!("CARGO_PKG_VERSION"),
+    );
+    if decision == install::Launch::Run {
+        return run(true, None);
+    }
+    match bootstrap(&install_dir, &installed_exe) {
+        // The installed copy is now running; this one's job is done.
+        Ok(()) => Ok(()),
+        // Never die silently: run in place and say why in the window.
+        Err(reason) => run(true, Some(format!("could not install itself: {reason}"))),
+    }
+}
+
+/// Installs everything and starts the installed copy: binaries, then hooks for
+/// every agent found, then the handover.
+#[cfg(windows)]
+fn bootstrap(install_dir: &std::path::Path, installed_exe: &std::path::Path) -> Result<(), String> {
+    // The old instance holds the ingress port, and its tray X only hides. It
+    // has to go before the relaunch can bind — and old versions have no way
+    // to be asked, so this is a targeted termination: only processes running
+    // the installed executable itself.
+    retire_installed_instance(installed_exe);
+    install::install_binaries(install_dir)
+        .map_err(|error| format!("installing executables: {error}"))?;
+    // Hook registration failures are per-agent and not fatal: the app is
+    // about to run and its agent cards show exactly what is and is not
+    // registered.
+    for entry in &agents::detect() {
+        if let Ok(plan) = install::plan_install(entry, install_dir)
+            && !plan.is_noop()
+        {
+            let _ = install::apply(&plan);
+        }
+    }
+    std::process::Command::new(installed_exe)
+        .spawn()
+        .map_err(|error| format!("relaunching the installed copy: {error}"))?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn bootstrap(
+    _install_dir: &std::path::Path,
+    _installed_exe: &std::path::Path,
+) -> Result<(), String> {
+    Err("self-install is a Windows facility".to_owned())
+}
+
+/// Ends every process running the installed executable, and waits for it.
+///
+/// Targeted three ways: by image name first (cheap), then by full canonical
+/// path (the identity check), and never this process itself.
+#[cfg(windows)]
+fn retire_installed_instance(installed_exe: &std::path::Path) {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows::Win32::System::Threading::{
+        GetCurrentProcessId, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, QueryFullProcessImageNameW, TerminateProcess,
+        WaitForSingleObject,
+    };
+    use windows::core::PWSTR;
+
+    let Ok(installed) = installed_exe.canonicalize() else {
+        return; // nothing installed, nothing to retire
+    };
+    // SAFETY: FFI; the handle is closed below on every path.
+    let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
+        return;
+    };
+    let mut pids = Vec::new();
+    // SAFETY: `dw_size` is set as the API requires before first use.
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: `entry` is a live, correctly sized structure.
+    let mut ok = unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok();
+    let own_pid = unsafe { GetCurrentProcessId() };
+    while ok {
+        let len = entry
+            .szExeFile
+            .iter()
+            .position(|&unit| unit == 0)
+            .unwrap_or(entry.szExeFile.len());
+        let name = String::from_utf16_lossy(&entry.szExeFile[..len]);
+        if entry.th32ProcessID != own_pid && name.eq_ignore_ascii_case("agent-frow.exe") {
+            pids.push(entry.th32ProcessID);
+        }
+        // SAFETY: as above.
+        ok = unsafe { Process32NextW(snapshot, &mut entry) }.is_ok();
+    }
+    // SAFETY: the handle came from CreateToolhelp32Snapshot and is done with.
+    let _ = unsafe { CloseHandle(snapshot) };
+
+    for pid in pids {
+        // SAFETY: FFI; the handle is closed below on every path.
+        let Ok(handle) = (unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | PROCESS_SYNCHRONIZE,
+                false,
+                pid,
+            )
+        }) else {
+            continue;
+        };
+        let mut buffer = [0u16; 1024];
+        let mut length = buffer.len() as u32;
+        // SAFETY: `buffer` and `length` describe the same live buffer.
+        let queried = unsafe {
+            QueryFullProcessImageNameW(
+                handle,
+                PROCESS_NAME_WIN32,
+                PWSTR(buffer.as_mut_ptr()),
+                &mut length,
+            )
+        };
+        let matches = queried.is_ok()
+            && std::path::Path::new(&String::from_utf16_lossy(&buffer[..length as usize]))
+                .canonicalize()
+                .is_ok_and(|path| path == installed);
+        if matches {
+            // SAFETY: handle has PROCESS_TERMINATE; exit code 0 by intent.
+            let _ = unsafe { TerminateProcess(handle, 0) };
+            // SAFETY: handle has PROCESS_SYNCHRONIZE; bounded wait.
+            let _ = unsafe { WaitForSingleObject(handle, 3_000) };
+        }
+        // SAFETY: handle came from OpenProcess and is not used again.
+        let _ = unsafe { CloseHandle(handle) };
+    }
+}
+
+/// "Already running" where a double-click can actually see it — the console
+/// was freed long before the port check, so stderr goes nowhere.
+#[cfg(windows)]
+fn already_running_dialog() {
+    use windows::Win32::UI::WindowsAndMessaging::{MB_ICONINFORMATION, MB_OK, MessageBoxW};
+    use windows::core::w;
+    // SAFETY: constant wide strings, no owner window.
+    unsafe {
+        MessageBoxW(
+            None,
+            w!("Agent F-Row is already running — look for it in the system tray."),
+            w!("Agent F-Row"),
+            MB_OK | MB_ICONINFORMATION,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn already_running_dialog() {}
+
+fn run(dialog_on_busy: bool, notice: Option<String>) -> Result<(), String> {
     hide_own_console();
     // This process has no console most of the time, so a panicking thread dies
     // without a trace — and a quietly dead worker thread is how a feature
@@ -336,7 +521,17 @@ fn run() -> Result<(), String> {
     // Binding the port is also the single-instance lock: the thing that must
     // not exist twice is the listener, so let it be the lock rather than
     // inventing a second mechanism that can disagree with it.
-    let listener = ingress::bind()?;
+    let listener = match ingress::bind() {
+        Ok(listener) => listener,
+        // Not an error: the bind is the single-instance lock. A double-click
+        // has no console (freed above), so a silent exit here reads as "the
+        // app is broken" — say it where the user can see it.
+        Err(ingress::BindError::Busy) if dialog_on_busy => {
+            already_running_dialog();
+            return Ok(());
+        }
+        Err(error) => return Err(error.to_string()),
+    };
 
     // A settings file we cannot read is reported and left exactly as it is.
     // Starting from defaults is recoverable; overwriting colours somebody
@@ -426,7 +621,14 @@ fn run() -> Result<(), String> {
     eframe::run_native(
         "Agent F-Row",
         options,
-        Box::new(move |_cc| Ok(Box::new(ui::App::new(tracker, install_dir, settings_path)))),
+        Box::new(move |_cc| {
+            Ok(Box::new(ui::App::new(
+                tracker,
+                install_dir,
+                settings_path,
+                notice,
+            )))
+        }),
     )
     .map_err(|error| format!("could not open the window: {error}"))
 }
