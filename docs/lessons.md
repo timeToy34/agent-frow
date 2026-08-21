@@ -99,16 +99,17 @@ cases the documentation is wrong.
     the other one, and UIA then reads no tabs at all — and because it can
     spend a quarter of a second waiting for the terminal to agree which tab
     is in front.
-- **Two agents once came up reversed** — Agent A on B's bound lane and B on
-  A's, each summon raising the other's window. Cause: lanes are claimed at
-  first sight, hooks post concurrently, and a session adopted from a
-  *subagent's* event deliberately carries no cwd (a subfolder must not bind
-  the lane) — so it matched no bind and the fallback handed it the first free
-  lane, bound or not. Restarting the app made it likely: every live session
-  re-adopts from whatever event lands first. Hence the rules in `claim()`:
-  unbound lanes first, bound lanes borrowed only under scarcity, never
-  without a proven cwd — and a laneless session re-enters assignment the
-  moment its cwd arrives.
+- **Two agents once came up reversed** — Agent A on B's lane and B on A's,
+  each summon raising the other's window. Cause: lanes are claimed at first
+  sight, hooks post concurrently, and a session adopted from a *subagent's*
+  event deliberately carries no cwd (a subfolder must not become the lane's
+  project) — so it could not be recognised as a saved agent and the fallback
+  handed it the first free lane, somebody's preferred lane or not. Restarting
+  the app made it likely: every live session re-adopts from whatever event
+  lands first. Hence the one refinement in `claim()` (saved-agent preferences
+  are otherwise plain first-come, by the owner's choice): a session whose cwd
+  is still unknown takes a lane nobody prefers while there is one — and a
+  laneless session re-enters assignment the moment its cwd arrives.
 - **Never flip window styles behind winit's back.** Setting
   `WS_EX_TOOLWINDOW` directly to hide the taskbar button did not remove the
   button and left the restored window with a toolwindow caption — one lone

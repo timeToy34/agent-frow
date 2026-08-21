@@ -141,33 +141,42 @@ its lane where it stood.
 
 ## Lanes
 
-Twelve F-row keys, in 3, 4 or 6 lanes. A session takes the lane bound to its
-`(agent, project folder)` if that lane is free, else the first free unbound
-lane; a bound lane is borrowed only when nothing else is free, and never by a
-session that has not yet reported its working directory — a bind match cannot
-be proven without one, and the session claims properly the moment it arrives.
-The rest live **off the keyboard**: full cards in the window — state, note, timer,
-Focus, dismiss — just no key and no light. An off-keyboard session stays fully
-tracked, is promoted oldest-first the moment a lane frees or the layout grows,
-and the landing spot for the next agent is drawn whenever every lane is taken,
-so the board never runs out of room.
+Twelve F-row keys, in 3, 4 or 6 lanes. A session takes the first free lane.
+The rest live **off the keyboard**: full cards in the window — state, note,
+timer, Focus, dismiss — just no key and no light. An off-keyboard session stays
+fully tracked, is promoted oldest-first the moment a lane frees or the layout
+grows, and the landing spot for the next agent is drawn whenever every lane is
+taken, so the board never runs out of room.
+
+**Saved agents.** Press *Save* on a lane card and the app remembers that
+`(agent, project folder)` with that lane as its *preferred* lane. When the
+agent comes back it takes its preferred lane if the lane is free; otherwise the
+first free lane; otherwise it waits off the keyboard — and landing elsewhere
+never rewrites the save. A preference is not a reservation: an empty preferred
+lane is a free lane to whoever comes next. (One refinement: a session whose
+folder is not known yet — one adopted from a subagent's event — takes a lane
+nobody prefers while there is one, so an unidentified agent cannot sit down in
+a saved agent's place during a restart.) The window shows three groups: the
+lanes, the off-keyboard sessions, and the saved agents that are not running;
+a running saved agent is tagged on its card. The roster is where a save's
+agent and preferred lane are edited, and where it is forgotten.
 
 **Nothing ever takes a lane away from a session
 that already has one** — lane position is identity, and a display you glance at
 teaches you nothing if lane 2 moves while you are looking at it. The *user* has
 two sanctioned exceptions: the ⏶⏷ buttons reorder lanes (everything — session,
-name, colour, binding, keys — travels together), and an off-keyboard card's ⏶
-takes the bottom lane, its incumbent stepping off the keyboard in trade.
+name, colour, saved preference, keys — travels together), and an off-keyboard
+card's ⏶ takes the bottom lane, its incumbent stepping off the keyboard in trade.
 
 A session's **project folder** is the *main* agent's launch directory: it is
 taken from `SessionStart`'s `cwd` (authoritative) and, until that arrives, from
 the first non-subagent event that carries one. A **subagent's** `cwd` never sets
 it — a subagent working in `…/frontend` under a project rooted at `…/` must not
-bind the lane to the subfolder, which was a real "bound to the wrong folder"
-bug.
+make the subfolder the lane's project, which was a real "bound to the wrong
+folder" bug.
 
-Lane names, colours, bindings and the lane count live in
-`%LOCALAPPDATA%\agent-frow\settings.json`, written atomically. A file that does
+Lane names, colours, saved agents, the lane count and whether Settings is
+unfolded live in `%LOCALAPPDATA%\agent-frow\settings.json`, written atomically. A file that does
 not parse is refused and left exactly as it is: the window says so, and says
 that changing anything will overwrite it.
 

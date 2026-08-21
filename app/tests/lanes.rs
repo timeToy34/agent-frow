@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 
 use agent_frow::event::Event;
-use agent_frow::settings::{Bind, BindAgent, Settings};
+use agent_frow::settings::{AgentFilter, SavedAgent, Settings};
 use agent_frow::state::State;
 use agent_frow::tracker::{ACTIVE_IDLE_MS, RESTING_IDLE_MS, Tracker};
 use serde_json::{Value, json};
@@ -32,6 +32,14 @@ fn tracker(lane_count: usize) -> Tracker {
 
 fn lane_project(tracker: &Tracker, lane: usize) -> Option<String> {
     tracker.on_lane(lane).and_then(|session| session.project())
+}
+
+fn saved(agent: AgentFilter, folder: &str, lane: usize) -> SavedAgent {
+    SavedAgent {
+        agent,
+        folder: PathBuf::from(folder),
+        lane,
+    }
 }
 
 #[test]
@@ -74,13 +82,12 @@ fn the_first_session_takes_the_first_lane_and_keeps_it() {
 }
 
 #[test]
-fn a_bound_lane_claims_its_project() {
+fn a_saved_agent_takes_its_preferred_lane() {
     let mut settings = Settings::default();
     settings.set_lane_count(4);
-    settings.lanes[2].bind = Some(Bind {
-        agent: BindAgent::Any,
-        folder: PathBuf::from(r"C:\dev\beta"),
-    });
+    settings
+        .saved
+        .push(saved(AgentFilter::Any, r"C:\dev\beta", 2));
     let mut tracker = Tracker::new(settings, Default::default());
 
     send(
@@ -106,16 +113,15 @@ fn a_bound_lane_claims_its_project() {
 }
 
 #[test]
-fn a_binding_can_name_the_agent_as_well_as_the_folder() {
+fn a_save_can_name_the_agent_as_well_as_the_folder() {
     let mut settings = Settings::default();
     settings.set_lane_count(4);
-    settings.lanes[1].bind = Some(Bind {
-        agent: BindAgent::Codex,
-        folder: PathBuf::from(r"C:\dev\alpha"),
-    });
+    settings
+        .saved
+        .push(saved(AgentFilter::Codex, r"C:\dev\alpha", 1));
     let mut tracker = Tracker::new(settings, Default::default());
 
-    // Same folder, wrong agent: the binding does not apply, so it takes the
+    // Same folder, wrong agent: the save does not apply, so it takes the
     // first free lane like anything else.
     send(
         &mut tracker,
@@ -145,50 +151,31 @@ fn a_binding_can_name_the_agent_as_well_as_the_folder() {
 }
 
 #[test]
-fn nothing_takes_a_lane_away_from_a_session_that_already_has_one() {
-    // The borrowing session got there first, under scarcity. Moving it now
-    // would be the display rearranging itself under somebody who is looking
-    // at it, which is worse than a binding not applying today.
+fn a_taken_preferred_lane_sends_the_saved_agent_elsewhere_and_leaves_the_save_alone() {
     let mut settings = Settings::default();
     settings.set_lane_count(3);
-    settings.lanes[0].bind = Some(Bind {
-        agent: BindAgent::Any,
-        folder: PathBuf::from(r"C:\dev\beta"),
-    });
+    settings
+        .saved
+        .push(saved(AgentFilter::Any, r"C:\dev\beta", 2));
+    let before = settings.clone();
     let mut tracker = Tracker::new(settings, Default::default());
 
-    // Strangers fill the unbound lanes first…
-    send(
-        &mut tracker,
-        "claude-win",
-        "a",
-        "UserPromptSubmit",
-        r"C:\dev\alpha",
-        10,
-    );
-    send(
-        &mut tracker,
-        "claude-win",
-        "g",
-        "UserPromptSubmit",
-        r"C:\dev\gamma",
-        11,
-    );
-    assert_eq!(lane_project(&tracker, 1).as_deref(), Some("alpha"));
-    assert_eq!(lane_project(&tracker, 2).as_deref(), Some("gamma"));
+    // A preference is not a reservation: strangers take free lanes in order,
+    // the preferred one included.
+    for (name, at) in [("alpha", 10), ("gamma", 11), ("delta", 12)] {
+        send(
+            &mut tracker,
+            "claude-win",
+            name,
+            "UserPromptSubmit",
+            &format!(r"C:\dev\{name}"),
+            at,
+        );
+    }
+    assert_eq!(lane_project(&tracker, 2).as_deref(), Some("delta"));
 
-    // …and only scarcity lets one borrow the bound lane.
-    send(
-        &mut tracker,
-        "claude-win",
-        "d",
-        "UserPromptSubmit",
-        r"C:\dev\delta",
-        12,
-    );
-    assert_eq!(lane_project(&tracker, 0).as_deref(), Some("delta"));
-
-    // The lane's own project arriving does not evict the borrower.
+    // The saved agent arrives to find its lane taken: it waits off the
+    // keyboard rather than evicting anybody…
     send(
         &mut tracker,
         "claude-win",
@@ -197,102 +184,157 @@ fn nothing_takes_a_lane_away_from_a_session_that_already_has_one() {
         r"C:\dev\beta",
         20,
     );
-    assert_eq!(lane_project(&tracker, 0).as_deref(), Some("delta"));
     assert_eq!(tracker.overflow().len(), 1);
+    assert_eq!(lane_project(&tracker, 2).as_deref(), Some("delta"));
+
+    // …and when a different lane frees up it takes that one, seated for good.
+    send(
+        &mut tracker,
+        "claude-win",
+        "alpha",
+        "SessionEnd",
+        r"C:\dev\alpha",
+        30,
+    );
+    assert_eq!(lane_project(&tracker, 0).as_deref(), Some("beta"));
+    send(
+        &mut tracker,
+        "claude-win",
+        "delta",
+        "SessionEnd",
+        r"C:\dev\delta",
+        40,
+    );
+    assert_eq!(lane_project(&tracker, 0).as_deref(), Some("beta"));
+    assert!(tracker.on_lane(2).is_none());
+
+    // Through all of it the save itself never moved: it still says lane 3.
+    assert_eq!(tracker.settings, before);
 }
 
 #[test]
-fn a_session_without_a_cwd_never_takes_a_bound_lane() {
-    // Hooks post concurrently; a session adopted from a subagent's event has
-    // no cwd and so cannot prove a bind match. Granting it a reserved lane is
-    // how two agents once came up reversed after an app restart, summoning
-    // each other's windows.
+fn nothing_takes_a_lane_away_from_a_session_that_already_has_one() {
+    // The stranger got there first. Moving it now would be the display
+    // rearranging itself under somebody who is looking at it, which is worse
+    // than a preference not coming true today.
     let mut settings = Settings::default();
     settings.set_lane_count(3);
-    settings.lanes[0].bind = Some(Bind {
-        agent: BindAgent::Any,
-        folder: PathBuf::from("/home/j/beta"),
-    });
-    settings.lanes[1].bind = Some(Bind {
-        agent: BindAgent::Any,
-        folder: PathBuf::from("/home/j/gamma"),
-    });
+    settings
+        .saved
+        .push(saved(AgentFilter::Any, r"C:\dev\beta", 0));
+    let mut tracker = Tracker::new(settings, Default::default());
+
+    send(
+        &mut tracker,
+        "claude-win",
+        "a",
+        "UserPromptSubmit",
+        r"C:\dev\alpha",
+        10,
+    );
+    assert_eq!(lane_project(&tracker, 0).as_deref(), Some("alpha"));
+
+    // The lane's preferred project arriving does not evict the stranger; it
+    // takes the next free lane.
+    send(
+        &mut tracker,
+        "claude-win",
+        "b",
+        "UserPromptSubmit",
+        r"C:\dev\beta",
+        20,
+    );
+    assert_eq!(lane_project(&tracker, 0).as_deref(), Some("alpha"));
+    assert_eq!(lane_project(&tracker, 1).as_deref(), Some("beta"));
+}
+
+#[test]
+fn a_session_without_a_cwd_avoids_preferred_lanes_when_another_is_free() {
+    // Hooks post concurrently; a session adopted from a subagent's event has
+    // no cwd and so cannot be recognised as anybody's save. Handing it a lane
+    // somebody prefers is how two agents once came up reversed after an app
+    // restart, summoning each other's windows.
+    let mut settings = Settings::default();
+    settings.set_lane_count(3);
+    settings
+        .saved
+        .push(saved(AgentFilter::Any, "/home/j/beta", 0));
+    settings
+        .saved
+        .push(saved(AgentFilter::Any, "/home/j/gamma", 1));
     let mut tracker = Tracker::new(settings, Default::default());
 
     // Adopted from a subagent event: the cwd is deliberately not believed.
-    let subagent: Value = json!({
-        "src": "claude-wsl",
-        "hook_event_name": "SubagentStart",
-        "session_id": "b",
-        "cwd": "/home/j/beta/frontend",
-        "agent_id": "sub-1",
-    });
-    tracker.accept(Event::parse(&subagent, 10), 10);
+    let subagent = |session: &str| -> Value {
+        json!({
+            "src": "claude-wsl",
+            "hook_event_name": "SubagentStart",
+            "session_id": session,
+            "cwd": "/home/j/beta/frontend",
+            "agent_id": "sub-1",
+        })
+    };
+    tracker.accept(Event::parse(&subagent("x"), 10), 10);
 
-    // Both bound lanes are free, but only the unbound lane 2 is claimable.
-    let session = tracker.on_lane(2);
-    assert!(session.is_some(), "an unbound lane is fine without a cwd");
+    // Both preferred lanes are free, but lane 2 is the one nobody wants.
+    assert!(tracker.on_lane(2).is_some());
     assert!(tracker.on_lane(0).is_none());
     assert!(tracker.on_lane(1).is_none());
-}
 
-#[test]
-fn a_late_cwd_claims_the_bound_lane_it_could_not_prove_before() {
-    let mut settings = Settings::default();
-    settings.set_lane_count(3);
-    settings.lanes[0].bind = Some(Bind {
-        agent: BindAgent::Any,
-        folder: PathBuf::from("/home/j/beta"),
-    });
-    settings.lanes[1].bind = Some(Bind {
-        agent: BindAgent::Any,
-        folder: PathBuf::from("/home/j/gamma"),
-    });
-    settings.lanes[2].bind = Some(Bind {
-        agent: BindAgent::Any,
-        folder: PathBuf::from("/home/j/delta"),
-    });
-    let mut tracker = Tracker::new(settings, Default::default());
+    // With nothing else left, a preferred lane is a free lane like any other —
+    // a preference is not a reservation.
+    tracker.accept(Event::parse(&subagent("y"), 11), 11);
+    assert!(tracker.on_lane(0).is_some());
+    assert!(tracker.overflow().is_empty());
 
-    // Every lane is bound, so a cwd-less adoption waits off the keyboard…
-    let subagent: Value = json!({
-        "src": "claude-wsl",
-        "hook_event_name": "SubagentStart",
-        "session_id": "b",
-        "cwd": "/home/j/beta/frontend",
-        "agent_id": "sub-1",
-    });
-    tracker.accept(Event::parse(&subagent, 10), 10);
-    assert_eq!(tracker.overflow().len(), 1);
-
-    // …until the main agent's first event proves where it lives.
+    // The saved agent whose lane that was lands on the other one; the save
+    // still says lane 1.
     send(
         &mut tracker,
         "claude-wsl",
         "b",
-        "PostToolUse",
+        "UserPromptSubmit",
         "/home/j/beta",
         20,
     );
-    assert_eq!(lane_project(&tracker, 0).as_deref(), Some("beta"));
-    assert!(tracker.overflow().is_empty());
+    assert_eq!(lane_project(&tracker, 1).as_deref(), Some("beta"));
+    assert_eq!(tracker.settings.saved[0].lane, 0);
 }
 
 #[test]
-fn bindings_survive_layouts_where_their_lane_does_not_exist() {
+fn a_save_preferring_a_hidden_lane_survives_the_layout_change() {
     let mut settings = Settings::default();
     settings.set_lane_count(4);
-    settings.lanes[3].bind = Some(Bind {
-        agent: BindAgent::Any,
-        folder: PathBuf::from("/home/j/beta"),
-    });
+    settings
+        .saved
+        .push(saved(AgentFilter::Any, "/home/j/beta", 3));
     let mut tracker = Tracker::new(settings, Default::default());
 
+    // While the layout has three lanes the preference cannot come true, and
+    // the agent takes a lane that exists.
     tracker.set_lane_count(3);
+    send(
+        &mut tracker,
+        "claude-wsl",
+        "early",
+        "UserPromptSubmit",
+        "/home/j/beta",
+        5,
+    );
+    assert_eq!(lane_project(&tracker, 0).as_deref(), Some("beta"));
+    send(
+        &mut tracker,
+        "claude-wsl",
+        "early",
+        "SessionEnd",
+        "/home/j/beta",
+        6,
+    );
+
     tracker.set_lane_count(4);
-    assert!(
-        tracker.settings.lanes[3].bind.is_some(),
-        "a binding outlives layouts that hide its lane"
+    assert_eq!(
+        tracker.settings.saved[0].lane, 3,
+        "a save outlives layouts that hide its lane, unchanged"
     );
     send(
         &mut tracker,
@@ -494,14 +536,13 @@ fn an_unknown_notification_is_counted_rather_than_acted_on() {
 }
 
 #[test]
-fn moving_a_lane_takes_its_session_name_colour_and_binding_along() {
+fn moving_a_lane_takes_its_session_name_colour_and_saved_preference_along() {
     let mut settings = Settings::default();
     settings.set_lane_count(4);
     settings.lanes[0].name = "First".to_owned();
-    settings.lanes[1].bind = Some(Bind {
-        agent: BindAgent::Any,
-        folder: PathBuf::from(r"C:\dev\beta"),
-    });
+    settings
+        .saved
+        .push(saved(AgentFilter::Any, r"C:\dev\beta", 1));
     let mut tracker = Tracker::new(settings, Default::default());
     send(
         &mut tracker,
@@ -522,12 +563,12 @@ fn moving_a_lane_takes_its_session_name_colour_and_binding_along() {
 
     tracker.move_lane(0, 1);
 
-    // The whole lane moved: the session, the name, and the binding — and the
-    // lane it swapped with moved back the other way, intact.
+    // The whole lane moved: the session, the name, and the saved preference —
+    // and the lane it swapped with moved back the other way, intact.
     assert_eq!(lane_project(&tracker, 1).as_deref(), Some("alpha"));
     assert_eq!(lane_project(&tracker, 0).as_deref(), Some("beta"));
     assert_eq!(tracker.settings.lanes[1].name, "First");
-    assert!(tracker.settings.lanes[0].bind.is_some());
+    assert_eq!(tracker.settings.saved[0].lane, 0);
 
     // Out-of-range and self moves change nothing.
     tracker.move_lane(1, 9);

@@ -1,7 +1,8 @@
-//! Lane configuration, and keeping it on disk.
+//! Lane configuration, saved agents, and keeping both on disk.
 //!
 //! The F-row has twelve keys. A lane is a group of them and is where a session
-//! is shown, so lanes exist now even though nothing is lit until milestone 3.
+//! is shown. A saved agent is an `(agent, project folder)` the user asked the
+//! app to remember, with the lane it would rather come back to.
 //!
 //! A file that does not parse is **refused and left untouched**. Starting from
 //! defaults is recoverable; silently overwriting colours somebody hand-edited
@@ -47,15 +48,17 @@ impl Rgb {
     }
 }
 
-/// Which agent a binding accepts.
+/// Which agent a saved entry accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BindAgent {
+pub enum AgentFilter {
     Any,
     Claude,
     Codex,
 }
 
-impl BindAgent {
+impl AgentFilter {
+    pub const ALL: [Self; 3] = [Self::Any, Self::Claude, Self::Codex];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Any => "any agent",
@@ -81,21 +84,36 @@ impl BindAgent {
     }
 }
 
-/// "This lane is that project."
+/// "Remember this agent in this project" — and the lane it would rather have.
+///
+/// The lane is a *preference*, not a record: a session that matches takes it
+/// when it is free and lands anywhere else when it is not, and landing
+/// elsewhere never rewrites it. Only the user changes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Bind {
-    pub agent: BindAgent,
+pub struct SavedAgent {
+    pub agent: AgentFilter,
     pub folder: PathBuf,
+    /// Zero-based, like everything in the code; the file and the window count
+    /// from one.
+    pub lane: usize,
 }
 
-impl Bind {
+impl SavedAgent {
     pub fn matches(&self, agent: crate::agents::Agent, cwd: Option<&Path>) -> bool {
         let agent_ok = match self.agent {
-            BindAgent::Any => true,
-            BindAgent::Claude => agent == crate::agents::Agent::Claude,
-            BindAgent::Codex => agent == crate::agents::Agent::Codex,
+            AgentFilter::Any => true,
+            AgentFilter::Claude => agent == crate::agents::Agent::Claude,
+            AgentFilter::Codex => agent == crate::agents::Agent::Codex,
         };
         agent_ok && cwd.is_some_and(|cwd| same_folder(&self.folder, cwd))
+    }
+
+    /// The folder's own name — what a card calls the project.
+    pub fn project(&self) -> String {
+        self.folder
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.folder.display().to_string())
     }
 }
 
@@ -103,7 +121,7 @@ impl Bind {
 ///
 /// Compared as normalised text, not by asking the filesystem: half of these
 /// paths are WSL paths that mean nothing to Windows, and a `canonicalize` that
-/// fails would silently stop every binding from matching.
+/// fails would silently stop every saved agent from matching.
 pub fn same_folder(left: &Path, right: &Path) -> bool {
     fn normalise(path: &Path) -> String {
         path.to_string_lossy()
@@ -116,11 +134,10 @@ pub fn same_folder(left: &Path, right: &Path) -> bool {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Lane {
-    /// Empty means "the project folder's name". Load-bearing later: milestone 4
-    /// finds a terminal tab by this name.
+    /// Empty means "the project folder's name". Load-bearing: focus finds a
+    /// terminal tab by this name.
     pub name: String,
     pub color: Rgb,
-    pub bind: Option<Bind>,
 }
 
 /// The six default lane colours, chosen to stay apart from each other and from
@@ -139,7 +156,6 @@ impl Lane {
         Self {
             name: String::new(),
             color: DEFAULT_COLORS[index % MAX_LANES],
-            bind: None,
         }
     }
 }
@@ -158,11 +174,17 @@ pub struct Settings {
     pub lane_count: usize,
     /// Always [`MAX_LANES`] long; `lane_count` says how many are live.
     pub lanes: Vec<Lane>,
+    /// The roster, in the order the user saved them. Earlier entries win when
+    /// two would claim the same lane at once.
+    pub saved: Vec<SavedAgent>,
     pub brightness: f32,
     /// Per-channel gain (R, G, B) multiplied into what the keys are sent —
     /// calibration for a keyboard whose LEDs do not match the screen. Unity
     /// is untouched; the window is never corrected.
     pub color_gain: [f32; 3],
+    /// Whether the Settings section of the window is unfolded. Remembered so
+    /// the window opens the way it was left.
+    pub settings_open: bool,
 }
 
 impl Default for Settings {
@@ -170,15 +192,16 @@ impl Default for Settings {
         Self {
             lane_count: 4,
             lanes: (0..MAX_LANES).map(Lane::default_at).collect(),
+            saved: Vec::new(),
             brightness: 0.8,
             color_gain: [1.0, 1.0, 1.0],
+            settings_open: false,
         }
     }
 }
 
 impl Settings {
-    /// How many keys each lane gets on the keyboard. Milestone 3 uses it; the
-    /// window states it so the choice means something before then.
+    /// How many keys each lane gets on the keyboard.
     pub fn keys_per_lane(&self) -> usize {
         KEYS / self.lane_count.max(1)
     }
@@ -202,6 +225,42 @@ impl Settings {
             (None, None) => format!("Lane {}", index + 1),
         }
     }
+
+    /// The first saved entry this session is, if any. A session whose agent
+    /// or folder is unknown is nobody's save.
+    pub fn saved_matching(
+        &self,
+        agent: Option<crate::agents::Agent>,
+        cwd: Option<&Path>,
+    ) -> Option<usize> {
+        let agent = agent?;
+        self.saved
+            .iter()
+            .position(|entry| entry.matches(agent, cwd))
+    }
+
+    /// Whether any saved agent would rather have this lane.
+    pub fn prefers(&self, lane: usize) -> bool {
+        self.saved.iter().any(|entry| entry.lane == lane)
+    }
+
+    /// The saved agents that would rather have this lane, by roster index.
+    pub fn preferring(&self, lane: usize) -> impl Iterator<Item = &SavedAgent> {
+        self.saved.iter().filter(move |entry| entry.lane == lane)
+    }
+
+    /// Adds an entry unless an equal `(agent, folder)` is already there.
+    pub fn remember(&mut self, entry: SavedAgent) -> bool {
+        let duplicate = self
+            .saved
+            .iter()
+            .any(|known| known.agent == entry.agent && same_folder(&known.folder, &entry.folder));
+        if duplicate {
+            return false;
+        }
+        self.saved.push(entry);
+        true
+    }
 }
 
 pub fn load(path: &Path) -> Result<Settings, String> {
@@ -213,6 +272,11 @@ pub fn load(path: &Path) -> Result<Settings, String> {
 /// JSON, or not an object, is an error nobody should paper over; a single field
 /// that has gone missing or odd falls back to its default, because refusing the
 /// whole file over one bad colour helps nobody.
+///
+/// A file from before saved agents existed carried a `bind` on each lane —
+/// the same `(agent, folder)`, pinned to that lane. Those are read as saved
+/// agents preferring the lane they were on, and never written back in the old
+/// shape.
 pub fn parse(text: &str) -> Result<Settings, String> {
     let value: Value = serde_json::from_str(text).map_err(|error| format!("{error}"))?;
     let Value::Object(object) = value else {
@@ -233,6 +297,24 @@ pub fn parse(text: &str) -> Result<Settings, String> {
             }
         }
     }
+    if let Some(open) = object.get("settings_open").and_then(Value::as_bool) {
+        settings.settings_open = open;
+    }
+    if let Some(saved) = object.get("saved").and_then(Value::as_array) {
+        for entry in saved.iter().filter_map(Value::as_object) {
+            // The file counts lanes from one, like the window does.
+            let Some(lane) = entry
+                .get("lane")
+                .and_then(Value::as_u64)
+                .filter(|lane| (1..=MAX_LANES as u64).contains(lane))
+            else {
+                continue;
+            };
+            if let Some(entry) = saved_agent(entry, lane as usize - 1) {
+                settings.remember(entry);
+            }
+        }
+    }
     if let Some(lanes) = object.get("lanes").and_then(Value::as_array) {
         for (index, lane) in lanes.iter().take(MAX_LANES).enumerate() {
             let Some(lane) = lane.as_object() else {
@@ -249,24 +331,30 @@ pub fn parse(text: &str) -> Result<Settings, String> {
             {
                 slot.color = color;
             }
-            slot.bind = lane
+            if let Some(legacy) = lane
                 .get("bind")
                 .and_then(Value::as_object)
-                .and_then(|bind| {
-                    let folder = bind.get("folder").and_then(Value::as_str)?;
-                    if folder.is_empty() {
-                        return None;
-                    }
-                    Some(Bind {
-                        agent: BindAgent::parse(
-                            bind.get("agent").and_then(Value::as_str).unwrap_or("any"),
-                        ),
-                        folder: PathBuf::from(folder),
-                    })
-                });
+                .and_then(|bind| saved_agent(bind, index))
+            {
+                settings.remember(legacy);
+            }
         }
     }
     Ok(settings)
+}
+
+/// One `{"agent": …, "folder": …}` object, preferring `lane`. A missing or
+/// empty folder is no entry at all.
+fn saved_agent(object: &Map<String, Value>, lane: usize) -> Option<SavedAgent> {
+    let folder = object.get("folder").and_then(Value::as_str)?;
+    if folder.is_empty() {
+        return None;
+    }
+    Some(SavedAgent {
+        agent: AgentFilter::parse(object.get("agent").and_then(Value::as_str).unwrap_or("any")),
+        folder: PathBuf::from(folder),
+        lane,
+    })
 }
 
 pub fn to_json(settings: &Settings) -> String {
@@ -278,6 +366,10 @@ pub fn to_json(settings: &Settings) -> String {
         gain.insert(key.to_owned(), Value::from(value));
     }
     root.insert("color_gain".to_owned(), Value::Object(gain));
+    root.insert(
+        "settings_open".to_owned(),
+        Value::Bool(settings.settings_open),
+    );
     let lanes: Vec<Value> = settings
         .lanes
         .iter()
@@ -285,24 +377,25 @@ pub fn to_json(settings: &Settings) -> String {
             let mut out = Map::new();
             out.insert("name".to_owned(), Value::String(lane.name.clone()));
             out.insert("color".to_owned(), Value::String(lane.color.to_hex()));
-            match &lane.bind {
-                Some(bind) => {
-                    let mut written = Map::new();
-                    written.insert("agent".to_owned(), Value::from(bind.agent.key()));
-                    written.insert(
-                        "folder".to_owned(),
-                        Value::String(bind.folder.display().to_string()),
-                    );
-                    out.insert("bind".to_owned(), Value::Object(written));
-                }
-                None => {
-                    out.insert("bind".to_owned(), Value::Null);
-                }
-            }
             Value::Object(out)
         })
         .collect();
     root.insert("lanes".to_owned(), Value::Array(lanes));
+    let saved: Vec<Value> = settings
+        .saved
+        .iter()
+        .map(|entry| {
+            let mut out = Map::new();
+            out.insert("agent".to_owned(), Value::from(entry.agent.key()));
+            out.insert(
+                "folder".to_owned(),
+                Value::String(entry.folder.display().to_string()),
+            );
+            out.insert("lane".to_owned(), Value::from(entry.lane + 1));
+            Value::Object(out)
+        })
+        .collect();
+    root.insert("saved".to_owned(), Value::Array(saved));
     serde_json::to_string_pretty(&Value::Object(root)).unwrap_or_else(|_| "{}".to_owned())
 }
 
@@ -346,11 +439,67 @@ mod tests {
         settings.set_lane_count(6);
         settings.lanes[1].name = "Backend".to_owned();
         settings.lanes[1].color = Rgb::new(1, 2, 3);
-        settings.lanes[2].bind = Some(Bind {
-            agent: BindAgent::Codex,
+        settings.saved.push(SavedAgent {
+            agent: AgentFilter::Codex,
             folder: PathBuf::from(r"C:\dev\thing"),
+            lane: 2,
         });
+        settings.saved.push(SavedAgent {
+            agent: AgentFilter::Any,
+            folder: PathBuf::from("/home/j/other"),
+            lane: 5,
+        });
+        settings.settings_open = true;
         assert_eq!(parse(&to_json(&settings)).unwrap(), settings);
+    }
+
+    #[test]
+    fn a_legacy_bind_becomes_a_saved_agent_with_that_lane() {
+        let settings = parse(
+            r##"{
+                "lane_count": 4,
+                "lanes": [
+                    { "name": "", "color": "#50aaff", "bind": null },
+                    { "name": "", "color": "#fabe3c", "bind": null },
+                    { "name": "", "color": "#5ad282",
+                      "bind": { "agent": "claude", "folder": "C:\\dev\\thing" } },
+                    { "name": "", "color": "#e16ec8", "bind": null }
+                ]
+            }"##,
+        )
+        .unwrap();
+        assert_eq!(
+            settings.saved,
+            vec![SavedAgent {
+                agent: AgentFilter::Claude,
+                folder: PathBuf::from(r"C:\dev\thing"),
+                lane: 2,
+            }]
+        );
+        // Written back in the new shape only.
+        let text = to_json(&settings);
+        assert!(!text.contains("\"bind\""));
+        assert!(text.contains("\"saved\""));
+        assert_eq!(parse(&text).unwrap(), settings);
+    }
+
+    #[test]
+    fn the_file_counts_lanes_from_one_and_drops_what_it_cannot_place() {
+        let settings = parse(
+            r#"{ "saved": [
+                { "agent": "any", "folder": "/a", "lane": 1 },
+                { "agent": "any", "folder": "/b", "lane": 0 },
+                { "agent": "any", "folder": "/c", "lane": 7 },
+                { "agent": "any", "folder": "", "lane": 2 },
+                { "agent": "any", "folder": "/A/", "lane": 3 }
+            ] }"#,
+        )
+        .unwrap();
+        // Lane 1 in the file is index 0; 0 and 7 are not lanes; an empty folder
+        // is nothing; "/A/" is "/a" again and the first entry keeps its lane.
+        assert_eq!(settings.saved.len(), 1);
+        assert_eq!(settings.saved[0].folder, PathBuf::from("/a"));
+        assert_eq!(settings.saved[0].lane, 0);
     }
 
     #[test]
@@ -391,13 +540,30 @@ mod tests {
     }
 
     #[test]
-    fn a_binding_matches_the_same_folder_written_differently() {
-        let bind = Bind {
-            agent: BindAgent::Any,
+    fn a_saved_agent_matches_the_same_folder_written_differently() {
+        let saved = SavedAgent {
+            agent: AgentFilter::Any,
             folder: PathBuf::from(r"C:\Dev\Thing\"),
+            lane: 0,
         };
-        assert!(bind.matches(crate::agents::Agent::Codex, Some(Path::new("c:/dev/thing"))));
-        assert!(!bind.matches(crate::agents::Agent::Codex, Some(Path::new("c:/dev/other"))));
-        assert!(!bind.matches(crate::agents::Agent::Codex, None));
+        assert!(saved.matches(crate::agents::Agent::Codex, Some(Path::new("c:/dev/thing"))));
+        assert!(!saved.matches(crate::agents::Agent::Codex, Some(Path::new("c:/dev/other"))));
+        assert!(!saved.matches(crate::agents::Agent::Codex, None));
+
+        let mut settings = Settings::default();
+        settings.saved.push(saved);
+        assert_eq!(
+            settings.saved_matching(
+                Some(crate::agents::Agent::Claude),
+                Some(Path::new("c:/dev/thing"))
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            settings.saved_matching(None, Some(Path::new("c:/dev/thing"))),
+            None
+        );
+        assert!(settings.prefers(0));
+        assert!(!settings.prefers(1));
     }
 }

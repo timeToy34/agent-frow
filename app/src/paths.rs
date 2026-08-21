@@ -49,7 +49,7 @@ pub fn last_seen_file() -> Option<PathBuf> {
     Some(root()?.join("last-seen.json"))
 }
 
-/// Lane names, colours, bindings and the lane count.
+/// Lane names, colours, saved agents, the lane count — the window's settings.
 ///
 /// Beside the installed executables rather than in the profile directory: it is
 /// this application's own configuration, and it should go wherever removing

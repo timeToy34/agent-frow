@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use crate::agents::Agent;
 use crate::event::{Ancestor, Event, Kind, Parsed};
-use crate::settings::Settings;
+use crate::settings::{SavedAgent, Settings};
 use crate::state::{self, Note, State, Step};
 
 /// How long a Done or Connected session stays lit after its last event before
@@ -229,8 +229,9 @@ impl Tracker {
                 let first_cwd = session.cwd.is_none();
                 session.cwd.clone_from(&event.cwd);
                 // A session adopted from a subagent's event started without a
-                // cwd, so it could not prove a bind match and may be waiting
-                // off the keyboard. Now it can: give assignment another look.
+                // cwd, so it could not be recognised as a saved agent and may
+                // be waiting off the keyboard. Now it can: give assignment
+                // another look.
                 if first_cwd && session.lane.is_none() {
                     learned_cwd = true;
                 }
@@ -392,22 +393,30 @@ impl Tracker {
         (session.ancestors.clone(), names)
     }
 
-    /// Swaps two lanes: name, colour, binding, and whatever session is on
-    /// each. The one sanctioned exception to "a live lane is never reordered"
-    /// — the user did it, deliberately, so everything travels together and the
-    /// lane they picked up is the lane that lands.
+    /// Swaps two lanes: name, colour, the saved agents that prefer each, and
+    /// whatever session is on each. The one sanctioned exception to "a live
+    /// lane is never reordered" — the user did it, deliberately, so everything
+    /// travels together and the lane they picked up is the lane that lands.
     pub fn move_lane(&mut self, from: usize, to: usize) {
         let count = self.settings.lane_count;
         if from >= count || to >= count || from == to {
             return;
         }
         self.settings.lanes.swap(from, to);
+        let swapped = |lane: usize| {
+            if lane == from {
+                to
+            } else if lane == to {
+                from
+            } else {
+                lane
+            }
+        };
+        for entry in &mut self.settings.saved {
+            entry.lane = swapped(entry.lane);
+        }
         for session in &mut self.sessions {
-            session.lane = match session.lane {
-                Some(lane) if lane == from => Some(to),
-                Some(lane) if lane == to => Some(from),
-                other => other,
-            };
+            session.lane = session.lane.map(swapped);
         }
     }
 
@@ -484,10 +493,21 @@ impl Tracker {
         self.fill_lanes();
     }
 
-    /// Re-runs assignment after a binding changed, without moving anybody who
-    /// already has a lane.
-    pub fn rebind(&mut self) {
+    /// Re-runs assignment after the saved roster changed, without moving
+    /// anybody who already has a lane.
+    pub fn reseat(&mut self) {
         self.fill_lanes();
+    }
+
+    /// Whether any session we can see is this saved agent. The roster in the
+    /// window lists only the ones that are not — a running one is shown where
+    /// it runs.
+    pub fn running(&self, saved: &SavedAgent) -> bool {
+        self.sessions.iter().any(|session| {
+            session
+                .agent
+                .is_some_and(|agent| saved.matches(agent, session.cwd.as_deref()))
+        })
     }
 }
 
@@ -522,46 +542,42 @@ fn roster(session: &mut Session, event: &Event) {
 
 /// Which lane a session should take.
 ///
-/// A binding wins if its lane is free. Otherwise the first free lane of any
-/// kind — including a bound one, because a bound lane standing empty while its
-/// session is invisible in the overflow list is worse than a lane being used by
-/// the wrong project for a while.
+/// A saved agent's preferred lane, if it is free. Otherwise the first free
+/// lane, whoever might have preferred it — a preference is not a reservation,
+/// and landing elsewhere never rewrites it; `settings` is read-only here so
+/// that cannot happen by accident.
+///
+/// The one refinement: a session whose working directory is not known yet
+/// cannot be recognised as anybody's save. Hooks post concurrently, and a
+/// session adopted from a *subagent's* event deliberately carries no cwd —
+/// handing it a lane somebody else prefers is how two agents once came up
+/// reversed after an app restart, summoning each other's windows. So while its
+/// cwd is unknown it takes a lane nobody prefers when there is one, and any
+/// free lane when there is not.
 ///
 /// Nothing here can take a lane away from a session that already holds one.
 /// Lane position is identity: a display you glance at teaches you nothing if
 /// lane 2 moves while you are looking at it.
 fn claim(settings: &Settings, taken: &[usize], session: &Session) -> Option<usize> {
-    let free = |index: usize| !taken.contains(&index);
-    let lanes = || settings.lanes.iter().enumerate().take(settings.lane_count);
+    let count = settings.lane_count;
+    let free = |index: usize| index < count && !taken.contains(&index);
 
     if let Some(agent) = session.agent {
         let cwd: Option<&Path> = session.cwd.as_deref();
-        if let Some((index, _)) = lanes().find(|(index, lane)| {
-            free(*index)
-                && lane
-                    .bind
-                    .as_ref()
-                    .is_some_and(|bind| bind.matches(agent, cwd))
-        }) {
-            return Some(index);
+        if let Some(entry) = settings
+            .saved
+            .iter()
+            .find(|entry| free(entry.lane) && entry.matches(agent, cwd))
+        {
+            return Some(entry.lane);
         }
     }
-    // No match, so first the lanes nobody has claims on.
-    if let Some((index, _)) = lanes().find(|(index, lane)| free(*index) && lane.bind.is_none()) {
+    if session.cwd.is_none()
+        && let Some(index) = (0..count).find(|index| free(*index) && !settings.prefers(*index))
+    {
         return Some(index);
     }
-    // Borrowing a bound lane is deliberate policy under scarcity — a bound
-    // lane standing empty while its session waits off the keyboard is worse
-    // than a lane used by the wrong project for a while. But only a session
-    // whose working directory is known may borrow: hooks post concurrently,
-    // and one adopted from a subagent's event carries no cwd yet — granting
-    // it someone's reserved lane is how two agents once came up reversed
-    // after an app restart, summoning each other's windows. It waits off the
-    // keyboard instead; the moment its cwd arrives, assignment reruns.
-    if session.cwd.is_some() {
-        return lanes().map(|(index, _)| index).find(|index| free(*index));
-    }
-    None
+    (0..count).find(|index| free(*index))
 }
 
 /// "3s", "1m 20s", "2h 5m" — how long a lane has been in its state.

@@ -1,9 +1,10 @@
 //! The tray icon and the window.
 //!
-//! Two panels. **Lanes** is the product: what each agent is doing right now,
-//! where it is doing it, and for how long. **Agents** is the setup that makes
-//! the first one possible — which agents this machine has, and whether our hook
-//! is registered with them.
+//! **Lanes** is the product: what each agent is doing right now, where it is
+//! doing it, and for how long — on the keyboard, off it, and the saved agents
+//! that are not running. **Settings** folds away underneath it: the keyboard,
+//! and which agents this machine has and whether our hook is registered with
+//! them.
 //!
 //! Closing the window hides it to the tray; the ingress keeps running either
 //! way, so a lane that changes while the window is closed is correct the moment
@@ -20,7 +21,7 @@ use tray_icon::{TrayIcon, TrayIconBuilder, TrayIconEvent};
 use crate::agents::{self, Found};
 use crate::install;
 use crate::lastseen;
-use crate::settings::{self, Bind, BindAgent, LANE_COUNTS, Rgb};
+use crate::settings::{self, AgentFilter, LANE_COUNTS, Rgb, SavedAgent};
 use crate::state::State;
 use crate::tracker::{self, Tracker};
 
@@ -264,11 +265,10 @@ impl eframe::App for App {
                         ui.add_space(10.0);
                         ui.separator();
                         ui.add_space(6.0);
-                        settings_changed |= keyboard_panel(ui, &mut tracker);
-                        ui.add_space(10.0);
-                        ui.separator();
-                        ui.add_space(6.0);
-                        action = agents_panel(ui, rows, &tracker, now, card_height, &mut rescan);
+                        let (changed, clicked) =
+                            settings_section(ui, rows, &mut tracker, now, card_height, &mut rescan);
+                        settings_changed |= changed;
+                        action = clicked;
                     });
             });
         }
@@ -484,9 +484,6 @@ fn lanes_panel(
         tracker.move_lane(from, to);
         changed = true;
     }
-    if actions.rebind {
-        tracker.rebind();
-    }
 
     // Off the keyboard: sessions that arrived after every lane was taken.
     // Full cards, because an agent without a key is still an agent — tracked,
@@ -497,21 +494,18 @@ fn lanes_panel(
     let every_lane_taken = views.iter().all(Option::is_some);
     if !overflow.is_empty() || every_lane_taken {
         ui.add_space(6.0);
-        ui.label(
-            egui::RichText::new(
-                "Off the keyboard — fully tracked, no key or light. Nothing here takes a \
-                 lane away from a session that already has one; the ⏶ you press is the \
-                 exception.",
-            )
-            .small()
-            .weak(),
+        group_label(
+            ui,
+            "Off the keyboard",
+            "fully tracked, no key or light. Nothing here takes a lane away from a \
+             session that already has one; the ⏶ you press is the exception.",
         );
         ui.add_space(2.0);
     }
     let mut off = OverflowActions::default();
     for view in &overflow {
         ui.push_id(("off-keyboard", &view.source, &view.session_id), |ui| {
-            overflow_card(ui, view, now, &mut off);
+            overflow_card(ui, view, now, &tracker.settings, &mut off);
         });
         ui.add_space(4.0);
     }
@@ -528,6 +522,41 @@ fn lanes_panel(
         tracker.dismiss_session(&source, &id);
     }
 
+    // Saved agents that are not running. A running one is shown where it
+    // runs, tagged; this is the rest of the roster — what would come back,
+    // and where it would rather land — and where a save is edited or dropped.
+    let idle: Vec<usize> = (0..tracker.settings.saved.len())
+        .filter(|index| !tracker.running(&tracker.settings.saved[*index]))
+        .collect();
+    if !idle.is_empty() {
+        ui.add_space(6.0);
+        group_label(
+            ui,
+            "Saved agents",
+            "remembered from a lane, not running now. Each takes its preferred lane \
+             when it starts, if the lane is free; otherwise another lane.",
+        );
+        ui.add_space(2.0);
+        for index in idle {
+            ui.push_id(("saved", index), |ui| {
+                changed |= saved_card(ui, index, &mut tracker.settings, &mut actions);
+            });
+            ui.add_space(4.0);
+        }
+    }
+    // After every card has drawn: a roster index is only stable until
+    // something is removed.
+    if let Some(index) = actions.forget
+        && index < tracker.settings.saved.len()
+    {
+        tracker.settings.saved.remove(index);
+        changed = true;
+        actions.reseat = true;
+    }
+    if actions.reseat {
+        tracker.reseat();
+    }
+
     footnotes(ui, tracker);
     changed
 }
@@ -537,7 +566,10 @@ fn lanes_panel(
 /// fistful of out-parameters.
 #[derive(Default)]
 struct LaneActions {
-    rebind: bool,
+    /// The saved roster changed; assignment gets another look.
+    reseat: bool,
+    /// Drop this roster entry, by index — applied once every card has drawn.
+    forget: Option<usize>,
     focus: Option<usize>,
     moved: Option<(usize, usize)>,
     dismiss: Option<usize>,
@@ -616,7 +648,7 @@ fn lane_card(
                     }
                     // Moving a lane is the user's call — the app itself never
                     // reorders one. Everything travels together: session, name,
-                    // colour, binding, keys.
+                    // colour, saved preference, keys.
                     if ui
                         .add_enabled(
                             index + 1 < config.lane_count,
@@ -655,11 +687,19 @@ fn lane_card(
                             }
                         }
                         None => {
-                            ui.label(
-                                egui::RichText::new("empty — the next free agent lands here")
-                                    .weak()
-                                    .small(),
-                            );
+                            // Information, not a reservation: whoever comes
+                            // next lands here, saved or not.
+                            let preferred: Vec<String> =
+                                config.preferring(index).map(SavedAgent::project).collect();
+                            let text = if preferred.is_empty() {
+                                "empty — the next free agent lands here".to_owned()
+                            } else {
+                                format!(
+                                    "empty — the next free agent lands here · preferred by {}",
+                                    preferred.join(", ")
+                                )
+                            };
+                            ui.label(egui::RichText::new(text).weak().small());
                         }
                     }
                 });
@@ -684,9 +724,9 @@ fn lane_card(
                 if let Some(cwd) = &view.cwd {
                     identity.on_hover_text(cwd.display().to_string());
                 }
-                // The last thing that happened, and the binding, share a row.
-                // Six lanes each spending a row on a button nobody presses twice
-                // is most of a window.
+                // The last thing that happened, and the save, share a row. Six
+                // lanes each spending a row on a button nobody presses twice is
+                // most of a window.
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(&view.note).small().weak().monospace());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -702,18 +742,7 @@ fn lane_card(
                         {
                             actions.focus = Some(index);
                         }
-                        changed |=
-                            bind_controls(ui, index, Some(view), config, &mut actions.rebind);
-                    });
-                });
-            } else if config.lanes[index].bind.is_some() {
-                // Empty, but reserved. Worth saying: it is why the next session
-                // went somewhere else. Laid out right-to-left like the row
-                // above, or the same widgets come out in the opposite order and
-                // the line reads backwards.
-                ui.horizontal(|ui| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        changed |= bind_controls(ui, index, None, config, &mut actions.rebind);
+                        changed |= save_controls(ui, index, view, config, actions);
                     });
                 });
             }
@@ -722,65 +751,169 @@ fn lane_card(
     changed
 }
 
-/// "This lane is that project" — as widgets, in whatever layout the caller is
-/// already in, so it can sit at the end of the line above rather than on one of
+/// "Remember this agent here" — as widgets, in whatever layout the caller is
+/// already in, so it can sit at the end of the note row rather than on one of
 /// its own. In a right-to-left layout the first widget added is the rightmost,
 /// which is why these read backwards.
-fn bind_controls(
+fn save_controls(
     ui: &mut egui::Ui,
     index: usize,
-    view: Option<&LaneView>,
+    view: &LaneView,
     config: &mut settings::Settings,
-    rebind: &mut bool,
+    actions: &mut LaneActions,
 ) -> bool {
     let mut changed = false;
-    match &config.lanes[index].bind {
-        Some(bind) => {
-            let folder = bind.folder.display().to_string();
-            if ui.small_button("Unbind").clicked() {
-                config.lanes[index].bind = None;
-                *rebind = true;
-                return true;
-            }
-            let mut agent = bind.agent;
-            egui::ComboBox::from_id_salt(("bind-agent", index))
-                .width(96.0)
-                .selected_text(egui::RichText::new(agent.label()).small())
-                .show_ui(ui, |ui| {
-                    for option in [BindAgent::Any, BindAgent::Claude, BindAgent::Codex] {
-                        ui.selectable_value(&mut agent, option, option.label());
-                    }
-                });
-            if agent != bind.agent
-                && let Some(bind) = &mut config.lanes[index].bind
+    match config.saved_matching(view.agent, view.cwd.as_deref()) {
+        Some(saved) => {
+            if ui
+                .small_button("Forget")
+                .on_hover_text(
+                    "Drop this agent from the saved roster. Nothing moves; it just stops \
+                     coming back to a lane on purpose.",
+                )
+                .clicked()
             {
-                bind.agent = agent;
-                changed = true;
-                *rebind = true;
+                actions.forget = Some(saved);
+                return false;
             }
-            // A `\\wsl.localhost\...` path is long enough to push everything
-            // else off the row, so it gives way rather than the controls.
-            ui.add(egui::Label::new(egui::RichText::new(folder).small().monospace()).truncate())
-                .on_hover_text("this lane is reserved for this project");
-            ui.label(egui::RichText::new("bound to").small().weak());
+            if saved_pickers(ui, ("lane-saved", index), saved, config, Some(index)) {
+                changed = true;
+                actions.reseat = true;
+            }
+            ui.label(egui::RichText::new("saved").small().weak());
         }
         None => {
-            if let Some(cwd) = view.and_then(|view| view.cwd.clone())
+            // Only a session we could recognise again is worth remembering:
+            // one with a known agent and a known folder.
+            if let (Some(cwd), Some(_)) = (&view.cwd, view.agent)
                 && ui
-                    .small_button("Bind to this project")
-                    .on_hover_text("This project comes back to this lane whenever it is free.")
+                    .small_button("Save")
+                    .on_hover_text(
+                        "Remember this agent and project. It comes back to this lane \
+                         whenever the lane is free; otherwise it takes another lane, or \
+                         waits off the keyboard.",
+                    )
                     .clicked()
             {
-                config.lanes[index].bind = Some(Bind {
-                    agent: BindAgent::Any,
-                    folder: cwd,
+                config.remember(SavedAgent {
+                    agent: AgentFilter::Any,
+                    folder: cwd.clone(),
+                    lane: index,
                 });
                 changed = true;
-                *rebind = true;
+                actions.reseat = true;
             }
         }
     }
     changed
+}
+
+/// The two things about a saved agent the user can change: which agent it
+/// accepts, and which lane it would rather have. Added agent first, so in a
+/// right-to-left row the lane reads first. `here` is the lane the session is
+/// on when drawn on a lane card, so a preference that did not come true can
+/// say why.
+fn saved_pickers(
+    ui: &mut egui::Ui,
+    salt: (&str, usize),
+    saved: usize,
+    config: &mut settings::Settings,
+    here: Option<usize>,
+) -> bool {
+    let (was_agent, was_lane) = (config.saved[saved].agent, config.saved[saved].lane);
+    let count = config.lane_count;
+
+    let mut agent = was_agent;
+    egui::ComboBox::from_id_salt((salt, "agent"))
+        .width(96.0)
+        .selected_text(egui::RichText::new(agent.label()).small())
+        .show_ui(ui, |ui| {
+            for option in AgentFilter::ALL {
+                ui.selectable_value(&mut agent, option, option.label());
+            }
+        });
+
+    let mut lane = was_lane;
+    let text = if lane < count {
+        format!("prefers lane {}", lane + 1)
+    } else {
+        format!("prefers lane {} (hidden)", lane + 1)
+    };
+    let picker = egui::ComboBox::from_id_salt((salt, "lane"))
+        .width(124.0)
+        .selected_text(egui::RichText::new(text).small())
+        .show_ui(ui, |ui| {
+            for option in 0..count {
+                ui.selectable_value(&mut lane, option, format!("lane {}", option + 1));
+            }
+        });
+    if let Some(here) = here
+        && here != was_lane
+    {
+        picker.response.on_hover_text(format!(
+            "Lane {} was taken when this agent started. It stays here — nothing moves a \
+             session that has a lane.",
+            was_lane + 1
+        ));
+    }
+
+    if agent != was_agent || lane != was_lane {
+        let entry = &mut config.saved[saved];
+        entry.agent = agent;
+        entry.lane = lane;
+        return true;
+    }
+    false
+}
+
+/// One saved agent that is not running: what would come back, and where it
+/// would rather land. Drawn like the empty off-keyboard slot — an outline, no
+/// state — because there is no state: nothing is happening.
+fn saved_card(
+    ui: &mut egui::Ui,
+    index: usize,
+    config: &mut settings::Settings,
+    actions: &mut LaneActions,
+) -> bool {
+    let mut changed = false;
+    let project = config.saved[index].project();
+    let folder = config.saved[index].folder.display().to_string();
+    egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(8, 6))
+        .corner_radius(6.0)
+        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("saved").small().weak());
+                ui.label(egui::RichText::new(project).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .small_button("Forget")
+                        .on_hover_text("Drop this agent from the saved roster.")
+                        .clicked()
+                    {
+                        actions.forget = Some(index);
+                    }
+                    if saved_pickers(ui, ("roster", index), index, config, None) {
+                        changed = true;
+                        actions.reseat = true;
+                    }
+                });
+            });
+            // A `\\wsl.localhost\...` path is long enough to push everything
+            // else off a row, so it gets a row of its own and gives way.
+            ui.add(egui::Label::new(egui::RichText::new(folder).small().monospace()).truncate());
+        });
+    changed
+}
+
+/// A group under the lane cards: a small title, then what the group is.
+fn group_label(ui: &mut egui::Ui, title: &str, caption: &str) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(egui::RichText::new(title).small().strong());
+        ui.label(egui::RichText::new(format!("— {caption}")).small().weak());
+    });
 }
 
 /// What an off-keyboard card asked for. Sessions there have no lane index, so
@@ -794,7 +927,13 @@ struct OverflowActions {
 
 /// One off-keyboard session: the same card as a lane, minus the colour and the
 /// number — this session has no key, and the tag says so in their place.
-fn overflow_card(ui: &mut egui::Ui, view: &LaneView, now: u64, actions: &mut OverflowActions) {
+fn overflow_card(
+    ui: &mut egui::Ui,
+    view: &LaneView,
+    now: u64,
+    config: &settings::Settings,
+    actions: &mut OverflowActions,
+) {
     let key = || (view.source.clone(), view.session_id.clone());
     let tint = {
         let [r, g, b] = view.state.tint();
@@ -873,6 +1012,18 @@ fn overflow_card(ui: &mut egui::Ui, view: &LaneView, now: u64, actions: &mut Ove
                         .clicked()
                     {
                         actions.focus = Some(key());
+                    }
+                    // A saved agent that did not get a lane is still a saved
+                    // agent; say so, and say where it would rather be.
+                    if let Some(saved) = config.saved_matching(view.agent, view.cwd.as_deref()) {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "saved · prefers lane {}",
+                                config.saved[saved].lane + 1
+                            ))
+                            .small()
+                            .weak(),
+                        );
                     }
                 });
             });
@@ -970,6 +1121,101 @@ fn footnotes(ui: &mut egui::Ui, tracker: &Tracker) {
     }
 }
 
+/// Keyboard and Agents under one fold. Lanes is what the window is for; the
+/// setup sits beneath it and opens when wanted. Folded, the header still says
+/// the two things that matter from across the room: whether the keyboard is
+/// there, and whether every agent's hook is in place. Returns whether the
+/// settings changed, and which agent card's install/remove button was pressed.
+fn settings_section(
+    ui: &mut egui::Ui,
+    rows: &[Row],
+    tracker: &mut Tracker,
+    now: u64,
+    card_height: &mut f32,
+    rescan: &mut bool,
+) -> (bool, Option<(usize, bool)>) {
+    let mut changed = false;
+    let mut action = None;
+    let id = ui.make_persistent_id("settings-fold");
+    let state = egui::collapsing_header::CollapsingState::load_with_default_open(
+        ui.ctx(),
+        id,
+        tracker.settings.settings_open,
+    );
+    let mut toggled = false;
+    let mut header = state.show_header(ui, |ui| {
+        // The word is as much of a handle as the arrow.
+        if ui
+            .add(
+                egui::Label::new(egui::RichText::new("Settings").heading())
+                    .sense(egui::Sense::click()),
+            )
+            .clicked()
+        {
+            toggled = true;
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            settings_summary(ui, rows, &tracker.keyboard);
+        });
+    });
+    if toggled {
+        header.toggle();
+    }
+    header.body_unindented(|ui| {
+        ui.add_space(4.0);
+        changed |= keyboard_panel(ui, tracker);
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(6.0);
+        action = agents_panel(ui, rows, tracker, now, card_height, rescan);
+    });
+    // Remembered with the rest of the settings, so the window opens the way
+    // it was left.
+    let open = egui::collapsing_header::CollapsingState::load(ui.ctx(), id)
+        .is_some_and(|state| state.is_open());
+    if open != tracker.settings.settings_open {
+        tracker.settings.settings_open = open;
+        changed = true;
+    }
+    (changed, action)
+}
+
+/// What the folded Settings header says. Right-to-left: added last, read
+/// first.
+fn settings_summary(ui: &mut egui::Ui, rows: &[Row], keyboard: &tracker::KeyboardStatus) {
+    let incomplete: Vec<String> = rows
+        .iter()
+        .filter(|row| !row.missing.is_empty() || !row.stale.is_empty())
+        .map(|row| row.found.flavor.describe())
+        .collect();
+    if incomplete.is_empty() {
+        ui.label(
+            egui::RichText::new(format!(
+                "{} agent{}",
+                rows.len(),
+                if rows.len() == 1 { "" } else { "s" }
+            ))
+            .small()
+            .weak(),
+        );
+    } else {
+        ui.label(
+            egui::RichText::new(format!("hooks to install: {}", incomplete.join(", ")))
+                .small()
+                .color(egui::Color32::from_rgb(230, 180, 60)),
+        );
+    }
+    ui.label(egui::RichText::new("·").small().weak());
+    let (colour, text) = if keyboard.connected {
+        (egui::Color32::from_rgb(80, 200, 120), "keyboard connected")
+    } else if keyboard.detail.is_empty() {
+        (egui::Color32::GRAY, "looking for a keyboard…")
+    } else {
+        (egui::Color32::from_rgb(230, 180, 60), "no keyboard")
+    };
+    ui.label(egui::RichText::new(text).small().color(colour));
+}
+
 /// The keyboard: whether it is there, how bright, and what each state looks
 /// like. Returns whether anything about the settings changed.
 fn keyboard_panel(ui: &mut egui::Ui, tracker: &mut Tracker) -> bool {
@@ -977,7 +1223,7 @@ fn keyboard_panel(ui: &mut egui::Ui, tracker: &mut Tracker) -> bool {
     let status = tracker.keyboard.clone();
 
     ui.horizontal(|ui| {
-        ui.heading("Keyboard");
+        ui.strong("Keyboard");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let mut brightness = tracker.settings.brightness;
             if ui
@@ -1131,7 +1377,7 @@ fn agents_panel(
     rescan: &mut bool,
 ) -> Option<(usize, bool)> {
     ui.horizontal(|ui| {
-        ui.heading("Agents");
+        ui.strong("Agents");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button("Rescan").clicked() {
                 *rescan = true;
