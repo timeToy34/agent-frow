@@ -53,16 +53,11 @@ pub struct App {
     card_height: f32,
     /// Kept alive for the life of the app: dropping it removes the icon.
     tray: Option<TrayIcon>,
-    /// The window's Win32 handle, published for the tray thread: reopening a
-    /// tray-hidden window cannot go through the UI loop — restore and
-    /// foreground need to come from real input on the tray's own thread —
-    /// and the hide/reveal style flips need the raw handle too.
+    /// The window's Win32 handle, published for the tray thread: bringing a
+    /// hidden window to the front needs `SetForegroundWindow` called with the
+    /// user's click as the permission, on the thread that received it.
     hwnd: Arc<AtomicIsize>,
     quitting: bool,
-    /// Whether the taskbar button is currently removed. Minimized IS "in the
-    /// tray": one state check in `update` keeps the button in lockstep with
-    /// the window, whichever way it was minimized or brought back.
-    tray_tabless: bool,
     /// Whether the Run-key startup entry exists. Read once and kept, so the
     /// registry is not asked twice a second for something only a click changes.
     autostart: bool,
@@ -85,7 +80,6 @@ impl App {
             tray: None,
             hwnd: Arc::new(AtomicIsize::new(0)),
             quitting: false,
-            tray_tabless: false,
             autostart: crate::autostart::enabled(),
         }
     }
@@ -170,34 +164,26 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    /// Runs before every `ui`, and — while the window is hidden in the tray —
+    /// only when something asks for a repaint. Nothing in here draws, and
+    /// nothing in here asks for a repaint: a hidden window must go quiet.
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.ensure_tray(ctx);
         self.publish_hwnd(frame);
 
         // Closing hides to the tray. Quit is deliberately only on the tray menu,
         // so the app cannot be shut down by the reflex of closing a window.
+        // Hidden is SW_HIDE: no taskbar button, no Alt-Tab entry, and eframe
+        // runs no UI pass for a hidden window, so the loop sleeps until the
+        // tray asks for it back. Minimize is left alone — that is a taskbar
+        // thing, not a tray thing.
         if ctx.input(|i| i.viewport().close_requested()) && !self.quitting {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            // Never SW_HIDE: Windows delivers no WM_PAINT to a hidden window,
-            // and eframe's scheduler then spins the event loop in Poll forever
-            // waiting for a paint that cannot come — a full core burned doing
-            // nothing (measured: ~5% total CPU in the tray, ~0.1% open).
-            // Minimizing keeps WS_VISIBLE, so paints keep pacing the loop.
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
-        // Minimized IS "in the tray": whichever control got it there — the X
-        // above or the title bar's own minimize — the taskbar button comes
-        // off, and only once the minimize has actually landed: deleting the
-        // tab first is a race the shell wins by re-adding it with the
-        // minimize. Brought back by any route (tray click, Alt-Tab), the
-        // button returns the same frame. ITaskbarList, never a style flip —
-        // winit reapplies its cached styles and hands back a broken frame.
-        let minimized = ctx.input(|i| i.viewport().minimized) == Some(true);
-        if minimized != self.tray_tabless {
-            taskbar_tab(&self.hwnd, !minimized);
-            self.tray_tabless = minimized;
-        }
+    }
 
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let now = crate::now_ms();
         let mut rescan = false;
         let mut action: Option<(usize, bool)> = None;
@@ -220,31 +206,12 @@ impl eframe::App for App {
             let autostart = &mut self.autostart;
             let autostart_error = &mut autostart_error;
 
-            egui::CentralPanel::default().show(ctx, |ui| {
-                // One scroll area for the whole window. Two of them nested was
-                // also what left the right-hand column of agent cards clipped:
-                // the width was measured outside the scroll area and then used
-                // inside it, where the scrollbar had already taken some.
-                egui::ScrollArea::vertical()
-                    .id_salt("window")
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        settings_changed = lanes_panel(ui, &mut tracker, now, &mut focus);
-                        ui.add_space(10.0);
-                        ui.separator();
-                        ui.add_space(6.0);
-                        settings_changed |= keyboard_panel(ui, &mut tracker);
-                        ui.add_space(10.0);
-                        ui.separator();
-                        ui.add_space(6.0);
-                        action = agents_panel(ui, rows, &tracker, now, card_height, &mut rescan);
-                    });
-            });
-
             // A bar rather than a line at the end of the page. What the last
             // action did — an install, or which window a Focus actually
             // raised — is the one thing that must never be below the fold.
-            egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+            // Built before the page it sits under: panels first, the central
+            // area takes what is left.
+            egui::Panel::bottom("status").show(ui, |ui| {
                 ui.add_space(2.0);
                 if let Some(summon) = &tracker.summon {
                     ui.label(summon.clone());
@@ -283,6 +250,27 @@ impl eframe::App for App {
                 });
                 ui.add_space(2.0);
             });
+
+            egui::CentralPanel::default().show(ui, |ui| {
+                // One scroll area for the whole window. Two of them nested was
+                // also what left the right-hand column of agent cards clipped:
+                // the width was measured outside the scroll area and then used
+                // inside it, where the scrollbar had already taken some.
+                egui::ScrollArea::vertical()
+                    .id_salt("window")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        settings_changed = lanes_panel(ui, &mut tracker, now, &mut focus);
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.add_space(6.0);
+                        settings_changed |= keyboard_panel(ui, &mut tracker);
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.add_space(6.0);
+                        action = agents_panel(ui, rows, &tracker, now, card_height, &mut rescan);
+                    });
+            });
         }
 
         // On its own thread, deliberately. Two reasons, and both were learned
@@ -297,7 +285,7 @@ impl eframe::App for App {
                 FocusRequest::Lane(lane) => tracker.summon_target(*lane),
                 FocusRequest::Session(source, id) => tracker.summon_session(source, id),
             });
-            let ctx = ctx.clone();
+            let ctx = ui.ctx().clone();
             std::thread::spawn(move || {
                 let report = match target {
                     Some(Ok((ancestors, names))) => crate::focus::raise(&ancestors, &names).detail,
@@ -326,8 +314,18 @@ impl eframe::App for App {
         }
 
         // Cheap, and it keeps every elapsed time and the eviction sweep honest
-        // without any plumbing between the ingress thread and the window.
-        ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        // without any plumbing between the ingress thread and the window. Only
+        // from here, never from `logic`, and never for a hidden window: this
+        // is the one thing that paces the loop. egui cannot tell a hidden
+        // window from a shown one on Windows — it knows minimized and
+        // occluded, and Windows reports neither for SW_HIDE — so left alone
+        // it would keep running this whole pass, twice a second, into a
+        // window nobody can see. Windows is asked directly, not a flag of our
+        // own: a flag can be wrong, `IsWindowVisible` cannot.
+        if self.window_shown() {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(500));
+        }
     }
 }
 
@@ -1303,6 +1301,24 @@ fn agent_card(
 }
 
 impl App {
+    /// Whether the window is on screen at all, straight from Windows.
+    /// `true` until the handle is known, and always off Windows.
+    fn window_shown(&self) -> bool {
+        #[cfg(windows)]
+        {
+            let raw = self.hwnd.load(Ordering::Relaxed);
+            if raw != 0 {
+                #[link(name = "user32")]
+                unsafe extern "system" {
+                    fn IsWindowVisible(hwnd: isize) -> i32;
+                }
+                // SAFETY: a plain user32 query; a stale handle answers 0.
+                return unsafe { IsWindowVisible(raw) } != 0;
+            }
+        }
+        true
+    }
+
     /// Publishes the window's Win32 handle for the tray thread, once known.
     fn publish_hwnd(&self, frame: &eframe::Frame) {
         if self.hwnd.load(Ordering::Relaxed) != 0 {
@@ -1324,14 +1340,13 @@ impl App {
 
 /// Brings the window back from the tray.
 ///
-/// Straight Win32, from the tray's own thread. The polite route — viewport
-/// commands into the UI loop — is also taken, but only works once the window
-/// is visible again, because a hidden window gets no redraws and a loop that
-/// is not redrawing is not listening.
+/// Straight Win32, from the tray's own thread: Windows grants the foreground
+/// only to the thread that just received the user's input, and that is this
+/// one. The polite route — viewport commands into the UI loop — is taken as
+/// well; it re-syncs winit's idea of visibility, and would on its own bring
+/// the window back (eframe processes a hidden window's commands within
+/// 100 ms), only without the right to put it in front.
 fn reopen(hwnd: &Arc<AtomicIsize>, ctx: &egui::Context) {
-    // The taskbar button is restored by the heal in `App::update` on the
-    // first frame after the restore — one owner, whichever way the window
-    // comes back.
     #[cfg(windows)]
     {
         let raw = hwnd.load(Ordering::Relaxed);
@@ -1341,6 +1356,7 @@ fn reopen(hwnd: &Arc<AtomicIsize>, ctx: &egui::Context) {
                 fn ShowWindow(hwnd: isize, cmd: i32) -> i32;
                 fn SetForegroundWindow(hwnd: isize) -> i32;
             }
+            // Shows a hidden window and un-minimizes a minimized one.
             const SW_RESTORE: i32 = 9;
             // SAFETY: plain user32 calls; a stale handle makes them no-ops.
             unsafe {
@@ -1356,50 +1372,6 @@ fn reopen(hwnd: &Arc<AtomicIsize>, ctx: &egui::Context) {
     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     ctx.request_repaint();
 }
-
-/// Adds or removes the window's taskbar button — the tray's idea of hidden is
-/// "minimized, and not on the taskbar". `ITaskbarList` is the documented API
-/// for exactly this, and unlike a `WS_EX_TOOLWINDOW` style flip it does not
-/// touch the window frame, so winit's cached styles have nothing to fight
-/// (the style flip left the button in place and rebuilt the restored frame
-/// with a toolwindow caption — one lone close button, no minimize/maximize).
-#[cfg(windows)]
-fn taskbar_tab(hwnd: &Arc<AtomicIsize>, show: bool) {
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::System::Com::{
-        CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
-        CoUninitialize,
-    };
-    use windows::Win32::UI::Shell::{ITaskbarList, TaskbarList};
-
-    let raw = hwnd.load(Ordering::Relaxed);
-    if raw == 0 {
-        return;
-    }
-    // SAFETY: COM init/uninit are balanced (S_FALSE still needs the uninit;
-    // RPC_E_CHANGED_MODE means the thread already has an apartment and the
-    // create below works in it). The handle is this window's own.
-    unsafe {
-        let inited = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
-        if let Ok(list) =
-            CoCreateInstance::<_, ITaskbarList>(&TaskbarList, None, CLSCTX_INPROC_SERVER)
-        {
-            let _ = list.HrInit();
-            let window = HWND(raw as *mut core::ffi::c_void);
-            let _ = if show {
-                list.AddTab(window)
-            } else {
-                list.DeleteTab(window)
-            };
-        }
-        if inited {
-            CoUninitialize();
-        }
-    }
-}
-
-#[cfg(not(windows))]
-fn taskbar_tab(_hwnd: &Arc<AtomicIsize>, _show: bool) {}
 
 /// The tray icon: the same four-key cluster as everywhere else, from
 /// [`crate::icon`], so the tray, the window and the executable cannot drift

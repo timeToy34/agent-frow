@@ -109,12 +109,6 @@ cases the documentation is wrong.
   unbound lanes first, bound lanes borrowed only under scarcity, never
   without a proven cwd — and a laneless session re-enters assignment the
   moment its cwd arrives.
-- **Delete the taskbar tab after the minimize lands, not before.** The shell
-  (re-)adds a window's taskbar button as part of minimizing it, so
-  `ITaskbarList::DeleteTab` issued before `Minimized(true)` is undone a frame
-  later. Keying the tab off the observed minimized state — eframe keeps
-  running `update()` while minimized, its "guard" is just a 10 ms nap — makes
-  minimized ⇔ trayed, for the X and the minimize button alike.
 - **Never flip window styles behind winit's back.** Setting
   `WS_EX_TOOLWINDOW` directly to hide the taskbar button did not remove the
   button and left the restored window with a toolwindow caption — one lone
@@ -123,14 +117,26 @@ cases the documentation is wrong.
   touching the frame.
 - **The tray burned a full core doing nothing.** Hiding the window with
   `SW_HIDE` (`ViewportCommand::Visible(false)`) clears `WS_VISIBLE`, Windows
-  then never delivers `WM_PAINT`, and eframe's scheduler — which drops a
-  repaint deadline into `ControlFlow::Poll` and relies on the resulting paint
-  to re-arm `WaitUntil` — spins the event loop forever waiting for a paint
-  that cannot come. Measured: ~5% total CPU hidden, ~0.1% open, with the
-  hidden process's working set trimmed to 5 MB so it looked "small but busy".
-  The fix is to never clear `WS_VISIBLE`: hide to tray = minimize +
-  `WS_EX_TOOLWINDOW` (no taskbar button, no Alt-Tab entry), which keeps
-  paints flowing and the loop paced.
+  then never delivers `WM_PAINT`, and eframe 0.33's scheduler — which dropped
+  every due repaint into `ControlFlow::Poll` and relied on the resulting paint
+  to re-arm `WaitUntil` — spun the event loop forever waiting for a paint that
+  could not come (emilk/egui#7776). Measured: ~5% total CPU hidden, ~0.1%
+  open, with the hidden process's working set trimmed to 5 MB so it looked
+  "small but busy". The first fix was a detour: minimize instead of hide, pull
+  the taskbar button with `ITaskbarList`, heal it in `update()` — a window
+  that was still in Alt-Tab and still drawing twice a second. The real fix was
+  upstream: eframe 0.34 never polls an invisible window (#7905) and runs no UI
+  pass for one (`App::logic` / `App::ui`, #7950). So the tray is
+  `Visible(false)` again and the 500 ms repaint lives only in `ui` — and is
+  only re-armed while `IsWindowVisible` says so. That last part is ours to
+  do: egui's idea of "visible" is "not minimized, not occluded", and Windows
+  reports neither for `SW_HIDE`, so eframe kept running the full UI pass
+  into the hidden window twice a second (UI thread: 185 ms per 30 s hidden
+  against 108 ms per 15 s shown; with the gate, zero cycles in 30 s — the
+  thread never runs). Two consequences: the window no longer sweeps while hidden
+  — the lighting thread is the clock, as the README says, and without the
+  iCUE DLL stale sessions clear on the next reopen — and the title bar's
+  minimize is just a minimize.
 - **"Just unzip and run" silently did nothing** when any instance was already
   running: the app frees its console at the top of `run()`, and the port bind
   — which is also the single-instance lock — failed *after* that, printing

@@ -21,7 +21,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # The window. `glow` rather than the default `wgpu`: one less graphics stack to
 # be surprised by on someone else's machine, and nothing here draws anything a
 # 2005 GPU would struggle with.
-eframe = { version = "0.33", default-features = false, features = ["glow", "default_fonts"] }
+eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts"] }
 # The tray. Same crate Tauri itself uses for this, without the rest of Tauri.
 tray-icon = { version = "0.24", default-features = false }
 
