@@ -630,7 +630,13 @@ fn run(dialog_on_busy: bool, notice: Option<String>) -> Result<(), String> {
     eframe::run_native(
         "Agent F-Row",
         options,
-        Box::new(move |_cc| {
+        Box::new(move |cc| {
+            // A scroll bar that takes its own gutter. egui's default floats
+            // over the content, which puts it on top of whatever is
+            // right-aligned — every panel here ends its rows with buttons.
+            cc.egui_ctx.all_styles_mut(|style| {
+                style.spacing.scroll = eframe::egui::style::ScrollStyle::solid();
+            });
             Ok(Box::new(ui::App::new(
                 tracker,
                 install_dir,
