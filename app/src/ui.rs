@@ -1137,31 +1137,34 @@ fn settings_section(
     let mut changed = false;
     let mut action = None;
     let id = ui.make_persistent_id("settings-fold");
-    let state = egui::collapsing_header::CollapsingState::load_with_default_open(
+    let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
         ui.ctx(),
         id,
         tracker.settings.settings_open,
     );
-    let mut toggled = false;
-    let mut header = state.show_header(ui, |ui| {
-        // The word is as much of a handle as the arrow.
-        if ui
-            .add(
-                egui::Label::new(egui::RichText::new("Settings").heading())
-                    .sense(egui::Sense::click()),
-            )
-            .clicked()
-        {
-            toggled = true;
-        }
+    // Drawn by hand rather than with `show_header`, which puts the caret
+    // before the title: this header reads like the Lanes one — the same
+    // heading, the caret right after the word, the summary at the right edge.
+    let mut caret_clicked = false;
+    let row = ui.horizontal(|ui| {
+        ui.heading("Settings");
+        caret_clicked = state
+            .show_toggle_button(ui, egui::collapsing_header::paint_default_icon)
+            .clicked();
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             settings_summary(ui, rows, &tracker.keyboard);
         });
     });
-    if toggled {
-        header.toggle();
+    // The whole row is a handle, not only the caret. Registered after the
+    // row's own widgets so it cannot take the caret's click for itself and
+    // count it twice.
+    let row_clicked = ui
+        .interact(row.response.rect, id.with("row"), egui::Sense::click())
+        .clicked();
+    if caret_clicked || row_clicked {
+        state.toggle(ui);
     }
-    header.body_unindented(|ui| {
+    state.show_body_unindented(ui, |ui| {
         ui.add_space(4.0);
         changed |= keyboard_panel(ui, tracker);
         ui.add_space(10.0);
