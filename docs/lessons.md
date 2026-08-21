@@ -1,13 +1,10 @@
 # Things worth knowing before changing anything
 
-The developer companion to the [README](../README.md): the constraints in this
+The companion to [how-it-works.md](how-it-works.md): the constraints in this
 codebase that were measured against real sessions rather than read from
 documentation — in two cases the documentation is wrong — plus the history of
 how each was learned. Read this before touching the state machine, focus, the
 hook, or the lighting.
-
-These were measured against real sessions, not read from documentation — in two
-cases the documentation is wrong.
 
 - **`PermissionRequest` and `Notification` carry no `tool_use_id`.** Only
   `session_id` and `prompt_id`, which are turn-level while a turn holds dozens
@@ -65,7 +62,7 @@ cases the documentation is wrong.
   against a hash of it. That is why it names `%LOCALAPPDATA%` rather than a build
   directory, and why the token lives in a file rather than in the command.
 
-## Stories behind the README's rules
+## Stories behind the rules
 
 - **"Activity clears Waiting" is the whole design.** The lane that used to
   stick was caused by correlation: the previous application tried to match a
@@ -135,7 +132,7 @@ cases the documentation is wrong.
   into the hidden window twice a second (UI thread: 185 ms per 30 s hidden
   against 108 ms per 15 s shown; with the gate, zero cycles in 30 s — the
   thread never runs). Two consequences: the window no longer sweeps while hidden
-  — the lighting thread is the clock, as the README says, and without the
+  — the lighting thread is the clock, as how-it-works.md says, and without the
   iCUE DLL stale sessions clear on the next reopen — and the title bar's
   minimize is just a minimize.
 - **"Just unzip and run" silently did nothing** when any instance was already
