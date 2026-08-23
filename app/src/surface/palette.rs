@@ -1,8 +1,9 @@
 //! What the twelve keys look like, for one frame.
 //!
-//! Pure arithmetic and no FFI, so it can be read and tested without a keyboard
-//! plugged in. [`super::surface`] does nothing but hand the result across the
-//! SDK boundary.
+//! Pure arithmetic and no device: it names keys by their position on the
+//! F-row, 0 through 11, and never an LED id. Each surface maps a key index to
+//! whatever its keyboard calls that LED and hands the result across its own
+//! boundary — so a second keyboard is a second mapping, not a second palette.
 //!
 //! **The lane's colour is the base for everything**, and a change of colour
 //! only ever means trouble: red is Error, and nothing else on the row is
@@ -11,25 +12,8 @@
 //! brightness and in some motion, which is what lets a glance answer "which
 //! lane" and "how bad" as two separate questions.
 
-use crate::settings::{Rgb, Settings};
+use crate::settings::{KEYS, Rgb, Settings};
 use crate::state::State;
-
-/// The F-row LEDs, `CLK_F1` = 2 through `CLK_F12` = 13, contiguous.
-pub const F_ROW_FIRST_LUID: u32 = 2;
-
-/// How many keys there are. Fixed by the keyboard.
-pub const KEYS: usize = 12;
-
-/// LED id for the nth key of the F-row.
-pub fn luid(key_index: usize) -> u32 {
-    F_ROW_FIRST_LUID + key_index as u32
-}
-
-/// Every LED id we are ever allowed to write, derived from [`luid`] so
-/// "which keys are ours" has exactly one answer.
-pub fn our_led_ids() -> impl Iterator<Item = u32> {
-    (0..KEYS).map(luid)
-}
 
 /// A lane with no session. The one colour that is not a preference: darkness is
 /// how the row says nothing is there.
@@ -179,23 +163,22 @@ pub fn animated(states: &[Option<State>]) -> bool {
         .any(|state| matches!(state, State::Running | State::Waiting))
 }
 
-/// One frame: which LED gets which colour.
+/// One frame: which key gets which colour, by F-row position.
 ///
 /// **Only ever the twelve.** An earlier version of this returned an entry for
 /// every LED the device reported and then overwrote twelve of them, which meant
 /// it explicitly blacked out the whole keyboard and took the rest of it away
-/// from whoever owns it. The SDK sets only the LEDs it is handed and leaves the
-/// others alone, so naming twelve is all it takes to leave every other key to
-/// the user's own profile.
+/// from whoever owns it. Naming twelve keys is all it takes to leave every
+/// other key to the user's own lighting, whichever keyboard renders it.
 ///
-/// `available` is what the device actually reports, so a keyboard without a
-/// full F-row is never handed ids it does not have.
+/// `available` is which of the twelve the device actually has, so a keyboard
+/// without a full F-row is never handed keys it does not have.
 pub fn frame(
     states: &[Option<State>],
     settings: &Settings,
     elapsed_ms: u64,
-    available: &[u32],
-) -> Vec<(u32, Rgb)> {
+    available: &[usize],
+) -> Vec<(usize, Rgb)> {
     let keys = settings.keys_per_lane();
     let brightness = settings.brightness.clamp(0.0, 1.0);
     let mut frame = Vec::with_capacity(KEYS);
@@ -210,9 +193,12 @@ pub fn frame(
             .into_iter()
             .enumerate()
         {
-            let id = luid(lane * keys + offset);
-            if available.contains(&id) {
-                frame.push((id, corrected(scale(color, brightness), settings.color_gain)));
+            let key = lane * keys + offset;
+            if available.contains(&key) {
+                frame.push((
+                    key,
+                    corrected(scale(color, brightness), settings.color_gain),
+                ));
             }
         }
     }
@@ -281,23 +267,20 @@ mod tests {
     fn a_frame_never_names_a_key_that_is_not_ours() {
         // The constraint the whole surface exists under: write the twelve and
         // leave the rest of the keyboard to whoever set it up.
-        let available: Vec<u32> = (0..200).collect();
+        let available: Vec<usize> = (0..200).collect();
         for lanes in [3, 4, 6] {
             let states = vec![Some(State::Running); lanes];
             let frame = frame(&states, &settings(lanes), 0, &available);
             assert_eq!(frame.len(), KEYS, "{lanes} lanes");
-            for (id, _) in frame {
-                assert!(
-                    (F_ROW_FIRST_LUID..F_ROW_FIRST_LUID + KEYS as u32).contains(&id),
-                    "{id} is not one of ours"
-                );
+            for (key, _) in frame {
+                assert!(key < KEYS, "key {key} is not one of ours");
             }
         }
     }
 
     #[test]
-    fn a_keyboard_missing_those_leds_is_never_handed_them() {
-        let available = [2, 3, 4];
+    fn a_keyboard_missing_those_keys_is_never_handed_them() {
+        let available = [0, 1, 2];
         let frame = frame(&[Some(State::Running); 4], &settings(4), 0, &available);
         assert_eq!(frame.len(), 3);
     }
@@ -393,7 +376,7 @@ mod tests {
         bright.brightness = 1.0;
         let mut dim = bright.clone();
         dim.brightness = 0.25;
-        let available: Vec<u32> = our_led_ids().collect();
+        let available: Vec<usize> = (0..KEYS).collect();
         let states = vec![Some(State::Done); 4];
         for ((_, full), (_, low)) in frame(&states, &bright, 0, &available)
             .into_iter()

@@ -135,10 +135,13 @@ impl App {
                     if event.id == show_id {
                         reopen(&hwnd, &ctx);
                     } else if event.id == quit_id {
-                        // Release the registered hotkeys before the immediate
-                        // exit. The rest — settings, lighting, sessions — needs
-                        // nothing, and going through the UI loop would hang
-                        // exactly when the window is hidden.
+                        // Hand the Keychron back and release the registered
+                        // hotkeys before the immediate exit — neither happens
+                        // by itself, since exit does not unwind. The rest —
+                        // settings, sessions, iCUE — needs nothing, and going
+                        // through the UI loop would hang exactly when the
+                        // window is hidden.
+                        crate::surface::keychron::restore_now();
                         crate::keys::unhook_now();
                         std::process::exit(0);
                     }
@@ -1152,7 +1155,7 @@ fn settings_section(
             .show_toggle_button(ui, egui::collapsing_header::paint_default_icon)
             .clicked();
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            settings_summary(ui, rows, &tracker.keyboard);
+            settings_summary(ui, rows, &tracker.keyboards);
         });
     });
     // The whole row is a handle, not only the caret. Registered after the
@@ -1185,7 +1188,7 @@ fn settings_section(
 
 /// What the folded Settings header says. Right-to-left: added last, read
 /// first.
-fn settings_summary(ui: &mut egui::Ui, rows: &[Row], keyboard: &tracker::KeyboardStatus) {
+fn settings_summary(ui: &mut egui::Ui, rows: &[Row], keyboards: &[tracker::KeyboardStatus]) {
     let incomplete: Vec<String> = rows
         .iter()
         .filter(|row| !row.missing.is_empty() || !row.stale.is_empty())
@@ -1209,9 +1212,11 @@ fn settings_summary(ui: &mut egui::Ui, rows: &[Row], keyboard: &tracker::Keyboar
         );
     }
     ui.label(egui::RichText::new("·").small().weak());
-    let (colour, text) = if keyboard.connected {
+    // Any surface driving keys is "connected"; until every surface has
+    // given up it is still "looking".
+    let (colour, text) = if keyboards.iter().any(|status| status.connected) {
         (egui::Color32::from_rgb(80, 200, 120), "keyboard connected")
-    } else if keyboard.detail.is_empty() {
+    } else if keyboards.iter().all(|status| status.detail.is_empty()) {
         (egui::Color32::GRAY, "looking for a keyboard…")
     } else {
         (egui::Color32::from_rgb(230, 180, 60), "no keyboard")
@@ -1223,7 +1228,7 @@ fn settings_summary(ui: &mut egui::Ui, rows: &[Row], keyboard: &tracker::Keyboar
 /// like. Returns whether anything about the settings changed.
 fn keyboard_panel(ui: &mut egui::Ui, tracker: &mut Tracker) -> bool {
     let mut changed = false;
-    let status = tracker.keyboard.clone();
+    let keyboards = tracker.keyboards.clone();
 
     ui.horizontal(|ui| {
         ui.strong("Keyboard");
@@ -1271,15 +1276,30 @@ fn keyboard_panel(ui: &mut egui::Ui, tracker: &mut Tracker) -> bool {
     });
 
     // "Dark" and "broken" look identical from the desk, so this always says
-    // which one it is.
-    let (colour, detail) = if status.connected {
-        (egui::Color32::from_rgb(80, 200, 120), status.detail.clone())
-    } else if status.detail.is_empty() {
-        (egui::Color32::GRAY, "looking for a keyboard…".to_owned())
+    // which one it is. A surface that is driving keys speaks for itself; only
+    // when none is does every surface get to say why not.
+    let connected: Vec<&tracker::KeyboardStatus> =
+        keyboards.iter().filter(|status| status.connected).collect();
+    if connected.is_empty() {
+        if keyboards.is_empty() {
+            ui.colored_label(egui::Color32::GRAY, "looking for a keyboard…");
+        }
+        for status in &keyboards {
+            let (colour, detail) = if status.detail.is_empty() {
+                (egui::Color32::GRAY, format!("{}: looking…", status.surface))
+            } else {
+                (
+                    egui::Color32::from_rgb(230, 180, 60),
+                    format!("{}: {}", status.surface, status.detail),
+                )
+            };
+            ui.colored_label(colour, detail);
+        }
     } else {
-        (egui::Color32::from_rgb(230, 180, 60), status.detail.clone())
-    };
-    ui.colored_label(colour, detail);
+        for status in connected {
+            ui.colored_label(egui::Color32::from_rgb(80, 200, 120), status.detail.clone());
+        }
+    }
 
     ui.add_space(4.0);
     ui.label(
@@ -1306,7 +1326,8 @@ fn keyboard_panel(ui: &mut egui::Ui, tracker: &mut Tracker) -> bool {
         let (received, queued, handled) = crate::keys::stages();
         let line = if received == 0 {
             "Summon: F13–F24 are registered, but none have arrived yet — remap the F-row \
-             to F13–F24 in iCUE, then the leftmost key of each lane summons its agent."
+             to F13–F24 in your keyboard's software (iCUE, or the Keychron Launcher \
+             keymap), then the leftmost key of each lane summons its agent."
                 .to_owned()
         } else {
             // A press was seen and went missing on the way. Naming the stage

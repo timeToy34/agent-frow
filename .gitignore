@@ -16,3 +16,6 @@
 # Development scratch: a screenshot and the script that takes it.
 /window.png
 /shot.ps1
+# The Keychron firmware build: a clone of Keychron's fork and the built image.
+/firmware/keychron-ultra/zmk/
+/firmware/keychron-ultra/out/

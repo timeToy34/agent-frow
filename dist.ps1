@@ -36,9 +36,13 @@ https://github.com/timeToy34/agent-frow
 2. Restart your agents. For Codex, also run /hooks inside it and trust the
    entry, or its hooks will never run.
 
-Keyboard (optional): iCUE with a Corsair board, and the F-row remapped to
-F13-F24 in the DEFAULT profile - a profile switch takes the summon keys with
-it. The app runs fine without any of this; the window shows everything.
+Keyboard (optional), with the F-row remapped to F13-F24:
+- Corsair: iCUE running, the remap in the DEFAULT profile - a profile switch
+  takes the summon keys with it.
+- Keychron Ultra: the remap in the Launcher keymap; light over the cable or
+  the 2.4 GHz receiver, not Bluetooth. Per-key brightness needs Keychron's
+  firmware fix (Keychron/zmk pull request 9).
+The app runs fine without any of this; the window shows everything.
 
 Windows may warn on first run (SmartScreen): the zip is not code-signed.
 

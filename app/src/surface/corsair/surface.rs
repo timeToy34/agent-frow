@@ -1,9 +1,9 @@
-//! The lighting thread: connects to iCUE, paints the F-row from the tracker,
+//! The lighting thread: connects to iCUE, paints the F-row from the scene,
 //! and keeps checking that it is still allowed to.
 //!
-//! All FFI happens on this one thread. It is also the application's clock —
-//! it evicts stale sessions every frame — so lanes stay honest while the
-//! window is hidden in the tray, which is most of the time.
+//! All FFI happens on this one thread. Through [`Scene`] it is also one of the
+//! application's clocks — it evicts stale sessions every frame — so lanes stay
+//! honest while the window is hidden in the tray, which is most of the time.
 
 use std::os::raw::c_char;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -11,9 +11,22 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::ffi::{self, *};
-use super::palette;
-use crate::state::State;
+use crate::settings::KEYS;
+use crate::surface::palette;
+use crate::surface::scene::Scene;
 use crate::tracker::{KeyboardStatus, Tracker};
+
+/// How this surface names itself in the window.
+const SURFACE: &str = "Corsair";
+
+/// The F-row LEDs, `CLK_F1` = 2 through `CLK_F12` = 13, contiguous.
+const F_ROW_FIRST_LUID: u32 = 2;
+
+/// The SDK's id for the nth key of the F-row — the one place the palette's
+/// key index becomes something Corsair-shaped.
+fn luid(key: usize) -> u32 {
+    F_ROW_FIRST_LUID + key as u32
+}
 
 /// ~30 Hz. Fast enough that a 420 ms pulse looks like a pulse rather than a
 /// stutter, slow enough to be free.
@@ -73,15 +86,19 @@ pub fn start(tracker: Arc<Mutex<Tracker>>) -> Surface {
 
 fn report(tracker: &Mutex<Tracker>, status: KeyboardStatus) {
     if let Ok(mut tracker) = tracker.lock() {
-        tracker.keyboard = status;
+        tracker.report_keyboard(status);
     }
+}
+
+fn unavailable(detail: impl Into<String>) -> KeyboardStatus {
+    KeyboardStatus::unavailable(SURFACE, detail.into())
 }
 
 /// A keyboard we are painting.
 struct Device {
     id: [c_char; 128],
-    /// Which of our twelve LEDs this keyboard actually has.
-    available: Vec<u32>,
+    /// Which of our twelve keys this keyboard actually has, by F-row position.
+    available: Vec<usize>,
     model: String,
 }
 
@@ -94,7 +111,7 @@ fn render(tracker: Arc<Mutex<Tracker>>, running: Arc<AtomicBool>) {
             // broken application, so it says which it is.
             report(
                 &tracker,
-                KeyboardStatus::unavailable(format!(
+                unavailable(format!(
                     "{reason}. Install the app so {} sits beside it.",
                     ffi::DLL_NAME
                 )),
@@ -103,24 +120,17 @@ fn render(tracker: Arc<Mutex<Tracker>>, running: Arc<AtomicBool>) {
         }
     };
 
-    let start = Instant::now();
+    let mut scene = Scene::new();
     let mut device: Option<Device> = None;
     let mut next_attempt = Instant::now();
-    // What the keys were last told, so a motionless board is written once,
-    // not thirty times a second. `dirty` forces the first frame after any
-    // (re)connect; the settings clone is kept so it is re-made only when the
-    // settings actually change — it carries every lane-name String.
-    let mut last_states: Vec<Option<State>> = Vec::new();
-    let mut settings_cache: Option<crate::settings::Settings> = None;
-    let mut dirty = true;
 
     while running.load(Ordering::SeqCst) {
-        // The clock. Doing it here rather than only when the window draws is
-        // what keeps a lane from lingering on the keyboard for as long as the
-        // window happens to be closed.
-        if let Ok(mut tracker) = tracker.lock() {
-            tracker.sweep(crate::now_ms());
-        }
+        // The clock, keyboard or no keyboard. Doing it here rather than only
+        // when the window draws is what keeps a lane from lingering on the
+        // keyboard for as long as the window happens to be closed.
+        let Ok(frame) = scene.tick(&tracker, crate::now_ms()) else {
+            break;
+        };
 
         let Some(ready) = &device else {
             if Instant::now() < next_attempt {
@@ -129,12 +139,15 @@ fn render(tracker: Arc<Mutex<Tracker>>, running: Arc<AtomicBool>) {
             }
             match connect(&sdk, &running) {
                 Ok(ready) => {
-                    report(&tracker, KeyboardStatus::connected(&ready));
+                    report(
+                        &tracker,
+                        KeyboardStatus::connected(SURFACE, &ready.model, ready.available.len()),
+                    );
                     device = Some(ready);
-                    dirty = true;
+                    scene.invalidate();
                 }
                 Err(reason) => {
-                    report(&tracker, KeyboardStatus::unavailable(reason));
+                    report(&tracker, unavailable(reason));
                     let _ = sdk.disconnect();
                     next_attempt = Instant::now() + RETRY;
                 }
@@ -147,7 +160,7 @@ fn render(tracker: Arc<Mutex<Tracker>>, running: Arc<AtomicBool>) {
         if SESSION_STATE.load(Ordering::SeqCst) != CSS_CONNECTED {
             report(
                 &tracker,
-                KeyboardStatus::unavailable("iCUE dropped the connection; reconnecting".to_owned()),
+                unavailable("iCUE dropped the connection; reconnecting"),
             );
             let _ = sdk.disconnect();
             device = None;
@@ -155,71 +168,32 @@ fn render(tracker: Arc<Mutex<Tracker>>, running: Arc<AtomicBool>) {
             continue;
         }
 
-        let states = match tracker.lock() {
-            Ok(mut tracker) => {
-                // A preview overrides every lane while it lasts, and this
-                // thread is what retires it — the window may be closed, and a
-                // preview that outlives anyone looking at it should still die.
-                let now = crate::now_ms();
-                if tracker
-                    .preview
-                    .is_some_and(|preview| preview.expires_at <= now)
-                {
-                    tracker.preview = None;
-                }
-                let states = match tracker.preview {
-                    Some(preview) => vec![Some(preview.state); tracker.settings.lane_count],
-                    None => (0..tracker.settings.lane_count)
-                        .map(|lane| {
-                            tracker
-                                .on_lane(lane)
-                                .map(|session| session.effective_state())
-                        })
-                        .collect::<Vec<Option<State>>>(),
-                };
-                if settings_cache
-                    .as_ref()
-                    .is_none_or(|cached| *cached != tracker.settings)
-                {
-                    settings_cache = Some(tracker.settings.clone());
-                    dirty = true;
-                }
-                states
-            }
-            Err(_) => break,
-        };
-        if states != last_states {
-            last_states = states.clone();
-            dirty = true;
-        }
         // A motionless, unchanged board needs no frame. The wake stays at
-        // FRAME so the sweep above keeps being the application's clock.
-        if !dirty && !palette::animated(&states) {
-            std::thread::sleep(FRAME);
-            continue;
-        }
-        let Some(settings) = settings_cache.as_ref() else {
+        // FRAME so the tick above keeps being the application's clock.
+        let Some(frame) = frame else {
             std::thread::sleep(FRAME);
             continue;
         };
 
-        let elapsed = start.elapsed().as_millis() as u64;
-        let colors: Vec<CorsairLedColor> =
-            palette::frame(&states, settings, elapsed, &ready.available)
-                .into_iter()
-                .map(|(id, color)| CorsairLedColor {
-                    id,
-                    r: color.r,
-                    g: color.g,
-                    b: color.b,
-                    a: 255,
-                })
-                .collect();
-        dirty = false;
+        let colors: Vec<CorsairLedColor> = palette::frame(
+            frame.states,
+            frame.settings,
+            frame.elapsed_ms,
+            &ready.available,
+        )
+        .into_iter()
+        .map(|(key, color)| CorsairLedColor {
+            id: luid(key),
+            r: color.r,
+            g: color.g,
+            b: color.b,
+            a: 255,
+        })
+        .collect();
         if sdk.set_led_colors(&ready.id, &colors) != CE_SUCCESS {
             report(
                 &tracker,
-                KeyboardStatus::unavailable("the keyboard stopped accepting colours".to_owned()),
+                unavailable("the keyboard stopped accepting colours"),
             );
             let _ = sdk.disconnect();
             device = None;
@@ -231,7 +205,7 @@ fn render(tracker: Arc<Mutex<Tracker>>, running: Arc<AtomicBool>) {
     }
 
     let _ = sdk.disconnect();
-    report(&tracker, KeyboardStatus::default());
+    report(&tracker, KeyboardStatus::searching(SURFACE));
 }
 
 fn connect(sdk: &Sdk, running: &AtomicBool) -> Result<Device, String> {
@@ -291,8 +265,8 @@ fn find_keyboard(sdk: &Sdk) -> Option<Device> {
         id: info.id,
         // Ours, intersected with what this keyboard has. Nothing outside this
         // list is ever written.
-        available: palette::our_led_ids()
-            .filter(|id| reported.contains(id))
+        available: (0..KEYS)
+            .filter(|key| reported.contains(&luid(*key)))
             .collect(),
         model: c_string(&info.model),
     })
@@ -307,29 +281,13 @@ fn c_string(raw: &[c_char]) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-impl KeyboardStatus {
-    fn connected(device: &Device) -> Self {
-        let driven = device.available.len();
-        Self {
-            connected: true,
-            driven,
-            detail: if driven == palette::KEYS {
-                format!("{}: driving the {driven} F-row keys", device.model)
-            } else {
-                format!(
-                    "{}: only {driven} of the {} F-row keys exist here, so the lanes are incomplete",
-                    device.model,
-                    palette::KEYS
-                )
-            },
-        }
-    }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    fn unavailable(detail: String) -> Self {
-        Self {
-            connected: false,
-            driven: 0,
-            detail,
-        }
+    #[test]
+    fn key_index_maps_onto_the_contiguous_f_row_luids() {
+        assert_eq!(luid(0), 2, "CLK_F1");
+        assert_eq!(luid(KEYS - 1), 13, "CLK_F12");
     }
 }

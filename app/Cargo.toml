@@ -29,7 +29,11 @@ raw-window-handle = "0.6"
 # written like the rest of our FFI; UI Automation could not — it is COM, and
 # hand-rolled vtables for four interfaces would be a lot of unsafe code to get
 # subtly wrong. Windows-only, so nothing else in the tree pays for it.
+# The Keychron surface talks raw HID. `windows-native` is the crate's pure
+# Rust backend, so nothing is compiled from C and nothing is linked; the
+# device is found by usage page and opened by path at runtime.
 [target.'cfg(windows)'.dependencies]
+hidapi = { version = "2.6", default-features = false, features = ["windows-native"] }
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_System_Com",

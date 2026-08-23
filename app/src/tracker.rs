@@ -106,14 +106,51 @@ impl Session {
     }
 }
 
-/// What the keyboard is doing, reported by the lighting thread so the window
-/// can answer "why is the F-row dark?" without anybody reading a log.
+/// What one keyboard surface is doing, reported by its lighting thread so
+/// the window can answer "why is the F-row dark?" without anybody reading a
+/// log. One per surface: a Corsair and a Keychron each say their own piece.
 #[derive(Debug, Clone, Default)]
 pub struct KeyboardStatus {
+    /// Which surface is talking: "Corsair", "Keychron".
+    pub surface: &'static str,
     pub connected: bool,
     /// How many of our twelve keys this keyboard actually has.
     pub driven: usize,
     pub detail: String,
+}
+
+impl KeyboardStatus {
+    /// Driving `driven` of the twelve keys on `model`.
+    pub fn connected(surface: &'static str, model: &str, driven: usize) -> Self {
+        let keys = crate::settings::KEYS;
+        Self {
+            surface,
+            connected: true,
+            driven,
+            detail: if driven == keys {
+                format!("{model}: driving the {driven} F-row keys")
+            } else {
+                format!(
+                    "{model}: only {driven} of the {keys} F-row keys exist here, so the lanes are incomplete"
+                )
+            },
+        }
+    }
+
+    /// Not driving anything, and this is why.
+    pub fn unavailable(surface: &'static str, detail: String) -> Self {
+        Self {
+            surface,
+            connected: false,
+            driven: 0,
+            detail,
+        }
+    }
+
+    /// Not driving anything yet, and still looking.
+    pub fn searching(surface: &'static str) -> Self {
+        Self::unavailable(surface, String::new())
+    }
 }
 
 #[derive(Default)]
@@ -130,7 +167,8 @@ pub struct Tracker {
     /// Set when the settings file was refused; shown in the window, because
     /// the next thing the user changes will overwrite that file.
     pub settings_error: Option<String>,
-    pub keyboard: KeyboardStatus,
+    /// One entry per lighting surface, in the order they first reported.
+    pub keyboards: Vec<KeyboardStatus>,
     /// A state being auditioned on the physical keyboard: every lane plays it,
     /// in its own colour, until this expires. The window keeps showing the real
     /// sessions — this exists so a pattern can be judged by looking at the keys
@@ -164,6 +202,24 @@ impl Tracker {
             last_seen,
             ..Self::default()
         }
+    }
+
+    /// A surface saying what it is doing. Replaces that surface's previous
+    /// word; other surfaces keep theirs.
+    pub fn report_keyboard(&mut self, status: KeyboardStatus) {
+        match self
+            .keyboards
+            .iter_mut()
+            .find(|known| known.surface == status.surface)
+        {
+            Some(known) => *known = status,
+            None => self.keyboards.push(status),
+        }
+    }
+
+    /// Whether any surface is driving keys right now.
+    pub fn keyboard_connected(&self) -> bool {
+        self.keyboards.iter().any(|status| status.connected)
     }
 
     /// Takes one arriving event.

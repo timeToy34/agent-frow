@@ -18,9 +18,9 @@ it.
 
 - **Windows only.** Works with **Claude Code** and **Codex**, each running
   natively on Windows and inside WSL.
-- **The light is a Corsair keyboard through iCUE.** Without one the window
-  still shows everything; the keys and the light are the part you would be
-  missing.
+- **The light is a Corsair keyboard through iCUE, or a Keychron Ultra on its
+  cable or 2.4 GHz receiver.** Without one the window still shows everything;
+  the keys and the light are the part you would be missing.
 - **Display only.** It never sends anything to an agent and cannot approve,
   deny, or answer anything; its reply to every hook is empty. The agents talk
   to it over loopback on your machine, and nothing leaves it.
@@ -89,9 +89,8 @@ be shown for it.
 2. Restart your agents so they read their hooks. **Codex also needs `/hooks`
    run inside it and the entry trusted** — until then it looks installed and
    nothing happens.
-3. For the keyboard: iCUE running with a Corsair board, and the F-row remapped
-   to **F13–F24** — in the **default** profile, or a profile switch silently
-   takes the summon keys with it.
+3. For the keyboard: remap the F-row to **F13–F24** in the keyboard's own
+   software — see [Keyboards](#keyboards) for each.
 
 Upgrading is the same gesture with a newer zip. "Start with Windows" is a
 checkbox in the window. Windows will warn on first run: the zip is not
@@ -99,6 +98,31 @@ code-signed.
 
 The window's **Settings** section lists every agent found, whether its hook is
 registered, and when it was last heard from, with Install and Remove per agent.
+
+## Keyboards
+
+Two are supported, and both may be plugged in at once. Either way the app
+touches only the twelve F-row LEDs and leaves the rest of the board to you.
+
+**Corsair, through iCUE.** iCUE running with third-party control enabled,
+and the F-row remapped to F13–F24 in the **default** profile — a profile
+switch silently takes the summon keys with it. The app paints on a shared
+layer above your own lighting.
+
+**Keychron Ultra (V3 Ultra 8K verified; the other Ultras speak the same
+protocol).** No driver and nothing to install: the app uses the raw-HID
+protocol the Keychron Launcher itself uses, over the **cable or the 2.4 GHz
+receiver** — the firmware does not carry it over Bluetooth. Remap F1–F12 to
+F13–F24 in the Launcher keymap; that lives in the keyboard, so the summon
+keys work over Bluetooth too. The keyboard's mixed mode gives the F-row to the
+app and keeps your own effect on every other key; everything the app changes
+is read first and put back on Quit, and nothing is ever written to the
+keyboard's flash. One caveat: **stock firmware ignores per-key brightness**,
+so every lit key shows at full and dark keys show white until Keychron ships
+[their fix](https://github.com/Keychron/zmk/pull/9). Until then,
+[firmware/keychron-ultra](firmware/keychron-ultra/README.md) builds their
+firmware with the fix applied and explains how the Launcher flashes it — read
+it before deciding. `agent-frow doctor` lists what it finds on the bus.
 
 ## Settings
 
@@ -114,9 +138,9 @@ registered, and when it was last heard from, with Install and Remove per agent.
 
 Rust on Windows. `cargo build --release`, then
 `target\release\agent-frow.exe install` — the app runs from `%LOCALAPPDATA%`,
-and only `install` puts a build there. For lighting, unzip Corsair's iCUE SDK
-(not committed; its own license) at `<repo>/iCUESDK`. `dist.ps1` builds the
-release zip.
+and only `install` puts a build there. For Corsair lighting, unzip Corsair's
+iCUE SDK (not committed; its own license) at `<repo>/iCUESDK`; Keychron needs
+nothing extra. `dist.ps1` builds the release zip.
 
 How it all works — the hook, the state machine, lane placement, the lighting,
 focus — is in [docs/how-it-works.md](docs/how-it-works.md); the reasons behind

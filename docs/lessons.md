@@ -149,6 +149,20 @@ hook, or the lighting.
   iCUE's process, and pid-only matching believed it. That is why every
   ancestor now carries its exe name from the hook's process snapshot, and a
   window only counts while its pid still resolves to that name.
+- **The Keychron talks unasked.** A layer change arrives on the raw-HID
+  interface as an `A3` report. An exchange that took "the next report" as its
+  echo went one out of step for good — "the keyboard answered A3 to A8;
+  reconnecting", forever, because every fresh handle met the next push. Read
+  until the echo, skip the rest, drain before writing.
+- **Quit skips Drop.** The tray's Quit is `process::exit`, so a surface that
+  has to hand a keyboard back needs its own `restore_now()` on that path,
+  exactly as the hotkeys needed `unhook_now()`.
+- **Stock Keychron firmware ignores per-key brightness.** Only hue and
+  saturation are per key; a black key is saturation 0 at the board's
+  brightness — white. Found by reading the fork, confirmed on the board, fixed
+  by building Keychron's fork with their open pull request and flashing it
+  through the Launcher's hidden manual upload (the image is unsigned; the
+  updater checks SHA-256 and the model string only).
 
 ## State of the work
 
@@ -156,6 +170,7 @@ hook, or the lighting.
 - **M2 — connect the hooks, state logic.** Done.
 - **M3 — Corsair lighting**, plus its setup UI. Done.
 - **M4 — click a lane to focus that agent's window and terminal tab.** Done.
+- **M5 — Keychron Ultra lighting**, through the keyboard's own protocol. Done.
 
 `app/src/surface/corsair/` and `app/src/focus/` are the only code carried over
 from the previous version, because they were the only parts that demonstrably

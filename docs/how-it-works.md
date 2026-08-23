@@ -233,7 +233,16 @@ The lane name is load-bearing: focus finds a terminal tab by it.
 
 ## The keyboard
 
-Corsair, through the iCUE SDK. Two constraints:
+Two surfaces, one palette. `app/src/surface/palette.rs` says what the twelve
+keys look like, by F-row position and never by LED; each surface maps a
+position to what its keyboard calls that LED, and writes. Both threads run for
+the life of the app: whichever keyboard is plugged in lights up, and both do
+if both are. Each is also a clock — through `surface/scene.rs`, which decides
+when a frame is due — so lanes stay honest while the window is hidden.
+
+### Corsair, through the iCUE SDK
+
+Two constraints:
 
 - **Only ever the twelve LEDs we own.** The SDK sets only the LEDs it is
   handed, so naming twelve leaves every other key to the user's own profile —
@@ -248,6 +257,56 @@ undershoots until a colour set on screen is unrecognisable on the keys.
 multiplied into what the keys are sent and nothing else — the window is never
 corrected. Calibrate with a **Preview** pattern playing; above 1.00 clips on
 already-full channels, so prefer pulling the strong channels down.
+
+### Keychron Ultra, through its Launcher protocol
+
+No firmware of ours and no driver. The Ultra series (Keychron's ZMK fork on a
+Realtek RTL8762G) serves a VIA-compatible raw-HID interface — usage page
+`0xFF60`, usage `0x61`, 32-byte reports — on the cable and through the 2.4 GHz
+receiver, and that is the interface the Keychron Launcher itself uses. Not
+over Bluetooth: the firmware drops this channel there, so the light needs the
+cable or the receiver; the summon keys, being ordinary keycodes in the
+keyboard's keymap, work over all three.
+
+- **Only ever the twelve LEDs, again.** The keyboard's mixed mode splits the
+  board into two regions, each running its own effect. The app gives the
+  F-row to region 1, rendered per key from what it sends, and leaves region 0
+  — everything else — running whatever the user had, or nothing if their
+  lighting was off.
+- **Left as found.** Everything the app changes — effect, brightness, speed,
+  colour, per-key type, the F-row's stored colours, every LED's region, both
+  effect lists — is read first and written back on the way out. Tray Quit
+  exits without unwinding, so it hands the keyboard back explicitly before
+  it goes. The snapshot also sits in `%LOCALAPPDATA%\agent-frow\keychron-state.json`
+  while the app runs: a keyboard found already in the app's mode on the next
+  start (the app was killed, or the keyboard re-enumerated after sleep) is
+  restored from there rather than "snapshotted", which would capture the
+  app's own work.
+- **Never the flash.** Every change is to the keyboard's RAM. The protocol
+  module has no way to spell either save command, and a test holds that; a
+  power cycle is always a complete undo.
+- **Per-key brightness needs the fixed firmware.** Stock Ultra firmware
+  discards the per-key value byte and renders every key at the board's
+  brightness — a dark key becomes white. [Keychron/zmk#9](https://github.com/Keychron/zmk/pull/9)
+  fixes it; until Keychron ships it, that is a custom build flashed through
+  the Launcher's manual upload — `firmware/keychron-ultra/` has the patch,
+  the build and the guide. The keyboard's own brightness still scales the
+  F-row on top of the app's slider.
+- **The keyboard talks unasked.** A layer change is pushed on the same
+  interface, so an exchange reads until the reply that echoes its command,
+  skips the rest, and clears anything stale before writing. Without that, one
+  push shifted every later reply by one and the surface reconnected forever.
+- **The idle timer is the keyboard's.** After its own backlight timeout the
+  F-row goes dark with the rest and returns on the next keypress; the app does
+  not keep it awake.
+- Found by usage page, never product id: the receiver ("Ultra-Link") is a
+  different USB device with the same interface. Cable and receiver both
+  plugged in is one keyboard on two paths, and the one that answers the
+  handshake is used; switching between them reboots the keyboard, which is a
+  reconnect like any other. `agent-frow doctor` lists what it finds and what
+  each answers.
+
+### Summon keys
 
 F13–F24 are registered as global hotkeys with `MOD_NOREPEAT`. That both keeps
 the remapped keys out of other applications and makes Windows deliver the

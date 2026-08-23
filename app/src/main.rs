@@ -87,6 +87,25 @@ fn doctor() -> Result<(), String> {
         if autostart::enabled() { "yes" } else { "no" }
     );
 
+    // Corsair is iCUE's to report on; the Keychron side answers for itself.
+    // Not while the app is running, though: it holds the keyboard, and a
+    // second speaker on the same interface would take its replies.
+    println!("keyboards");
+    match ingress::bind() {
+        Err(ingress::BindError::Busy) => {
+            println!("  Keychron: not probed while Agent F-Row is running — stop it first");
+        }
+        _ => match surface::keychron::probe() {
+            Ok(lines) => {
+                for line in lines {
+                    println!("  Keychron: {line}");
+                }
+            }
+            Err(reason) => println!("  Keychron: {reason}"),
+        },
+    }
+    println!();
+
     let seen = paths::last_seen_file()
         .map(|path| lastseen::load(&path))
         .unwrap_or_default();
@@ -610,6 +629,7 @@ fn run(dialog_on_busy: bool, notice: Option<String>) -> Result<(), String> {
     // F-row should be right whether or not anybody opens the window, and it is
     // also what evicts stale sessions while the window is hidden in the tray.
     let _keyboard = surface::corsair::start(Arc::clone(&tracker));
+    let _keychron = surface::keychron::start(Arc::clone(&tracker));
 
     // The summon keys: F13–F24, which the user's iCUE profile maps the F-row
     // to. Kept alive for the life of the app; dropping it unregisters them.

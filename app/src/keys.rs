@@ -3,8 +3,9 @@
 //!
 //! The app listens for **F13–F24**, not F1–F12. The F-row's ordinary meanings
 //! belong to every other application on the machine, so the user remaps the
-//! keyboard's F-row to F13–F24 in an iCUE profile — a one-time setup — and from
-//! then on those twelve codes mean nothing to anything but us. Registering them
+//! keyboard's F-row to F13–F24 in the keyboard's own software — an iCUE
+//! profile, the Keychron Launcher keymap — a one-time setup, and from then on
+//! those twelve codes mean nothing to anything but us. Registering them
 //! as global hotkeys keeps them out of whichever application has keyboard focus
 //! and delivers a `WM_HOTKEY` message to this process instead.
 //!
