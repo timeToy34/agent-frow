@@ -43,7 +43,7 @@ pub struct Snapshot {
     pub hue: u8,
     pub sat: u8,
     pub per_key_type: u8,
-    /// The stored per-key colour of each F-row LED.
+    /// The stored per-key colour of every LED on the board.
     pub colours: Vec<(u8, Hsv)>,
     /// The region of every LED on the board.
     pub regions: Vec<u8>,
@@ -251,8 +251,9 @@ impl<T: Transport> Board<T> {
             other => return Err(format!("unexpected answer {other:?}")),
         };
         let per_key_type = self.byte(Command::GetPerKeyType)?;
-        let mut colours = Vec::with_capacity(self.leds.len());
-        for run in runs(&self.leds, COLOURS_PER_PACKET) {
+        let all: Vec<u8> = (0..self.led_count).collect();
+        let mut colours = Vec::with_capacity(all.len());
+        for run in runs(&all, COLOURS_PER_PACKET) {
             let (start, count) = (run[0], run.len() as u8);
             match self.ask(Command::GetColours { start, count })? {
                 Reply::Colours(read) => colours.extend(run.iter().copied().zip(read)),
@@ -319,10 +320,26 @@ impl<T: Transport> Board<T> {
     }
 
     /// Puts the keyboard in mixed mode with the F-row as the app's region and
-    /// the rest of the board running what the user had — or nothing, if they
-    /// had the lighting off. The effect is switched last: that is what makes
-    /// the rest take.
+    /// the rest of the board running what the user had. The effect is
+    /// switched last: that is what makes the rest take.
+    ///
+    /// When the user had nothing running — lighting off, or their own mixed
+    /// setup with an empty region 0 — the rest is not given effect "none".
+    /// The firmware ends a mixed frame as soon as region 0 reports finished,
+    /// and "none" is finished after the board's first slice of LEDs, so the
+    /// later LEDs are never repainted — and the Caps Lock indicator, which
+    /// the firmware draws over its key and clears only by the key being
+    /// repainted, would stay lit once pressed. Instead the rest runs the
+    /// per-key effect too, every key stored black: it looks exactly like
+    /// off, but every LED repaints each frame and the indicator can clear.
     pub fn take_over(&mut self, remembered: &Snapshot) -> Result<(), String> {
+        let per_key = EffectSlot {
+            effect: EFFECT_PER_KEY,
+            hue: 0,
+            sat: 255,
+            speed: 128,
+            time_ms: SLOT_HOLD_MS,
+        };
         let ambient = match remembered.effect {
             // Their own mixed setup: region 0 keeps its list.
             EFFECT_MIXED => remembered.ambient.clone(),
@@ -335,13 +352,20 @@ impl<T: Transport> Board<T> {
                 time_ms: SLOT_HOLD_MS,
             }],
         };
-        let ours = vec![EffectSlot {
-            effect: EFFECT_PER_KEY,
-            hue: 0,
-            sat: 255,
-            speed: 128,
-            time_ms: SLOT_HOLD_MS,
-        }];
+        let dark = ambient.iter().all(|slot| slot.effect == EFFECT_OFF);
+        let ambient = if dark { vec![per_key] } else { ambient };
+        if dark {
+            let rest: Vec<u8> = (0..self.led_count)
+                .filter(|led| !self.leds.contains(led))
+                .collect();
+            for run in runs(&rest, COLOURS_PER_PACKET) {
+                self.tell(Command::SetColours {
+                    start: run[0],
+                    colours: vec![Hsv { h: 0, s: 0, v: 0 }; run.len()],
+                })?;
+            }
+        }
+        let ours = vec![per_key];
         let regions: Vec<Region> = (0..self.led_count)
             .map(|led| {
                 if self.leds.contains(&led) {
@@ -772,20 +796,57 @@ mod tests {
             "and rotates with nothing"
         );
         assert_eq!(state.per_key_type, PER_KEY_SOLID);
+        assert_eq!(
+            state.per_key[50],
+            Hsv {
+                h: 43,
+                s: 255,
+                v: 255
+            },
+            "a live ambient effect keeps every stored colour"
+        );
     }
 
     #[test]
-    fn a_board_with_the_lighting_off_gets_an_empty_ambient_region() {
+    fn a_board_with_the_lighting_off_runs_black_per_key_everywhere() {
+        let black = Hsv { h: 0, s: 0, v: 0 };
         let mut board = board();
+        let before = board.transport.state.clone();
         let snapshot = board.snapshot().unwrap();
         assert_eq!(snapshot.effect, EFFECT_OFF);
+        assert_eq!(
+            snapshot.colours.len(),
+            fake::LEDS,
+            "the snapshot covers every stored colour take-over overwrites"
+        );
         board.take_over(&snapshot).unwrap();
-        assert_eq!(board.transport.state.lists[0][0], EffectSlot::NONE);
+        let state = &board.transport.state;
+        assert_eq!(
+            state.lists[0][0].effect, EFFECT_PER_KEY,
+            "effect none would end the frame after the board's first slice, \
+             leaving later LEDs — Caps Lock among them — never repainted"
+        );
+        for led in 0..fake::LEDS as u8 {
+            if (1..=12).contains(&led) {
+                assert_ne!(state.per_key[led as usize], black, "F-row led {led}");
+            } else {
+                assert_eq!(state.per_key[led as usize], black, "led {led}");
+            }
+        }
         board.restore(&snapshot).unwrap();
         assert_eq!(
-            board.transport.state.effect, EFFECT_OFF,
-            "and goes back off"
+            board.transport.state, before,
+            "every colour, and the off effect, come back"
         );
+
+        // The user's own mixed setup with nothing on region 0 is the same case.
+        let mut mixed = Board::connect(ScriptedKeyboard::new()).unwrap();
+        mixed.transport.state.effect = EFFECT_MIXED;
+        mixed.transport.state.lists[0] = [EffectSlot::NONE; 5];
+        let snapshot = mixed.snapshot().unwrap();
+        mixed.take_over(&snapshot).unwrap();
+        assert_eq!(mixed.transport.state.lists[0][0].effect, EFFECT_PER_KEY);
+        assert_eq!(mixed.transport.state.per_key[50], black);
     }
 
     #[test]

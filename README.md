@@ -115,9 +115,10 @@ protocol the Keychron Launcher itself uses, over the **cable or the 2.4 GHz
 receiver** — the firmware does not carry it over Bluetooth. Remap F1–F12 to
 F13–F24 in the Launcher keymap; that lives in the keyboard, so the summon
 keys work over Bluetooth too. The keyboard's mixed mode gives the F-row to the
-app and keeps your own effect on every other key; everything the app changes
-is read first and put back on Quit, and nothing is ever written to the
-keyboard's flash. One caveat: **stock firmware ignores per-key brightness**,
+app and keeps your own effect on every other key (with your lighting off the
+app paints the rest black itself, so the Caps Lock indicator can still switch
+off); everything the app changes is read first and put back on Quit, and
+nothing is ever written to the keyboard's flash. One caveat: **stock firmware ignores per-key brightness**,
 so every lit key shows at full and dark keys show white until Keychron ships
 [their fix](https://github.com/Keychron/zmk/pull/9). Until then,
 [firmware/keychron-ultra](firmware/keychron-ultra/README.md) builds their

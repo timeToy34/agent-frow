@@ -272,10 +272,17 @@ keyboard's keymap, work over all three.
   board into two regions, each running its own effect. The app gives the
   F-row to region 1, rendered per key from what it sends, and leaves region 0
   — everything else — running whatever the user had, or nothing if their
-  lighting was off.
+  lighting was off. "Nothing" is not the firmware's effect "none", though:
+  a mixed frame ends as soon as region 0 reports finished, and "none" is
+  finished after the board's first slice of LEDs, so the later LEDs are
+  never repainted — and the Caps Lock indicator, which the firmware draws
+  over its key and clears only by the key being repainted, stayed lit once
+  pressed. So when the user had nothing running, region 0 runs the per-key
+  effect too, every key stored black: it looks exactly like off, but every
+  LED repaints each frame and Caps Lock can switch off.
 - **Left as found.** Everything the app changes — effect, brightness, speed,
-  colour, per-key type, the F-row's stored colours, every LED's region, both
-  effect lists — is read first and written back on the way out. Tray Quit
+  colour, per-key type, every LED's stored colour and region, both effect
+  lists — is read first and written back on the way out. Tray Quit
   exits without unwinding, so it hands the keyboard back explicitly before
   it goes. The snapshot also sits in `%LOCALAPPDATA%\agent-frow\keychron-state.json`
   while the app runs: a keyboard found already in the app's mode on the next
@@ -287,7 +294,8 @@ keyboard's keymap, work over all three.
   power cycle is always a complete undo.
 - **Per-key brightness needs the fixed firmware.** Stock Ultra firmware
   discards the per-key value byte and renders every key at the board's
-  brightness — a dark key becomes white. [Keychron/zmk#9](https://github.com/Keychron/zmk/pull/9)
+  brightness — a dark key becomes white (with the lighting off, that is the
+  whole board). [Keychron/zmk#9](https://github.com/Keychron/zmk/pull/9)
   fixes it; until Keychron ships it, that is a custom build flashed through
   the Launcher's manual upload — `firmware/keychron-ultra/` has the patch,
   the build and the guide. The keyboard's own brightness still scales the

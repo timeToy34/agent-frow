@@ -163,6 +163,21 @@ hook, or the lighting.
   by building Keychron's fork with their open pull request and flashing it
   through the Launcher's hidden manual upload (the image is unsigned; the
   updater checks SHA-256 and the model string only).
+- **The Keychron's Caps indicator is drawn, never cleared.** The firmware
+  paints its lock indicator over the key while Caps is on and simply stops
+  when it is off, trusting the key's effect to repaint it — so under an
+  effect that never repaints the key, Caps stays lit forever. And "never
+  repaints" is subtler than it sounds: a mixed-mode frame ends when *region
+  0's* effect reports finished, and effect "none" is finished immediately,
+  so with the user's lighting off only the board's first slice of 44 LEDs
+  ever rendered. The first fix — move Caps Lock into the app's
+  always-repainting region — failed on hardware exactly there: Caps Lock is
+  LED 50, in the second slice, which never came; the F-row (LEDs 1–12) sits
+  in the first, which is why it always worked and the starvation went
+  unseen. What holds: with the lighting off, region 0 runs the per-key
+  effect too, all its keys stored black — looks off, repaints everything,
+  completes the frame. Not touched: the indicator-disable command, which
+  would take the user's Caps light away.
 
 ## State of the work
 
