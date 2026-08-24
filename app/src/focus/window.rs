@@ -214,7 +214,10 @@ pub fn raise(ancestors: &[Ancestor], tab_names: &[String]) -> Report {
                 let tabs = uia_tabs::tabs(HWND(host.hwnd as *mut c_void));
                 TabbedWindow {
                     index,
-                    selected: tabs.iter().find(|tab| tab.selected).map(|tab| tab.name.clone()),
+                    selected: tabs
+                        .iter()
+                        .find(|tab| tab.selected)
+                        .map(|tab| tab.name.clone()),
                     tabs: tabs.into_iter().map(|tab| tab.name).collect(),
                 }
             })
@@ -712,7 +715,10 @@ mod tests {
 
     #[test]
     fn a_later_window_with_the_first_name_beats_an_earlier_one_with_the_second() {
-        let windows = [window(0, &["proj"], Some("proj")), window(1, &["lane"], None)];
+        let windows = [
+            window(0, &["proj"], Some("proj")),
+            window(1, &["lane"], None),
+        ];
         assert_eq!(choose(&windows, &names(&["lane", "proj"])), 1);
     }
 
