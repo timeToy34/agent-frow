@@ -73,12 +73,26 @@ impl Drop for Apartment {
     }
 }
 
-/// Every tab name in `hwnd`, in the order the window presents them.
+/// One tab of a terminal window: what it is called, and whether it is the one
+/// in front.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tab {
+    pub name: String,
+    pub selected: bool,
+}
+
+/// Every tab in `hwnd`, in the order the window presents them.
+///
+/// One walk of the window's tree answers both "what tabs are there" and "which
+/// is in front" — the walk (`FindAll` across processes) is the expensive part,
+/// and a caller choosing between several windows asks both of every one.
 ///
 /// Empty for anything that is not a terminal window, and empty rather than an
 /// error whenever UIA declines to answer — a caller that cannot see tabs is in
-/// exactly the position it was in before this module existed.
-pub fn tab_names(hwnd: HWND) -> Vec<String> {
+/// exactly the position it was in before this module existed. Empty is also
+/// what a window that has not been drawn can answer, so it means "unknown",
+/// never "no tabs".
+pub fn tabs(hwnd: HWND) -> Vec<Tab> {
     let Some(_apartment) = Apartment::enter() else {
         return Vec::new();
     };
@@ -96,9 +110,26 @@ pub fn tab_names(hwnd: HWND) -> Vec<String> {
         tab_elements(&automation, &window)
             .iter()
             .inspect(|tab| realize(tab))
-            .filter_map(|tab| tab.CurrentName().ok().map(|name| name.to_string()))
+            .filter_map(|tab| {
+                let name = tab.CurrentName().ok()?.to_string();
+                // A tab that does not offer the selection pattern is not the
+                // selected one; it is also not worth dropping from the list.
+                let selected = tab
+                    .GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
+                        UIA_SelectionItemPatternId,
+                    )
+                    .and_then(|select| select.CurrentIsSelected())
+                    .map(|selected| selected.as_bool())
+                    .unwrap_or(false);
+                Some(Tab { name, selected })
+            })
             .collect()
     }
+}
+
+/// Every tab name in `hwnd`, in the order the window presents them.
+pub fn tab_names(hwnd: HWND) -> Vec<String> {
+    tabs(hwnd).into_iter().map(|tab| tab.name).collect()
 }
 
 /// Selects the tab named `name` in `hwnd`. Returns whether it was selected.
@@ -157,29 +188,10 @@ pub fn select_tab(hwnd: HWND, name: &str) -> bool {
 /// tab moves keyboard focus into the tab strip, and suddenly the arrow keys
 /// navigate tabs instead of reaching the terminal.
 pub fn selected_tab(hwnd: HWND) -> Option<String> {
-    let _apartment = Apartment::enter()?;
-    // SAFETY: as above — all FFI, every fallible call matched.
-    unsafe {
-        let automation =
-            CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_ALL).ok()?;
-        let window = automation.ElementFromHandle(hwnd).ok()?;
-        for tab in tab_elements(&automation, &window) {
-            realize(&tab);
-            let Ok(select) = tab.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
-                UIA_SelectionItemPatternId,
-            ) else {
-                continue;
-            };
-            if select
-                .CurrentIsSelected()
-                .map(|selected| selected.as_bool())
-                .unwrap_or(false)
-            {
-                return tab.CurrentName().ok().map(|name| name.to_string());
-            }
-        }
-        None
-    }
+    tabs(hwnd)
+        .into_iter()
+        .find(|tab| tab.selected)
+        .map(|tab| tab.name)
 }
 
 /// Turns a placeholder into a real element where the tab strip virtualizes.

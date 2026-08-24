@@ -16,7 +16,11 @@
 //!   `powershell.exe → wsl.exe → wsl.exe → WindowsTerminal.exe`.
 //! - **UI Automation** to select a tab, because a terminal window's title is
 //!   whichever tab is in front, so three agents sharing one window are
-//!   indistinguishable to every window-level API Windows offers.
+//!   indistinguishable to every window-level API Windows offers. The same
+//!   tabs also choose the *window*: Windows Terminal hosts every window in one
+//!   process (that is what lets a tab be dragged out into its own window), so
+//!   identity finds the process, and the window holding the tab is the one
+//!   raised.
 //!
 //! What each attempt actually achieved is reported rather than assumed. "The
 //! window came forward showing the wrong agent" is a different outcome from

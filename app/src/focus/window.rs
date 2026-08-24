@@ -71,7 +71,8 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
 /// be summoned — identity does that now — but still two jobs: preferring the
 /// real terminal over a transient helper (`PopupHost`) inside Windows
 /// Terminal's own pid, and the fallback rule for an ancestor whose exe name an
-/// older hook did not record.
+/// older hook did not record. A Terminal pid can own several such windows (one
+/// process hosts them all); a console pid owns exactly one.
 fn is_terminal_class(class_name: &str) -> bool {
     class_name == TERMINAL_WINDOW_CLASS || class_name == "ConsoleWindowClass"
 }
@@ -157,12 +158,21 @@ pub fn raise(ancestors: &[Ancestor], tab_names: &[String]) -> Report {
     // raises VS Code, not whatever launched VS Code. `explorer.exe` is the one
     // deliberate exception: it sits above nearly everything ever launched from
     // the shell, and its windows are never the host.
+    //
+    // Identity finds the *process*, and Windows Terminal hosts every one of
+    // its windows in a single process — that is what lets a tab be dragged out
+    // into a window of its own. So a matching pid can own several terminal
+    // windows, and which of them holds the agent is not something any
+    // window-level API can say: their titles are whatever tab each has in
+    // front. Taking the topmost raised the wrong window whenever the tab had
+    // been torn out. All of the pid's terminal windows are kept, and the tab
+    // is what chooses between them, below.
     let own_pid = own_process_id();
-    let mut found: Option<(&Candidate, Option<String>)> = None;
+    let mut found: Option<(Vec<&Candidate>, Option<String>)> = None;
     for ancestor in ancestors {
         let of_this_pid =
             |window: &&Candidate| window.process_id == ancestor.pid && window.process_id != own_pid;
-        match &ancestor.exe {
+        let identity = match &ancestor.exe {
             Some(recorded) => {
                 if recorded.eq_ignore_ascii_case("explorer.exe") {
                     continue;
@@ -173,42 +183,46 @@ pub fn raise(ancestors: &[Ancestor], tab_names: &[String]) -> Report {
                 if !current.eq_ignore_ascii_case(recorded) {
                     continue; // the pid was recycled onto something else
                 }
-                if let Some(window) = windows
-                    .iter()
-                    .filter(of_this_pid)
-                    .find(|window| is_terminal_class(&window.class_name))
-                    .or_else(|| {
-                        windows
-                            .iter()
-                            .filter(of_this_pid)
-                            .find(|window| !window.tool_window)
-                    })
-                {
-                    found = Some((window, Some(current)));
-                    break;
-                }
+                Some(current)
             }
             // An old hook recorded no name, so there is no identity to check:
             // exactly the old rule, terminal classes only.
-            None => {
-                if let Some(window) = windows
-                    .iter()
-                    .filter(of_this_pid)
-                    .find(|window| is_terminal_class(&window.class_name))
-                {
-                    found = Some((window, None));
-                    break;
-                }
-            }
+            None => None,
+        };
+        let hosts = hosts_of(windows.iter().filter(of_this_pid), identity.is_some());
+        if !hosts.is_empty() {
+            found = Some((hosts, identity));
+            break;
         }
     }
-    let Some((found, found_exe)) = found else {
+    let Some((hosts, found_exe)) = found else {
         return Report::new(
             false,
             "no window found for that agent — it may have closed, or its ancestry \
              is stale (restart the agent to refresh it)",
         );
     };
+
+    // Several windows of one Terminal process: read each one's tabs, once, and
+    // let the tab decide which window is the agent's. One window — a console,
+    // a desktop app, a Terminal with nothing torn out — costs no UIA call here.
+    let snapshot: Vec<TabbedWindow> = if hosts.len() > 1 {
+        hosts
+            .iter()
+            .enumerate()
+            .map(|(index, host)| {
+                let tabs = uia_tabs::tabs(HWND(host.hwnd as *mut c_void));
+                TabbedWindow {
+                    index,
+                    selected: tabs.iter().find(|tab| tab.selected).map(|tab| tab.name.clone()),
+                    tabs: tabs.into_iter().map(|tab| tab.name).collect(),
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let found = hosts[choose(&snapshot, tab_names)];
 
     let hwnd = HWND(found.hwnd as *mut c_void);
     // Only Windows Terminal has tabs to select; a console host is one session
@@ -268,19 +282,119 @@ pub fn raise(ancestors: &[Ancestor], tab_names: &[String]) -> Report {
     // Half of what was asked for, and worth saying: the user is looking at the
     // right terminal showing the wrong agent. Naming the lane after its tab is
     // what fixes it, which is why a lane has a name — so the message names the
-    // tabs that are actually there rather than leaving it to be guessed.
-    let present = uia_tabs::tab_names(hwnd);
-    if present.is_empty() {
-        return Report::new(true, "raised the terminal; its tabs could not be read");
+    // tabs that are actually there rather than leaving it to be guessed. With
+    // several windows the snapshot already holds every tab of every one of
+    // them; with one, read it now.
+    if snapshot.is_empty() {
+        let present = uia_tabs::tab_names(hwnd);
+        if present.is_empty() {
+            return Report::new(true, "raised the terminal; its tabs could not be read");
+        }
+        return Report::new(
+            true,
+            format!(
+                "raised the terminal, but no tab is called {}. Its tabs: {}",
+                tab_names.join(" or "),
+                present.join(", ")
+            ),
+        );
     }
-    Report::new(
-        true,
-        format!(
-            "raised the terminal, but no tab is called {}. Its tabs: {}",
-            tab_names.join(" or "),
-            present.join(", ")
-        ),
-    )
+    Report::new(true, no_such_tab(tab_names, &snapshot))
+}
+
+/// The windows of one ancestor worth raising, best first.
+///
+/// Every Windows Terminal window of the pid, in Z-order, because Terminal
+/// hosts all of its windows in one process and any of them may hold the tab.
+/// Otherwise the one window the older rule picked: a terminal-class window
+/// (keeps `PopupHost` out of Terminal's own pid — and a console host owns
+/// exactly one window), else, only once identity has been checked, the topmost
+/// window that is not a tool window (a desktop app or an IDE).
+fn hosts_of<'a>(
+    windows: impl Iterator<Item = &'a Candidate> + Clone,
+    identified: bool,
+) -> Vec<&'a Candidate> {
+    let terminals: Vec<&Candidate> = windows
+        .clone()
+        .filter(|window| window.class_name == TERMINAL_WINDOW_CLASS)
+        .collect();
+    if !terminals.is_empty() {
+        return terminals;
+    }
+    windows
+        .clone()
+        .find(|window| is_terminal_class(&window.class_name))
+        .or_else(|| {
+            if identified {
+                windows.clone().find(|window| !window.tool_window)
+            } else {
+                None
+            }
+        })
+        .into_iter()
+        .collect()
+}
+
+/// One terminal window's tabs, read once, for choosing between the several
+/// windows of a Terminal process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TabbedWindow {
+    /// Position in the host list, so choosing needs no window handle.
+    index: usize,
+    /// The tab in front, when it could be read.
+    selected: Option<String>,
+    /// Every tab, in the window's order. Empty means *unread*, not tabless: a
+    /// window that has not been drawn since it went to the back can answer
+    /// with nothing, and so can a minimized one.
+    tabs: Vec<String>,
+}
+
+/// Which of several terminal windows to raise for `tab_names`: its index.
+///
+/// Names are tried in order — the lane's first, since that is the one the user
+/// controls — and for each, a window already showing it beats one merely
+/// containing it, so the raise lands on a tab that needs no re-selecting. When
+/// nothing matches, the first window: it is the topmost, which is exactly the
+/// rule for a process that owns one window, and the report then says which
+/// tabs were there. An empty list — nothing read from any window — gives the
+/// same, for the same reason.
+fn choose(windows: &[TabbedWindow], tab_names: &[String]) -> usize {
+    for name in tab_names {
+        let showing = windows
+            .iter()
+            .find(|window| window.selected.as_deref() == Some(name.as_str()));
+        let holding = || windows.iter().find(|window| window.tabs.contains(name));
+        if let Some(window) = showing.or_else(holding) {
+            return window.index;
+        }
+    }
+    windows.first().map_or(0, |window| window.index)
+}
+
+/// The report for a raise that found no tab called any of `tab_names` in any
+/// of several windows: every tab of every window, so the user can see what is
+/// there — grouped by window, in the order they were stacked.
+fn no_such_tab(tab_names: &[String], windows: &[TabbedWindow]) -> String {
+    let readable: Vec<String> = windows
+        .iter()
+        .filter(|window| !window.tabs.is_empty())
+        .map(|window| window.tabs.join(", "))
+        .collect();
+    if readable.is_empty() {
+        return "raised the terminal; its tabs could not be read".to_owned();
+    }
+    let mut detail = format!(
+        "raised the terminal, but no tab is called {} in any of its {} windows. Their tabs: {}",
+        tab_names.join(" or "),
+        windows.len(),
+        readable.join("; ")
+    );
+    let unreadable = windows.len() - readable.len();
+    if unreadable > 0 {
+        let plural = if unreadable == 1 { "" } else { "s" };
+        detail.push_str(&format!("; {unreadable} window{plural} unreadable"));
+    }
+    detail
 }
 
 /// How often a restore is re-checked. Restoring is animated and runs on the
@@ -527,4 +641,116 @@ fn settle_tab(hwnd: HWND, tab: &str) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TabbedWindow, choose, no_such_tab};
+
+    fn window(index: usize, tabs: &[&str], selected: Option<&str>) -> TabbedWindow {
+        TabbedWindow {
+            index,
+            selected: selected.map(str::to_owned),
+            tabs: tabs.iter().map(|tab| (*tab).to_owned()).collect(),
+        }
+    }
+
+    fn names(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    #[test]
+    fn one_window_is_the_window() {
+        let windows = [window(0, &["other"], Some("other"))];
+        assert_eq!(choose(&windows, &names(&["keeb"])), 0);
+    }
+
+    #[test]
+    fn nothing_read_falls_back_to_the_topmost() {
+        assert_eq!(choose(&[], &names(&["keeb"])), 0);
+        let windows = [window(0, &[], None), window(1, &[], None)];
+        assert_eq!(choose(&windows, &names(&["keeb"])), 0);
+    }
+
+    #[test]
+    fn no_match_falls_back_to_the_topmost() {
+        let windows = [window(0, &["a"], Some("a")), window(1, &["b"], Some("b"))];
+        assert_eq!(choose(&windows, &names(&["keeb"])), 0);
+        assert_eq!(choose(&windows, &[]), 0);
+    }
+
+    #[test]
+    fn a_window_holding_the_tab_beats_the_topmost() {
+        let windows = [
+            window(0, &["a"], Some("a")),
+            window(1, &["b", "keeb"], Some("b")),
+        ];
+        assert_eq!(choose(&windows, &names(&["keeb"])), 1);
+    }
+
+    #[test]
+    fn a_window_showing_the_tab_beats_one_merely_holding_it() {
+        // Two lanes on one project, unnamed, share a tab title: the one in
+        // front needs no re-selecting, so it wins.
+        let windows = [
+            window(0, &["keeb", "x"], Some("x")),
+            window(1, &["keeb"], Some("keeb")),
+        ];
+        assert_eq!(choose(&windows, &names(&["keeb"])), 1);
+    }
+
+    #[test]
+    fn the_lane_name_beats_the_project_name_in_another_window() {
+        // Window 0 shows the project; window 1 merely holds the lane's name.
+        // The lane's name is the one the user chose, so it wins anyway.
+        let windows = [
+            window(0, &["ai-agent-keeb"], Some("ai-agent-keeb")),
+            window(1, &["x", "keeb"], Some("x")),
+        ];
+        assert_eq!(choose(&windows, &names(&["keeb", "ai-agent-keeb"])), 1);
+    }
+
+    #[test]
+    fn a_later_window_with_the_first_name_beats_an_earlier_one_with_the_second() {
+        let windows = [window(0, &["proj"], Some("proj")), window(1, &["lane"], None)];
+        assert_eq!(choose(&windows, &names(&["lane", "proj"])), 1);
+    }
+
+    #[test]
+    fn report_lists_every_window_grouped() {
+        let windows = [
+            window(0, &["a", "b"], Some("a")),
+            window(1, &["c"], Some("c")),
+        ];
+        assert_eq!(
+            no_such_tab(&names(&["keeb", "proj"]), &windows),
+            "raised the terminal, but no tab is called keeb or proj in any of its 2 windows. \
+             Their tabs: a, b; c"
+        );
+    }
+
+    #[test]
+    fn report_counts_windows_it_could_not_read() {
+        let windows = [
+            window(0, &["a"], Some("a")),
+            window(1, &[], None),
+            window(2, &[], None),
+        ];
+        assert_eq!(
+            no_such_tab(&names(&["keeb"]), &windows),
+            "raised the terminal, but no tab is called keeb in any of its 3 windows. \
+             Their tabs: a; 2 windows unreadable"
+        );
+        let one = [window(0, &["a"], Some("a")), window(1, &[], None)];
+        assert!(no_such_tab(&names(&["keeb"]), &one).ends_with("; 1 window unreadable"));
+    }
+
+    #[test]
+    fn report_says_when_nothing_could_be_read() {
+        let windows = [window(0, &[], None), window(1, &[], None)];
+        assert_eq!(
+            no_such_tab(&names(&["keeb"]), &windows),
+            "raised the terminal; its tabs could not be read"
+        );
+    }
 }

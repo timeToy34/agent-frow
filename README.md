@@ -65,9 +65,9 @@ preference or forget it.
 ### Focus
 
 Press the lane's key (or click Focus) and the window the agent runs in comes
-forward — Windows Terminal with the right tab in front, the Claude or Codex
-desktop app, or an IDE. That is the only action in the product: no approvals,
-no key capture.
+forward — Windows Terminal with the right tab in front (including a tab torn
+out into its own window), the Claude or Codex desktop app, or an IDE. That is
+the only action in the product: no approvals, no key capture.
 
 The tab it looks for is the lane's name, then the project folder — so naming a
 lane is a feature. If no tab matches, it says so and lists the tabs it found,

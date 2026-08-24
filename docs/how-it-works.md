@@ -375,6 +375,15 @@ else the topmost window that is not a tool window, which keeps Electron splash
 screens and palettes out. `explorer.exe` is never the host and is skipped by
 name.
 
+Windows Terminal hosts **every window in one process** — that is what lets a
+tab be dragged out into a window of its own (1.22 and later) — so identity
+finds the process and a matching pid can own several terminal windows. The tab
+chooses between them: for each name tried, the window already showing it,
+else the window holding it, else the topmost. That read costs one UI Automation
+walk per window and happens only when there is more than one. Two unnamed lanes
+on the same project share a tab title, and the first in Z-order wins — naming
+the lane is the remedy, as it is for the tab itself.
+
 The tab it looks for is **the lane's name**, then the project folder — which is
 why naming a lane is a feature. When neither matches it says so and lists the
 tabs that are there, rather than quietly leaving you looking at the right

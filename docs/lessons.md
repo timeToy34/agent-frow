@@ -149,6 +149,15 @@ hook, or the lighting.
   iCUE's process, and pid-only matching believed it. That is why every
   ancestor now carries its exe name from the hook's process snapshot, and a
   window only counts while its pid still resolves to that name.
+- **A tab torn out of Windows Terminal was never found.** Terminal hosts every
+  window in one process (that is what makes tear-out possible), so the torn-out
+  window has the same pid as the one it left. Focus took the first terminal
+  window of that pid in Z-order and asked UI Automation about that window
+  only, so it raised the old window and reported the tab missing. Now every
+  terminal window of the pid is kept, each one's tabs are read once, and the
+  window showing — else holding — the tab is the one raised; nothing matching
+  still raises the topmost, and the report lists every window's tabs.
+  Mid-drag the tab is in no window's list, and the next press finds it.
 - **The Keychron talks unasked.** A layer change arrives on the raw-HID
   interface as an `A3` report. An exchange that took "the next report" as its
   echo went one out of step for good — "the keyboard answered A3 to A8;
