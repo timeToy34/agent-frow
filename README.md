@@ -74,9 +74,12 @@ lane is a feature. If no tab matches, it says so and lists the tabs it found,
 rather than leaving you looking at the wrong agent.
 
 Two limitations, stated in the window too: no agent reports when you *answer*
-a prompt, so a lane can read Waiting for a few seconds after you approved (it
-clears when that tool finishes); and Codex has no error event, so Error cannot
-be shown for it.
+a permission prompt, so a lane can read Waiting after you approved until that
+tool finishes — seconds for Claude; for Codex, which reports a command only
+once it exits, a server or long install you allowed holds Waiting until a
+later command finishes (a Codex *question* is the exception, and clears the
+moment you answer it); and Codex has no error event, so Error cannot be shown
+for it.
 
 ## Install
 

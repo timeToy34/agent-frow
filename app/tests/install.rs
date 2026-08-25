@@ -135,7 +135,13 @@ fn codex_hooks_are_never_async_and_claude_gets_a_matcher() {
     // not supported yet" — so writing it would silently disable five of the six
     // events on that version. Measured against a real install; the published
     // documentation says it is supported, and for 0.148 it is.
-    for event in ["PermissionRequest", "PostToolUse", "Stop", "SessionEnd"] {
+    for event in [
+        "PermissionRequest",
+        "PreToolUse",
+        "PostToolUse",
+        "Stop",
+        "SessionEnd",
+    ] {
         assert!(
             written["hooks"][event][0]["hooks"][0]
                 .get("async")
@@ -146,8 +152,18 @@ fn codex_hooks_are_never_async_and_claude_gets_a_matcher() {
     // Codex clamps this one to 3s and warns about anything larger.
     assert_eq!(written["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"], 3);
     assert_eq!(written["hooks"]["Stop"][0]["hooks"][0]["timeout"], 5);
-    // Codex reads a matcher as a regex, where "*" is not a valid pattern.
-    assert!(written["hooks"]["Stop"][0].get("matcher").is_none());
+    // Codex reads a matcher as a regex, where "*" is not a valid pattern — so
+    // every event but one omits it, and that one uses a real pattern: Codex
+    // asks questions through the `request_user_input` tool, and PreToolUse is
+    // registered for that tool alone, never for the other 46% of traffic.
+    for (event, entries) in written["hooks"].as_object().unwrap() {
+        let matcher = entries[0].get("matcher");
+        if event == "PreToolUse" {
+            assert_eq!(matcher, Some(&serde_json::json!("^request_user_input$")));
+        } else {
+            assert!(matcher.is_none(), "{event} must have no matcher");
+        }
+    }
 
     let claude = found(Agent::Claude, &dir, None);
     install::apply(&install::plan_install(&claude, &install_dir()).unwrap()).unwrap();
@@ -156,7 +172,8 @@ fn codex_hooks_are_never_async_and_claude_gets_a_matcher() {
     assert_eq!(written["hooks"]["Stop"][0]["matcher"], "*");
     // The state Claude could never reach before, because it was never registered.
     assert!(written["hooks"].get("StopFailure").is_some());
-    // 46% of all hook traffic, and no use to a lane.
+    // 46% of all hook traffic, and no use to a lane: Claude's questions reach
+    // us as a notification, so it gets no PreToolUse at all.
     assert!(written["hooks"].get("PreToolUse").is_none());
 }
 

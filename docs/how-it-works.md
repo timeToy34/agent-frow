@@ -162,6 +162,12 @@ has a test named after it:
   idle notification says so a minute later.
 - `PostToolUse` promotes **only from Waiting**. Hook processes post
   concurrently, so one emitted before `Stop` can arrive after it.
+- `PreToolUse` for `request_user_input` sets Waiting. It is the only tool
+  name the table reads: Codex asks its questions through that tool, whose
+  handler shows the dialog and blocks until it is answered, so the tool
+  starting *is* the question appearing, and its `PostToolUse` *is* the
+  answer. It is registered for Codex with that one tool as its matcher;
+  Claude's questions arrive as a notification instead.
 
 Unknown `notification_type` values are ignored and **counted**, and shown in the
 window as a number, so a new agent release is a line you can read rather than
@@ -174,7 +180,11 @@ before the app, after it, or an hour ago all behave identically.
 **Known limitation, stated in the window rather than hidden:** no agent emits an
 event when you *answer* a prompt. The next observable event is that tool
 finishing, so a lane can read Waiting while the approved tool already runs —
-seconds usually, up to about a minute. Bounded and self-clearing.
+seconds usually, up to about a minute. Codex stretches this: it reports a
+command only once its process has exited, so a server or a long install you
+allowed it to start holds Waiting until some later command finishes. A Codex
+*question* is the opposite case — its `PostToolUse` fires the moment you
+answer. Self-clearing in every case.
 
 **Silence is reported, never punished.** A session leaves only on `SessionEnd`
 or the ✕ — never on a timer, because the user who stepped away comes back to

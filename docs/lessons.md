@@ -23,10 +23,30 @@ hook, or the lighting.
 - **Codex clamps `SessionEnd` to 3 seconds**, so we ask for exactly 3 rather
   than collecting a warning on its hooks screen.
 - **Codex has no error and no interrupt event, and emits no `Notification` at
-  all.** Its only "needs you" signal is `PermissionRequest`. Say so rather than
-  guessing.
+  all.** It asks the user two ways: `PermissionRequest` for an approval, and
+  the `request_user_input` tool for a question. That tool is an ordinary
+  function call whose handler draws the dialog and blocks until it is
+  answered (read in `codex-rs/core/src/tools/handlers/request_user_input.rs`;
+  measured: 39 s between the call and its output in a real session), so its
+  `PreToolUse` fires as the question appears and its `PostToolUse` as it is
+  answered — Codex is the one agent that reports an answer. Say so rather
+  than guessing.
+- **Codex fires `PostToolUse` only when the command's process has exited.**
+  Measured 2026-08-25 (0.149.1, code mode) with `AGENT_FROW_DEBUG` against the
+  session rollout: every command is a JS cell calling `exec_command` /
+  `write_stdin`, and the nested call fires `PostToolUse` (as `Bash`) exactly
+  when it returns with an exit code. A call that yields with the process still
+  running — a dev server, an `npm install` on a 30 s `yield_time_ms` — fires
+  nothing, and neither do the polls on it, until the process exits during one.
+  So after the user approves such a command the lane holds Waiting until
+  *some* later command finishes: 42 s for `npm run dev`, two minutes for
+  `npm install`. Codex has no hook for the approval decision itself, so this
+  is stated in the window rather than papered over with a timer.
 - **`PreToolUse` is 46% of all hook traffic and tells a lane nothing**, because
-  agents auto-approve nearly every tool call. It is deliberately not registered.
+  agents auto-approve nearly every tool call. It is never registered
+  unfiltered. Codex gets it with the matcher `^request_user_input$` (a Codex
+  matcher is a regex against the tool name), for the reason above; Claude gets
+  none, because its questions arrive as a notification.
 - **Background subagents outlive the turn that spawned them.** `Stop` honestly
   means the main turn is done while subagents may still be at work, so the
   tracker keeps a per-session roster: `SubagentStart` enrols an `agent_id`,

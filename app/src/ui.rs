@@ -1078,9 +1078,14 @@ fn footnotes(ui: &mut egui::Ui, tracker: &Tracker) {
     {
         // Stated rather than hidden: no agent emits an event when the user
         // *answers* a prompt. The next observable event is the tool finishing,
-        // so a lane can read Waiting while the approved tool already runs.
+        // so a lane can read Waiting while the approved tool already runs —
+        // and Codex reports a command only once its process has exited, so a
+        // server or a long install it was allowed to start holds the lane on
+        // Waiting until some later command finishes.
         note(
-            "Waiting clears when the next tool finishes — no agent reports that you answered it."
+            "Waiting clears when the next tool finishes — no agent reports that you answered it. \
+             Codex reports a command only when it exits, so an approved server or long install \
+             holds Waiting until a later command finishes."
                 .to_owned(),
         );
     }

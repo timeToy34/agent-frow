@@ -31,12 +31,19 @@ const TIMEOUT_SECS: u64 = 5;
 /// problem there is not buried among warnings we caused ourselves.
 const CODEX_SESSION_END_TIMEOUT_SECS: u64 = 3;
 
+/// The one tool Codex's `PreToolUse` is registered for. Codex reads a matcher
+/// as a regular expression against the tool name, so this keeps the hook to
+/// the calls that ask the user a question and none of the other 46%.
+pub const QUESTION_TOOL_MATCHER: &str = "^request_user_input$";
+
 /// The hooks each agent is asked for, and why.
 ///
-/// `PreToolUse` is deliberately absent. It was 46% of all hook traffic in a
-/// real 46-hour measurement and contributed nothing a lane could show: a
-/// pre-tool hook fires for every tool call, and agents auto-approve nearly all
-/// of them.
+/// `PreToolUse` is deliberately never registered *unfiltered*. It was 46% of
+/// all hook traffic in a real 46-hour measurement and contributed nothing a
+/// lane could show: a pre-tool hook fires for every tool call, and agents
+/// auto-approve nearly all of them. Codex gets it for exactly one tool — see
+/// [`QUESTION_TOOL_MATCHER`] — because for that tool, running it *is* asking
+/// the user.
 fn events(agent: Agent) -> &'static [&'static str] {
     match agent {
         // `StopFailure` is how a lane can ever show Error, and the previous
@@ -64,10 +71,15 @@ fn events(agent: Agent) -> &'static [&'static str] {
             "SessionEnd",
         ],
         // Codex emits no `Notification` at all, and has neither an error nor an
-        // interrupt event. `PermissionRequest` is its only "needs you" signal.
+        // interrupt event. It asks the user two ways: `PermissionRequest` for
+        // an approval, and the `request_user_input` tool for a question — an
+        // ordinary function tool whose handler shows the dialog and blocks on
+        // the answer, so its `PreToolUse` is the moment the question appears
+        // and its `PostToolUse` the moment it was answered.
         Agent::Codex => &[
             "SessionStart",
             "UserPromptSubmit",
+            "PreToolUse",
             "PostToolUse",
             "PermissionRequest",
             "SubagentStart",
@@ -296,9 +308,19 @@ fn entry_for(agent: Agent, event: &str, command: &str) -> Value {
     let mut entry = Map::new();
     // Claude expects the literal `"*"`. Codex reads a matcher as a regular
     // expression, where `*` is not a valid pattern — omitting it is what means
-    // "every occurrence" there.
-    if agent == Agent::Claude {
-        entry.insert("matcher".to_owned(), Value::String("*".to_owned()));
+    // "every occurrence" there, and a real pattern is how its `PreToolUse` is
+    // narrowed to the question tool alone.
+    match (agent, event) {
+        (Agent::Claude, _) => {
+            entry.insert("matcher".to_owned(), Value::String("*".to_owned()));
+        }
+        (Agent::Codex, "PreToolUse") => {
+            entry.insert(
+                "matcher".to_owned(),
+                Value::String(QUESTION_TOOL_MATCHER.to_owned()),
+            );
+        }
+        (Agent::Codex, _) => {}
     }
     entry.insert("hooks".to_owned(), Value::Array(vec![Value::Object(hook)]));
     Value::Object(entry)

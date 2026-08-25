@@ -114,6 +114,23 @@ pub fn classify(notification_type: &str) -> Note {
     }
 }
 
+/// Whether the tool about to run is the one that asks the user a question.
+///
+/// The only place a tool's *name* means anything to a lane. Codex's
+/// `request_user_input` is an ordinary function tool whose handler draws the
+/// question and blocks until it is answered, so "the tool is starting" and
+/// "the user is being asked" are the same moment — and nothing is correlated
+/// to anything: the answer arrives as that tool's `PostToolUse`, which clears
+/// Waiting like any other activity. Claude's `AskUserQuestion` is named too
+/// because it means the same thing; Claude never sends us a `PreToolUse`, so
+/// it is inert there, and its questions reach us as a notification instead.
+fn asks_user(event: &Event) -> bool {
+    matches!(
+        event.tool_name.as_deref(),
+        Some("request_user_input" | "AskUserQuestion")
+    )
+}
+
 /// The transition table.
 pub fn step(current: State, event: &Event) -> Step {
     // A subagent's events carry the *parent's* `session_id`, so acting on them
@@ -132,6 +149,10 @@ pub fn step(current: State, event: &Event) -> Step {
 
         Kind::UserPromptSubmit => Step::Set(State::Running),
         Kind::PermissionRequest => Step::Set(State::Waiting),
+        // A question is about to be put to the user. Same weight as a
+        // permission prompt: it is asked, so it is pending, whatever the lane
+        // was doing.
+        Kind::PreToolUse if asks_user(event) => Step::Set(State::Waiting),
 
         // The prompt was answered with a no — by the user, a rule, or an
         // interrupt. Either way it is no longer pending, and the turn is
@@ -160,13 +181,15 @@ pub fn step(current: State, event: &Event) -> Step {
         // exists for events racing seconds apart (a PostToolUse emitted before
         // Stop can arrive after it), but after half an hour of silence an
         // event is genuine activity, not a straggler. Promoting from Done or
-        // Error would still resurrect a finished turn.
-        Kind::PostToolUse | Kind::PostToolUseFailure
+        // Error would still resurrect a finished turn. A `PreToolUse` for any
+        // other tool is the same kind of evidence: a tool is running, so a
+        // turn is open.
+        Kind::PreToolUse | Kind::PostToolUse | Kind::PostToolUseFailure
             if matches!(current, State::Waiting | State::Idle) =>
         {
             Step::Set(State::Running)
         }
-        Kind::PostToolUse | Kind::PostToolUseFailure => Step::Stay,
+        Kind::PreToolUse | Kind::PostToolUse | Kind::PostToolUseFailure => Step::Stay,
 
         // A subagent starting or stopping says nothing about what the *main*
         // agent is doing — the tracker keeps the roster; the lane state is the
@@ -206,6 +229,7 @@ pub fn adopt(event: &Event) -> Option<State> {
         Kind::SessionStart => State::Connected,
         Kind::UserPromptSubmit => State::Running,
         Kind::PermissionRequest => State::Waiting,
+        Kind::PreToolUse if asks_user(event) => State::Waiting,
         Kind::Notification => match event.notification.as_deref().map(classify) {
             Some(Note::NeedsUser) => State::Waiting,
             // Idle means a prompt is unanswered, and from here there is no way
@@ -213,7 +237,10 @@ pub fn adopt(event: &Event) -> Option<State> {
             // behind: something is alive over there.
             _ => State::Connected,
         },
-        Kind::PostToolUse | Kind::PostToolUseFailure | Kind::PermissionDenied => State::Running,
+        Kind::PreToolUse
+        | Kind::PostToolUse
+        | Kind::PostToolUseFailure
+        | Kind::PermissionDenied => State::Running,
         // Without an agent_id these say only that the session exists.
         Kind::SubagentStart | Kind::SubagentStop => State::Connected,
         Kind::Stop => State::Done,

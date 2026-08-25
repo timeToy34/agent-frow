@@ -47,6 +47,65 @@ fn a_permission_request_asks_for_the_user_and_activity_clears_it() {
 }
 
 #[test]
+fn a_codex_question_asks_for_the_user_and_the_answer_clears_it() {
+    // Codex asks questions through an ordinary tool, `request_user_input`,
+    // whose handler draws the dialog and blocks until it is answered. Its
+    // PreToolUse is therefore the moment the question appears, and its
+    // PostToolUse the moment it was answered — the one agent that reports an
+    // answer at all.
+    let asked = event(
+        "PreToolUse",
+        json!({ "src": "codex-wsl", "tool_name": "request_user_input" }),
+    );
+    for current in [State::Running, State::Connected, State::Idle, State::Done] {
+        assert_eq!(
+            state::step(current, &asked),
+            Step::Set(State::Waiting),
+            "{current:?}"
+        );
+    }
+    assert_eq!(
+        state::step(
+            State::Waiting,
+            &event(
+                "PostToolUse",
+                json!({ "src": "codex-wsl", "tool_name": "request_user_input" })
+            )
+        ),
+        Step::Set(State::Running)
+    );
+    // A subagent cannot ask (Codex refuses the tool off the root thread), and
+    // if one ever did, its event still carries the parent's session id.
+    assert_eq!(
+        state::step(
+            State::Running,
+            &event(
+                "PreToolUse",
+                json!({ "tool_name": "request_user_input", "agent_id": "sub-1" })
+            )
+        ),
+        Step::Stay
+    );
+}
+
+#[test]
+fn a_pre_tool_use_for_any_other_tool_is_plain_activity() {
+    // Only the question tool is registered for Codex, but a matcher is
+    // configuration somebody can widen. Any other tool starting means what a
+    // tool finishing means: a turn is open, and nothing more.
+    let bash = event("PreToolUse", json!({ "tool_name": "Bash" }));
+    assert_eq!(state::step(State::Idle, &bash), Step::Set(State::Running));
+    assert_eq!(
+        state::step(State::Waiting, &bash),
+        Step::Set(State::Running)
+    );
+    assert_eq!(state::step(State::Running, &bash), Step::Stay);
+    for finished in [State::Done, State::Error, State::Connected] {
+        assert_eq!(state::step(finished, &bash), Step::Stay, "{finished:?}");
+    }
+}
+
+#[test]
 fn activity_never_resurrects_a_finished_turn() {
     // Several hook processes post concurrently, so a PostToolUse emitted before
     // Stop can arrive after it. Promoting from anything but Waiting would put a
@@ -271,6 +330,18 @@ fn a_session_we_have_never_seen_is_read_from_the_event_that_introduced_it() {
         ("PostToolUseFailure", json!({}), Some(State::Running)),
         ("UserPromptSubmit", json!({}), Some(State::Running)),
         ("PermissionRequest", json!({}), Some(State::Waiting)),
+        // A question from a session we have never seen: somebody is being
+        // asked, right now.
+        (
+            "PreToolUse",
+            json!({ "src": "codex-win", "tool_name": "request_user_input" }),
+            Some(State::Waiting),
+        ),
+        (
+            "PreToolUse",
+            json!({ "tool_name": "Bash" }),
+            Some(State::Running),
+        ),
         ("Stop", json!({}), Some(State::Done)),
         ("StopFailure", json!({}), Some(State::Error)),
         (

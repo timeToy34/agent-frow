@@ -16,6 +16,9 @@ use serde_json::Value;
 pub enum Kind {
     SessionStart,
     UserPromptSubmit,
+    /// Registered for Codex only, and only for its question tool — see
+    /// `install::QUESTION_TOOL_MATCHER`.
+    PreToolUse,
     PostToolUse,
     PostToolUseFailure,
     PermissionRequest,
@@ -33,6 +36,7 @@ impl Kind {
         Some(match name {
             "SessionStart" => Self::SessionStart,
             "UserPromptSubmit" => Self::UserPromptSubmit,
+            "PreToolUse" => Self::PreToolUse,
             "PostToolUse" => Self::PostToolUse,
             "PostToolUseFailure" => Self::PostToolUseFailure,
             "PermissionRequest" => Self::PermissionRequest,
@@ -51,6 +55,7 @@ impl Kind {
         match self {
             Self::SessionStart => "SessionStart",
             Self::UserPromptSubmit => "UserPromptSubmit",
+            Self::PreToolUse => "PreToolUse",
             Self::PostToolUse => "PostToolUse",
             Self::PostToolUseFailure => "PostToolUseFailure",
             Self::PermissionRequest => "PermissionRequest",
@@ -231,6 +236,22 @@ mod tests {
         );
         assert!(parsed.subagent);
         assert_eq!(parsed.note(), "PostToolUse Bash");
+    }
+
+    #[test]
+    fn a_question_about_to_be_asked_is_named_as_such() {
+        let parsed = event(
+            json!({
+                "src": "codex-wsl",
+                "hook_event_name": "PreToolUse",
+                "session_id": "s1",
+                "tool_name": "request_user_input",
+            }),
+            10,
+        );
+        assert_eq!(parsed.kind, Kind::PreToolUse);
+        assert!(!parsed.subagent);
+        assert_eq!(parsed.note(), "PreToolUse request_user_input");
     }
 
     #[test]

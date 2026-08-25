@@ -305,10 +305,11 @@ fn log_event(value: &serde_json::Value) {
             .to_owned()
     };
     let line = format!(
-        "{} src={} evt={} sid={} cwd={:?} agent_id={} agent_type={} ntype={} reason={} end={}\n",
+        "{} src={} evt={} tool={} sid={} cwd={:?} agent_id={} agent_type={} ntype={} reason={} end={}\n",
         now_ms(),
         field("src"),
         field("hook_event_name"),
+        field("tool_name"),
         field("session_id"),
         field("cwd"),
         field("agent_id"),
