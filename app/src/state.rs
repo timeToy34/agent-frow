@@ -197,6 +197,13 @@ pub fn step(current: State, event: &Event) -> Step {
         // when the id is present; this is the answer when it is not.)
         Kind::SubagentStart | Kind::SubagentStop => Step::Stay,
 
+        // Codex has no dialog for approving a plan. It ends the turn with the
+        // plan in its final message, and its UI asks "implement?" from that —
+        // so a Stop carrying the plan is somebody being asked, not a turn
+        // that is over. The answer, whichever it is, arrives as the next
+        // prompt and clears it; Claude's plans are a tool and never come
+        // this way.
+        Kind::Stop if event.proposed_plan => Step::Set(State::Waiting),
         Kind::Stop => Step::Set(State::Done),
         Kind::StopFailure => Step::Set(State::Error),
         Kind::SessionEnd => Step::Release,
@@ -243,6 +250,7 @@ pub fn adopt(event: &Event) -> Option<State> {
         | Kind::PermissionDenied => State::Running,
         // Without an agent_id these say only that the session exists.
         Kind::SubagentStart | Kind::SubagentStop => State::Connected,
+        Kind::Stop if event.proposed_plan => State::Waiting,
         Kind::Stop => State::Done,
         Kind::StopFailure => State::Error,
         Kind::SessionEnd => return None,

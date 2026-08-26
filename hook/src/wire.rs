@@ -30,6 +30,11 @@ const ALLOWED: [&str; 13] = [
     "permission_mode",
 ];
 
+/// The tag Codex wraps a plan in when it ends a plan-mode turn by proposing
+/// one; its TUI and desktop app recognise exactly this to offer "implement
+/// the plan?".
+const PROPOSED_PLAN_TAG: &str = "<proposed_plan>";
+
 /// Projects the agent's payload onto the allowlist and adds what only this
 /// process can know: which of the four flavors ran it, and where it is running.
 ///
@@ -59,6 +64,20 @@ pub fn project(
                 _ => {}
             }
         }
+    }
+
+    // One fact about a field that itself never leaves: whether Codex's `Stop`
+    // carries a proposed plan. Codex has no dialog for "approve this plan?" —
+    // its UI draws that prompt when a turn *ends* with the plan wrapped in
+    // this tag, so the tag is the only evidence there is. Still a name and a
+    // shape, not a meaning: this reports that the tag is present; what that
+    // implies for a lane is decided in the app, as with every other field.
+    if payload
+        .get("last_assistant_message")
+        .and_then(Value::as_str)
+        .is_some_and(|text| text.contains(PROPOSED_PLAN_TAG))
+    {
+        out.insert("proposed_plan".to_owned(), Value::Bool(true));
     }
 
     if let Some(wt) = wt_session {
@@ -122,6 +141,32 @@ mod tests {
         ] {
             assert!(!out.contains_key(leaky), "{leaky} must not be forwarded");
         }
+    }
+
+    #[test]
+    fn a_proposed_plan_is_reported_as_a_flag_and_never_as_text() {
+        // Codex ends a plan-mode turn with the plan in the message, and its UI
+        // asks "implement?" from that. The flag is the evidence; the plan
+        // itself is the user's content and stays where it is.
+        let out = projected(json!({
+            "hook_event_name": "Stop",
+            "session_id": "s1",
+            "last_assistant_message": "<proposed_plan>\n# Rebuild the deck\n</proposed_plan>",
+        }));
+        assert_eq!(out.get("proposed_plan"), Some(&json!(true)));
+        assert!(!out.contains_key("last_assistant_message"));
+
+        // An ordinary final message sets nothing — absence, not `false`, so an
+        // app that predates the flag sees the exact record it always did.
+        let out = projected(json!({
+            "hook_event_name": "Stop",
+            "last_assistant_message": "Done. The deck validates at 35 slides.",
+        }));
+        assert!(!out.contains_key("proposed_plan"));
+
+        // And the payload cannot assert it by name.
+        let out = projected(json!({ "hook_event_name": "Stop", "proposed_plan": true }));
+        assert!(!out.contains_key("proposed_plan"));
     }
 
     #[test]

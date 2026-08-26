@@ -31,6 +31,15 @@ hook, or the lighting.
   `PreToolUse` fires as the question appears and its `PostToolUse` as it is
   answered — Codex is the one agent that reports an answer. Say so rather
   than guessing.
+- **Codex has no dialog for approving a plan.** A plan-mode turn *ends* with
+  the plan wrapped in `<proposed_plan>` in the final message, and the TUI and
+  desktop app draw "implement this plan?" from that tag; accepting sends a
+  new user message ("Implement the plan.") in Default mode. On the wire that
+  is a `Stop` then a `UserPromptSubmit` — nothing fires at the moment of the
+  question. `Stop` does carry `last_assistant_message`, so the hook reports
+  one boolean, `proposed_plan`, when the tag is present (the message itself
+  never leaves), and the table reads that `Stop` as Waiting. Claude's plans
+  are the `ExitPlanMode` tool and arrive as a `PermissionRequest`.
 - **Codex fires `PostToolUse` only when the command's process has exited.**
   Measured 2026-08-25 (0.149.1, code mode) with `AGENT_FROW_DEBUG` against the
   session rollout: every command is a JS cell calling `exec_command` /

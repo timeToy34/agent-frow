@@ -96,6 +96,10 @@ pub struct Event {
     /// `SessionStart`'s own `source` field: `startup`, `resume`, `clear`, `compact`.
     pub start_source: Option<String>,
     pub notification: Option<String>,
+    /// A `Stop` whose final message carried Codex's `<proposed_plan>` tag —
+    /// the hook reports the tag, this names it. Codex has no dialog for
+    /// approving a plan: its UI asks "implement?" when a turn ends like this.
+    pub proposed_plan: bool,
     /// The subagent this event belongs to, when it belongs to one — subagents
     /// share their parent's `session_id` and are told apart by this. Their
     /// events never change the lane's state (see [`crate::state::step`]); the
@@ -188,6 +192,10 @@ impl Event {
             tool_name: text("tool_name"),
             start_source: text("source"),
             notification: text("notification_type"),
+            proposed_plan: value
+                .get("proposed_plan")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             subagent: text("agent_id").is_some() || text("agent_type").is_some(),
             agent: text("agent_id"),
             wt_session: text("wt_session"),
@@ -201,7 +209,8 @@ impl Event {
             .tool_name
             .as_deref()
             .or(self.notification.as_deref())
-            .or(self.start_source.as_deref());
+            .or(self.start_source.as_deref())
+            .or(self.proposed_plan.then_some("proposed plan"));
         match detail {
             Some(detail) => format!("{} {detail}", self.kind.label()),
             None => self.kind.label().to_owned(),
@@ -252,6 +261,28 @@ mod tests {
         assert_eq!(parsed.kind, Kind::PreToolUse);
         assert!(!parsed.subagent);
         assert_eq!(parsed.note(), "PreToolUse request_user_input");
+    }
+
+    #[test]
+    fn a_stop_that_proposes_a_plan_says_so() {
+        let parsed = event(
+            json!({
+                "src": "codex-wsl",
+                "hook_event_name": "Stop",
+                "session_id": "s1",
+                "proposed_plan": true,
+            }),
+            10,
+        );
+        assert!(parsed.proposed_plan);
+        assert_eq!(parsed.note(), "Stop proposed plan");
+        // Absent — the record every hook sent before the flag existed.
+        let plain = event(
+            json!({ "src": "codex-wsl", "hook_event_name": "Stop", "session_id": "s1" }),
+            10,
+        );
+        assert!(!plain.proposed_plan);
+        assert_eq!(plain.note(), "Stop");
     }
 
     #[test]

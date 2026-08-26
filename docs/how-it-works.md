@@ -162,6 +162,11 @@ has a test named after it:
   idle notification says so a minute later.
 - `PostToolUse` promotes **only from Waiting**. Hook processes post
   concurrently, so one emitted before `Stop` can arrive after it.
+- A `Stop` carrying `proposed_plan` sets Waiting, not Done. Codex has no
+  dialog for approving a plan: it ends the plan-mode turn with the plan in
+  its final message and its UI asks "implement?" from that. The hook reports
+  only that the `<proposed_plan>` tag is present — the message stays where
+  it is — and the answer arrives as the next prompt.
 - `PreToolUse` for `request_user_input` sets Waiting. It is the only tool
   name the table reads: Codex asks its questions through that tool, whose
   handler shows the dialog and blocks until it is answered, so the tool

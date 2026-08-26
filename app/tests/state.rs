@@ -89,6 +89,34 @@ fn a_codex_question_asks_for_the_user_and_the_answer_clears_it() {
 }
 
 #[test]
+fn a_codex_plan_waits_for_its_verdict_and_the_verdict_clears_it() {
+    // Codex proposes a plan by ending the turn with it; its UI asks
+    // "implement?" from that. So this Stop is a question, not an ending, and
+    // whatever the user says comes back as the next prompt.
+    let proposed = event("Stop", json!({ "src": "codex-wsl", "proposed_plan": true }));
+    assert_eq!(
+        state::step(State::Running, &proposed),
+        Step::Set(State::Waiting)
+    );
+    assert_eq!(state::adopt(&proposed), Some(State::Waiting));
+    assert_eq!(
+        state::step(
+            State::Waiting,
+            &event("UserPromptSubmit", json!({ "src": "codex-wsl" }))
+        ),
+        Step::Set(State::Running)
+    );
+    // A turn that merely ends is still Done — the flag is absent, not false.
+    assert_eq!(
+        state::step(
+            State::Running,
+            &event("Stop", json!({ "src": "codex-wsl" }))
+        ),
+        Step::Set(State::Done)
+    );
+}
+
+#[test]
 fn a_pre_tool_use_for_any_other_tool_is_plain_activity() {
     // Only the question tool is registered for Codex, but a matcher is
     // configuration somebody can widen. Any other tool starting means what a
