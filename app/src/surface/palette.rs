@@ -17,15 +17,21 @@ use crate::state::State;
 
 /// A lane with no session. The one colour that is not a preference: darkness is
 /// how the row says nothing is there.
-const OFF: Rgb = Rgb::new(0, 0, 0);
+pub const OFF: Rgb = Rgb::new(0, 0, 0);
 
 /// Error. Fixed, not a setting — red only means anything if nothing else may
 /// use it, which is also why lane colours are asked to stay away from it. The
 /// deep shade, by the owner's eye on the real keys.
-const DARK_RED: Rgb = Rgb::new(110, 0, 0);
+pub const DARK_RED: Rgb = Rgb::new(110, 0, 0);
 
 /// The resting glow: how bright "present, nothing to report" sits.
 const BASE: f32 = 0.20;
+
+/// The lane's colour at the resting glow — what "present, nothing to report"
+/// looks like, for a surface that needs the shade by itself.
+pub fn base(lane_color: Rgb) -> Rgb {
+    scale(lane_color, BASE)
+}
 
 /// One full circuit of Running's travelling light.
 const SCANNER_PERIOD_MS: u64 = 1400;

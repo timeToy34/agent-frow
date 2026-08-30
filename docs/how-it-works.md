@@ -248,12 +248,12 @@ The lane name is load-bearing: focus finds a terminal tab by it.
 
 ## The keyboard
 
-Two surfaces, one palette. `app/src/surface/palette.rs` says what the twelve
+Three surfaces, one palette. `app/src/surface/palette.rs` says what the twelve
 keys look like, by F-row position and never by LED; each surface maps a
-position to what its keyboard calls that LED, and writes. Both threads run for
-the life of the app: whichever keyboard is plugged in lights up, and both do
-if both are. Each is also a clock — through `surface/scene.rs`, which decides
-when a frame is due — so lanes stay honest while the window is hidden.
+position to what its device calls that LED, and writes. All three threads run
+for the life of the app: whatever is plugged in lights up, and all of it does
+if all of it is. Each is also a clock — through `surface/scene.rs`, which
+decides when a frame is due — so lanes stay honest while the window is hidden.
 
 ### Corsair, through the iCUE SDK
 
@@ -329,6 +329,72 @@ keyboard's keymap, work over all three.
   reconnect like any other. `agent-frow doctor` lists what it finds and what
   each answers.
 
+### Stream Deck, over HID
+
+The one surface that is taken whole. A keyboard has keys of its own beside
+ours; a deck has only the keys, and the Elgato app repaints every one from
+its own profile and reads every press, so the two cannot share. Plain HID
+through the `elgato-streamdeck` crate, which knows each model's report
+layout, image size, rotation and encoding; no driver, nothing linked.
+
+- **Only while its own software is not running.** `StreamDeck.exe` in the
+  process list means the deck is the Elgato app's: the surface does not open
+  it and says so in the window. Checked every ten seconds while the deck is
+  held, too, and the deck is handed back — `reset`, which is its logo, what
+  a deck shows with nothing driving it — the moment the app appears. That
+  reset is also the exit, tray Quit included; "as found" for a deck is the
+  logo.
+- **One row per lane**, like the F-row: the first key is the lane's name,
+  the last its state, and the keys between are the lane's body. The colours
+  are `lane_colors` over the row — the marker, the runner crossing, the
+  double-pulse, the dark red of Error — with the state key steadied: it
+  rests at the lane's glow through Waiting's pulse, Error's red and Done's
+  marker. The words are ink over one colour, in Segoe UI Bold — read from
+  the Windows font folder, so nothing is shipped, and bold because a light
+  face on a small LCD could not be read at arm's length; the window's own
+  Ubuntu stands in if the file is missing: the name on the first key, the
+  state word over the elapsed time on the last, and in Waiting an up
+  triangle, a down triangle and the word Enter on the three middle keys —
+  the triangles drawn, not typeset. The name is set as words — a dot or a
+  dash breaks like a space, on the deck only — over up to three lines, as
+  large as the key allows. Ink is grey on a key that is dark on purpose (an
+  empty lane is black with its name in grey, Idle is one dim name key and
+  the rest off), and otherwise black or white by the key's colour of the
+  moment, whichever contrasts more — so it turns with the runner rather
+  than vanish into it. A deck shows as many lanes as it has rows — three
+  on a 15-key deck — and the window says which; the rows past the lanes are
+  black. `surface/streamdeck/canvas.rs` is the drawing and has no device in
+  it.
+- **Brightness is the deck's own**, set from the slider; the pixels are never
+  scaled and never colour-corrected — an LCD is a screen, like the window.
+- **A key is written when its face changes**, not when the scene says so:
+  the elapsed time on a key ticks while the lane's state stands still, so
+  every key is compared with what it was last told, and only a changed one
+  is rasterised, encoded and sent. A resting deck costs nothing; a lane in
+  motion rewrites its row ten times a second.
+- **One thread for both directions.** The device handle cannot be shared,
+  so the wait between frames is spent listening for a press, and a press is
+  answered at once. Every key of a row summons its lane through the same
+  `keys::summon_lane` the F-row's marker keys use; in Waiting the three
+  middle keys go through `keys::answer_lane` instead — the same raise, then
+  one key. Both on a thread of their own, since a raise can spend a quarter
+  of a second on the terminal's tab strip. A preview is a look, not a
+  question: its Waiting shows the answer keys and never types.
+- **A deck press is not input to this process.** It arrives over USB on our
+  thread, not as a keystroke Windows delivered to us, so the foreground
+  permission a summon key gets is not granted here. The terminal is still
+  brought to the top of the ordinary stack (the topmost/not-topmost pair
+  needs no permission), and no synthetic input is used to *get* the
+  keyboard. Whether the keyboard followed is then checked —
+  `GetForegroundWindow` is the window, and for Windows Terminal, UI
+  Automation says focus is not on the tab strip, where an arrow switches
+  tabs — and only then is one key sent with `SendInput`. If not, the press
+  has focused the window and the status bar says to press again; a
+  keystroke whose destination cannot be told is not sent.
+- Found by the driver's list and opened by serial; the first deck with a
+  screen is the one taken. `agent-frow doctor` lists what is on the bus and
+  whether the Elgato app has it, without opening anything.
+
 ### Summon keys
 
 F13–F24 are registered as global hotkeys with `MOD_NOREPEAT`. That both keeps
@@ -369,8 +435,10 @@ sessions every frame, so lanes stay honest in the tray.
 ## Focus
 
 Click a lane, and the window its agent runs in comes forward — a terminal with
-the right tab in front, or the Claude/Codex desktop app, or an IDE. **The only
-action in the product** — no approvals, no arrows, no key capture.
+the right tab in front, or the Claude/Codex desktop app, or an IDE. **The
+product's first action** — no approvals, no key capture. Its second is the one
+keystroke a Stream Deck's answer keys can send, and that goes only to a
+terminal that verifiably has the keyboard.
 
 - **The hook reports its own Windows ancestry**, each ancestor as a pid plus
   the exe name that pid had at event time; the nearest ancestor whose pid
@@ -409,7 +477,9 @@ Three things it must keep doing (the histories are in [lessons.md](lessons.md)):
 - **Get foreground permission from the input, not by force.** Windows only lets
   a process change the foreground window if the user just gave input *to it*.
   The summon key arrives as a `WM_HOTKEY` posted to this app, so the input *is*
-  ours and the raise is allowed. No synthetic input, no foreground-lock tricks.
+  ours and the raise is allowed. No synthetic input, no foreground-lock tricks
+  — synthetic input never gains the foreground; the deck's one keystroke is
+  sent only after the foreground is verified.
 - **Activation and Z-order are separate.** `SetForegroundWindow` can leave a
   window the "foreground window" per the API while it is still drawn *behind*
   another. A topmost/not-topmost `SetWindowPos` pair forces the window

@@ -104,6 +104,15 @@ fn doctor() -> Result<(), String> {
             Err(reason) => println!("  Keychron: {reason}"),
         },
     }
+    // The deck is only listed, never opened, so this is fine either way.
+    match surface::streamdeck::probe() {
+        Ok(lines) => {
+            for line in lines {
+                println!("  Stream Deck: {line}");
+            }
+        }
+        Err(reason) => println!("  Stream Deck: {reason}"),
+    }
     println!();
 
     let seen = paths::last_seen_file()
@@ -631,6 +640,7 @@ fn run(dialog_on_busy: bool, notice: Option<String>) -> Result<(), String> {
     // also what evicts stale sessions while the window is hidden in the tray.
     let _keyboard = surface::corsair::start(Arc::clone(&tracker));
     let _keychron = surface::keychron::start(Arc::clone(&tracker));
+    let _streamdeck = surface::streamdeck::start(Arc::clone(&tracker));
 
     // The summon keys: F13–F24, which the user's iCUE profile maps the F-row
     // to. Kept alive for the life of the app; dropping it unregisters them.

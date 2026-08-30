@@ -1,9 +1,11 @@
 //! Bringing the window an agent runs in forward — a terminal, a desktop app,
 //! or an IDE.
 //!
-//! **The only action in this product.** Everything else is display: the app
-//! never sends anything to an agent, never approves anything, never captures a
-//! key. Clicking a lane raises a window, and that is the whole of it.
+//! **The product's two actions.** Everything else is display: the app never
+//! answers a hook, never approves anything, never captures a key. Clicking a
+//! lane raises a window; and a Stream Deck's answer keys, while a lane is
+//! Waiting, raise the window and then send one Up, Down or Enter — only into
+//! a window that verifiably has the keyboard, never to gain it.
 //!
 //! Two documented Windows facilities and no window-title guessing:
 //!
@@ -35,16 +37,81 @@ mod window;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
     pub raised: bool,
+    /// The top-level window that came forward, when one did — what a
+    /// keystroke may then be sent to, once it is verified to have the
+    /// keyboard.
+    pub window: Option<isize>,
     pub detail: String,
 }
 
 impl Report {
-    fn new(raised: bool, detail: impl Into<String>) -> Self {
+    fn failed(detail: impl Into<String>) -> Self {
         Self {
-            raised,
+            raised: false,
+            window: None,
             detail: detail.into(),
         }
     }
+
+    #[cfg(windows)]
+    fn raised(window: isize, detail: impl Into<String>) -> Self {
+        Self {
+            raised: true,
+            window: Some(window),
+            detail: detail.into(),
+        }
+    }
+}
+
+/// The one keystroke a surface may send: an answer to a question the agent
+/// is asking, pressed by the user on a key that says which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Key {
+    Up,
+    Down,
+    Enter,
+}
+
+impl Key {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Up => "Up",
+            Self::Down => "Down",
+            Self::Enter => "Enter",
+        }
+    }
+}
+
+/// Whether a keystroke may go out, given what was verified: the target is
+/// the foreground window, and — for a terminal with tabs — keyboard focus
+/// is not on its tab strip, where arrows switch tabs instead of reaching
+/// the agent. `None` for the tab strip is "could not tell", and a keystroke
+/// whose destination cannot be told is not sent; the user is told instead.
+pub fn ready_to_type(
+    foreground_is_target: bool,
+    on_tab_strip: Option<bool>,
+) -> Result<(), &'static str> {
+    if !foreground_is_target {
+        return Err("brought forward, but the keyboard is elsewhere — press again");
+    }
+    match on_tab_strip {
+        Some(false) => Ok(()),
+        Some(true) => Err("focus is on the terminal's tab strip — click into the terminal"),
+        None => Err("could not tell where the keyboard is — click into the terminal"),
+    }
+}
+
+/// Sends `key` to `window`, which a [`raise`] just reported, after verifying
+/// it has the keyboard. `Ok` says what went where; `Err` says why nothing
+/// was sent, in words for the status bar.
+#[cfg(windows)]
+pub fn type_key(window: isize, key: Key) -> Result<String, String> {
+    window::type_key(window, key)
+}
+
+#[cfg(not(windows))]
+pub fn type_key(_window: isize, _key: Key) -> Result<String, String> {
+    Err("typing is a Windows facility".to_owned())
 }
 
 /// Raises the host window that ran `ancestors`, and — when the host is a
@@ -61,5 +128,37 @@ pub fn raise(ancestors: &[crate::event::Ancestor], tab_names: &[String]) -> Repo
 
 #[cfg(not(windows))]
 pub fn raise(_ancestors: &[crate::event::Ancestor], _tab_names: &[String]) -> Report {
-    Report::new(false, "focus is a Windows facility")
+    Report::failed("focus is a Windows facility")
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_keystroke_needs_the_foreground_and_not_the_tab_strip() {
+        assert_eq!(ready_to_type(true, Some(false)), Ok(()));
+        assert!(
+            ready_to_type(false, Some(false))
+                .unwrap_err()
+                .contains("press again")
+        );
+        assert!(
+            ready_to_type(true, Some(true))
+                .unwrap_err()
+                .contains("tab strip")
+        );
+        assert!(
+            ready_to_type(true, None)
+                .unwrap_err()
+                .contains("could not tell")
+        );
+        assert!(
+            ready_to_type(false, None)
+                .unwrap_err()
+                .contains("press again"),
+            "the foreground is the first question"
+        );
+    }
 }

@@ -135,13 +135,14 @@ impl App {
                     if event.id == show_id {
                         reopen(&hwnd, &ctx);
                     } else if event.id == quit_id {
-                        // Hand the Keychron back and release the registered
-                        // hotkeys before the immediate exit — neither happens
-                        // by itself, since exit does not unwind. The rest —
-                        // settings, sessions, iCUE — needs nothing, and going
-                        // through the UI loop would hang exactly when the
-                        // window is hidden.
+                        // Hand the Keychron and the Stream Deck back and
+                        // release the registered hotkeys before the immediate
+                        // exit — none happens by itself, since exit does not
+                        // unwind. The rest — settings, sessions, iCUE — needs
+                        // nothing, and going through the UI loop would hang
+                        // exactly when the window is hidden.
                         crate::surface::keychron::restore_now();
+                        crate::surface::streamdeck::restore_now();
                         crate::keys::unhook_now();
                         std::process::exit(0);
                     }

@@ -18,12 +18,16 @@ it.
 
 - **Windows only.** Works with **Claude Code** and **Codex**, each running
   natively on Windows and inside WSL.
-- **The light is a Corsair keyboard through iCUE, or a Keychron Ultra on its
-  cable or 2.4 GHz receiver.** Without one the window still shows everything;
-  the keys and the light are the part you would be missing.
-- **Display only.** It never sends anything to an agent and cannot approve,
-  deny, or answer anything; its reply to every hook is empty. The agents talk
-  to it over loopback on your machine, and nothing leaves it.
+- **The light is a Corsair keyboard through iCUE, a Keychron Ultra on its
+  cable or 2.4 GHz receiver, or an Elgato Stream Deck.** Without one the
+  window still shows everything; the keys and the light are the part you
+  would be missing.
+- **Display, and two presses.** It never answers a hook, never approves or
+  denies anything, and never acts on its own; its reply to every hook is
+  empty. A lane's key brings the agent's window forward. On a Stream Deck,
+  while a lane is Waiting, its three middle keys send one Up, Down or Enter —
+  only into a terminal that verifiably has the keyboard. The agents talk to
+  it over loopback on your machine, and nothing leaves it.
 
 ## What you see
 
@@ -66,8 +70,10 @@ preference or forget it.
 
 Press the lane's key (or click Focus) and the window the agent runs in comes
 forward — Windows Terminal with the right tab in front (including a tab torn
-out into its own window), the Claude or Codex desktop app, or an IDE. That is
-the only action in the product: no approvals, no key capture.
+out into its own window), the Claude or Codex desktop app, or an IDE. No
+approvals, no key capture. Nothing is ever typed into a window that merely
+came forward: a Stream Deck's answer keys send their one key only after
+Windows says the terminal has the keyboard, and otherwise say "press again".
 
 The tab it looks for is the lane's name, then the project folder — so naming a
 lane is a feature. If no tab matches, it says so and lists the tabs it found,
@@ -104,8 +110,9 @@ registered, and when it was last heard from, with Install and Remove per agent.
 
 ## Keyboards
 
-Two are supported, and both may be plugged in at once. Either way the app
-touches only the twelve F-row LEDs and leaves the rest of the board to you.
+Two keyboards and a Stream Deck are supported, and all may be plugged in at
+once. On a keyboard the app touches only the twelve F-row LEDs and leaves the
+rest of the board to you.
 
 **Corsair, through iCUE.** iCUE running with third-party control enabled,
 and the F-row remapped to F13–F24 in the **default** profile — a profile
@@ -127,6 +134,20 @@ so every lit key shows at full and dark keys show white until Keychron ships
 [firmware/keychron-ultra](firmware/keychron-ultra/README.md) builds their
 firmware with the fix applied and explains how the Launcher flashes it — read
 it before deciding. `agent-frow doctor` lists what it finds on the bus.
+
+**Elgato Stream Deck (MK.2 verified; the driver knows every model with a
+screen).** Plain USB, no driver, nothing to install. One row per lane, like a
+five-key F-row: the left key is the lane's name, the right key its state and
+how long, and the three between are the lane's body — the same colours and
+motion as on the keyboard. While a lane is Waiting those three are **Up, Down
+and Enter**, so a question gets answered from the deck; the app never presses
+anything on its own, and sends the key only into a terminal that verifiably
+has the keyboard. Every key of a row focuses the lane. A 15-key deck shows
+lanes 1–3, and the window says which lanes are on it. The deck cannot be
+shared with the Stream Deck app, which repaints every key and reads every
+press, so **quit the Stream Deck app** and Agent F-Row takes the deck; start
+it again and the deck is handed back within ten seconds. On Quit the deck goes
+back to its logo. `agent-frow doctor` lists it too.
 
 ## Settings
 

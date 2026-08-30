@@ -111,29 +111,36 @@ impl Session {
 /// log. One per surface: a Corsair and a Keychron each say their own piece.
 #[derive(Debug, Clone, Default)]
 pub struct KeyboardStatus {
-    /// Which surface is talking: "Corsair", "Keychron".
+    /// Which surface is talking: "Corsair", "Keychron", "Stream Deck".
     pub surface: &'static str,
     pub connected: bool,
-    /// How many of our twelve keys this keyboard actually has.
+    /// How many keys this surface is driving.
     pub driven: usize,
     pub detail: String,
 }
 
 impl KeyboardStatus {
-    /// Driving `driven` of the twelve keys on `model`.
+    /// Driving `driven` of the twelve F-row keys on `model`.
     pub fn connected(surface: &'static str, model: &str, driven: usize) -> Self {
         let keys = crate::settings::KEYS;
+        let detail = if driven == keys {
+            format!("{model}: driving the {driven} F-row keys")
+        } else {
+            format!(
+                "{model}: only {driven} of the {keys} F-row keys exist here, so the lanes are incomplete"
+            )
+        };
+        Self::driving(surface, detail, driven)
+    }
+
+    /// Driving `driven` keys of something that is not an F-row, described in
+    /// the surface's own words.
+    pub fn driving(surface: &'static str, detail: String, driven: usize) -> Self {
         Self {
             surface,
             connected: true,
             driven,
-            detail: if driven == keys {
-                format!("{model}: driving the {driven} F-row keys")
-            } else {
-                format!(
-                    "{model}: only {driven} of the {keys} F-row keys exist here, so the lanes are incomplete"
-                )
-            },
+            detail,
         }
     }
 
@@ -643,5 +650,21 @@ pub fn elapsed(since_ms: u64, now_ms: u64) -> String {
         0..=59 => format!("{secs}s"),
         60..=3599 => format!("{}m {}s", secs / 60, secs % 60),
         _ => format!("{}h {}m", secs / 3600, (secs % 3600) / 60),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn driving_says_exactly_what_the_surface_said() {
+        let status = KeyboardStatus::driving("Stream Deck", "Mk2: 15 keys".to_owned(), 15);
+        assert!(status.connected);
+        assert_eq!(status.driven, 15);
+        assert_eq!(status.detail, "Mk2: 15 keys");
+        let f_row = KeyboardStatus::connected("Keychron", "V3 Ultra", 12);
+        assert!(f_row.detail.contains("driving the 12 F-row keys"));
     }
 }

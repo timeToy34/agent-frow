@@ -12,7 +12,10 @@
 //! one". Reading it is not reverse engineering; it is the documented way an
 //! application tells the desktop what it contains.
 //!
-//! No synthetic input: nothing here fabricates a click or a keystroke.
+//! No synthetic input: nothing here fabricates a click or a keystroke. This
+//! file only reads and selects. The one keystroke the product can send lives
+//! in `window::type_key`, behind the question this file answers — where the
+//! keyboard focus is.
 
 use windows::Win32::Foundation::{HWND, RPC_E_CHANGED_MODE};
 use windows::Win32::System::Com::{
@@ -192,6 +195,23 @@ pub fn selected_tab(hwnd: HWND) -> Option<String> {
         .into_iter()
         .find(|tab| tab.selected)
         .map(|tab| tab.name)
+}
+
+/// Whether keyboard focus in a terminal window is on its tab strip — on a
+/// tab, where the arrow keys move between tabs — rather than in the
+/// terminal itself. `None` when UI Automation cannot say, which a caller
+/// about to send a keystroke must treat as "do not".
+pub fn focus_on_tab_strip(hwnd: HWND) -> Option<bool> {
+    let _apartment = Apartment::enter()?;
+    let _ = hwnd;
+    // SAFETY: all FFI, every fallible call matched.
+    unsafe {
+        let automation =
+            CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_ALL).ok()?;
+        let focused = automation.GetFocusedElement().ok()?;
+        let control = focused.CurrentControlType().ok()?;
+        Some(control == UIA_TabItemControlTypeId)
+    }
 }
 
 /// Turns a placeholder into a real element where the tab strip virtualizes.

@@ -65,6 +65,21 @@ impl Scene {
         self.dirty = true;
     }
 
+    /// What the board is showing right now, without counting it as painted.
+    ///
+    /// For a surface that paints on its own terms — one whose keys carry an
+    /// elapsed time, say, which changes while the lane's state does not — and
+    /// so cannot take "nothing changed" from [`Self::tick`] as "nothing to
+    /// do". `None` before the first tick, when there is nothing to show yet.
+    pub fn current(&self) -> Option<Frame<'_>> {
+        let settings = self.settings.as_ref()?;
+        Some(Frame {
+            states: &self.last_states,
+            settings,
+            elapsed_ms: self.start.elapsed().as_millis() as u64,
+        })
+    }
+
     /// Runs the clock and says whether a frame is due.
     ///
     /// Always sweeps and retires an expired preview, whether or not anything
@@ -199,6 +214,28 @@ mod tests {
         for now in 0..5 {
             assert!(scene.tick(&tracker, now).unwrap().is_some(), "tick {now}");
         }
+    }
+
+    #[test]
+    fn current_reports_the_board_without_counting_as_painted() {
+        let tracker = Mutex::new(Tracker::default());
+        let mut scene = Scene::new();
+        assert!(scene.current().is_none(), "nothing before the first tick");
+        scene.tick(&tracker, 0).unwrap();
+        tracker
+            .lock()
+            .unwrap()
+            .sessions
+            .push(session(State::Waiting, 2));
+        // The change is visible to the clock but a look is not a paint.
+        assert!(scene.tick(&tracker, 1).unwrap().is_some());
+        assert_eq!(scene.current().unwrap().states[2], Some(State::Waiting));
+        scene.invalidate();
+        assert_eq!(scene.current().unwrap().states[2], Some(State::Waiting));
+        assert!(
+            scene.tick(&tracker, 2).unwrap().is_some(),
+            "current() left the frame due"
+        );
     }
 
     #[test]

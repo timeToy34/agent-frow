@@ -114,7 +114,9 @@ hook, or the lighting.
     precisely when the Agent F-Row window was focused — while a click on the
     Focus button, being real input to us, always worked. Registering F13–F24
     as global hotkeys makes the `WM_HOTKEY` input ours, and the raise is
-    allowed. No synthetic input, no foreground-lock tricks.
+    allowed. No synthetic input, no foreground-lock tricks. (The Stream
+    Deck's answer keys do send one keystroke — after the foreground is
+    verified, never to win it.)
   - *Activation and Z-order are separate.* `SetForegroundWindow` reported
     success while the window stayed drawn behind another; the summon claimed
     to work while nothing visibly moved. Hence the topmost/not-topmost
@@ -224,6 +226,10 @@ hook, or the lighting.
 - **M3 — Corsair lighting**, plus its setup UI. Done.
 - **M4 — click a lane to focus that agent's window and terminal tab.** Done.
 - **M5 — Keychron Ultra lighting**, through the keyboard's own protocol. Done.
+- **M6 — Stream Deck**, one lane per row, the keys as summon and — in
+  Waiting — as Up, Down and Enter. Lighting and summon verified on an MK.2;
+  the answer keys are built and tested against a recorded deck, awaiting the
+  hardware pass.
 
 `app/src/surface/corsair/` and `app/src/focus/` are the only code carried over
 from the previous version, because they were the only parts that demonstrably

@@ -24,6 +24,9 @@ tray-icon = { workspace = true }
 # Only to name the window-handle types eframe already hands out; the version
 # must stay in step with eframe's or the trait is a different trait.
 raw-window-handle = "0.6"
+# Puts words on a Stream Deck key. Pure Rust, and the font is the one the
+# window already carries — egui's Ubuntu — so nothing is shipped twice.
+ab_glyph = "0.2"
 
 # Raising a window and selecting a terminal tab. The window half could be hand
 # written like the rest of our FFI; UI Automation could not — it is COM, and
@@ -34,6 +37,11 @@ raw-window-handle = "0.6"
 # device is found by usage page and opened by path at runtime.
 [target.'cfg(windows)'.dependencies]
 hidapi = { version = "2.6", default-features = false, features = ["windows-native"] }
+# The Stream Deck surface. The crate knows every model's report layout, image
+# size, rotation and encoding, and speaks through the same hidapi; `image` is
+# named here only because its `DynamicImage` is what the crate takes.
+elgato-streamdeck = "0.13"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_System_Com",

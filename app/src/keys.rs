@@ -20,6 +20,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::event::Ancestor;
 use crate::tracker::Tracker;
 
 /// Stops the hotkey pump immediately, for the quit path.
@@ -102,7 +103,7 @@ pub fn start(tracker: Arc<Mutex<Tracker>>) -> Option<Keys> {
 /// marker key, summon that lane's agent.
 fn handle_press(tracker: &Arc<Mutex<Tracker>>, index: usize) {
     HANDLED.fetch_add(1, Ordering::Relaxed);
-    let target = {
+    let lane = {
         let Ok(mut tracker) = tracker.lock() else {
             return;
         };
@@ -113,15 +114,61 @@ fn handle_press(tracker: &Arc<Mutex<Tracker>>, index: usize) {
             // Not a marker key. Swallowed and recorded, nothing to do.
             return;
         };
+        lane
+    };
+    summon_lane(tracker, lane);
+}
+
+/// Finds where a lane's agent is, does `act` to it, and records how that
+/// went for the status bar. The lock is held only to look the lane up: the
+/// act itself — a raise can spend a quarter of a second on the terminal's
+/// tab strip — runs with nothing held, which is also why callers with a
+/// frame to keep call this on a thread of its own.
+fn act_on_lane(
+    tracker: &Arc<Mutex<Tracker>>,
+    lane: usize,
+    act: impl FnOnce(&[Ancestor], &[String]) -> String,
+) {
+    let target = {
+        let Ok(tracker) = tracker.lock() else {
+            return;
+        };
         tracker.summon_target(lane)
     };
     let report = match target {
-        Ok((ancestors, names)) => crate::focus::raise(&ancestors, &names).detail,
+        Ok((ancestors, names)) => act(&ancestors, &names),
         Err(reason) => reason,
     };
     if let Ok(mut tracker) = tracker.lock() {
         tracker.summon = Some(report);
     }
+}
+
+/// Brings a lane's agent forward. The product's first action, shared by every
+/// surface with a button: the F-row's marker keys and a Stream Deck's row
+/// keys arrive here alike.
+pub fn summon_lane(tracker: &Arc<Mutex<Tracker>>, lane: usize) {
+    act_on_lane(tracker, lane, |ancestors, names| {
+        crate::focus::raise(ancestors, names).detail
+    });
+}
+
+/// Brings a lane's agent forward and answers it with one key — the product's
+/// second action, from a Stream Deck's answer keys while the lane is Waiting.
+/// The key is sent only if the window that came forward verifiably has the
+/// keyboard; otherwise the press has focused the lane, and the status bar
+/// says what to do next.
+pub fn answer_lane(tracker: &Arc<Mutex<Tracker>>, lane: usize, key: crate::focus::Key) {
+    act_on_lane(tracker, lane, |ancestors, names| {
+        let raise = crate::focus::raise(ancestors, names);
+        match raise.window {
+            Some(window) => match crate::focus::type_key(window, key) {
+                Ok(typed) => format!("{} — {typed}", raise.detail),
+                Err(why) => format!("{} — {why}", raise.detail),
+            },
+            None => raise.detail,
+        }
+    });
 }
 
 #[cfg(windows)]

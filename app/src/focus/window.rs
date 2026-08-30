@@ -4,6 +4,10 @@ use core::ffi::c_void;
 
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
+    KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC, MapVirtualKeyW, SendInput, VK_DOWN, VK_RETURN, VK_UP,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, EnumWindows, FlashWindow, GA_ROOT, GWL_EXSTYLE, GetAncestor, GetClassNameW,
     GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
@@ -16,8 +20,8 @@ use windows::core::BOOL;
 
 use crate::event::Ancestor;
 
-use super::Report;
 use super::uia_tabs::{self, TERMINAL_WINDOW_CLASS};
+use super::{Key, Report};
 
 struct Candidate {
     hwnd: isize,
@@ -136,7 +140,7 @@ fn visible_windows() -> Vec<Candidate> {
 pub fn raise(ancestors: &[Ancestor], tab_names: &[String]) -> Report {
     if ancestors.is_empty() {
         // Older events carry no ancestry; the next one from that session will.
-        return Report::new(false, "this session has not reported where it is running");
+        return Report::failed("this session has not reported where it is running");
     }
     let windows = visible_windows();
     // What we raise is the agent's *host window* — the nearest ancestor that
@@ -196,8 +200,7 @@ pub fn raise(ancestors: &[Ancestor], tab_names: &[String]) -> Report {
         }
     }
     let Some((hosts, found_exe)) = found else {
-        return Report::new(
-            false,
+        return Report::failed(
             "no window found for that agent — it may have closed, or its ancestry \
              is stale (restart the agent to refresh it)",
         );
@@ -252,7 +255,7 @@ pub fn raise(ancestors: &[Ancestor], tab_names: &[String]) -> Report {
         } else {
             format!("Windows refused to bring {what} forward")
         };
-        return Report::new(false, reason);
+        return Report::failed(reason);
     }
 
     // A console host has one session and no tabs; raising it is everything.
@@ -265,7 +268,7 @@ pub fn raise(ancestors: &[Ancestor], tab_names: &[String]) -> Report {
             }
             _ => format!("raised {what}"),
         };
-        return Report::new(true, detail);
+        return Report::raised(found.hwnd, detail);
     }
     // Never skip the window raise. `GetForegroundWindow` can name a terminal
     // that is still visibly behind another window, which made the old
@@ -275,12 +278,15 @@ pub fn raise(ancestors: &[Ancestor], tab_names: &[String]) -> Report {
     if let Some(selected) = uia_tabs::selected_tab(hwnd)
         && tab_names.contains(&selected)
     {
-        return Report::new(true, format!("raised, already showing the {selected} tab"));
+        return Report::raised(
+            found.hwnd,
+            format!("raised, already showing the {selected} tab"),
+        );
     }
     // Order matters: selecting a tab in a window nobody can see changes what is
     // in front of nothing.
     if let Some(name) = tab_names.iter().find(|name| settle_tab(hwnd, name)) {
-        return Report::new(true, format!("raised, showing the {name} tab"));
+        return Report::raised(found.hwnd, format!("raised, showing the {name} tab"));
     }
     // Half of what was asked for, and worth saying: the user is looking at the
     // right terminal showing the wrong agent. Naming the lane after its tab is
@@ -291,10 +297,13 @@ pub fn raise(ancestors: &[Ancestor], tab_names: &[String]) -> Report {
     if snapshot.is_empty() {
         let present = uia_tabs::tab_names(hwnd);
         if present.is_empty() {
-            return Report::new(true, "raised the terminal; its tabs could not be read");
+            return Report::raised(
+                found.hwnd,
+                "raised the terminal; its tabs could not be read",
+            );
         }
-        return Report::new(
-            true,
+        return Report::raised(
+            found.hwnd,
             format!(
                 "raised the terminal, but no tab is called {}. Its tabs: {}",
                 tab_names.join(" or "),
@@ -302,7 +311,7 @@ pub fn raise(ancestors: &[Ancestor], tab_names: &[String]) -> Report {
             ),
         );
     }
-    Report::new(true, no_such_tab(tab_names, &snapshot))
+    Report::raised(found.hwnd, no_such_tab(tab_names, &snapshot))
 }
 
 /// The windows of one ancestor worth raising, best first.
@@ -541,7 +550,8 @@ fn bring_forward(hwnd: HWND) -> bool {
 /// Activation and visual Z-order are separate on Windows. A topmost/not-topmost
 /// `SetWindowPos` pair moves the terminal visibly above ordinary windows without
 /// needing foreground permission; `SetForegroundWindow` still requests the
-/// keyboard activation. No synthetic input is needed.
+/// keyboard activation. No synthetic input is used to gain the foreground;
+/// [`type_key`] sends one key only after the foreground is verified.
 ///
 /// Every attach is detached on the way out: an input queue left attached to a
 /// window that later closes changes how this process receives input afterwards,
@@ -644,6 +654,100 @@ fn settle_tab(hwnd: HWND, tab: &str) -> bool {
         }
     }
     false
+}
+
+/// The class name of a top-level window, or empty.
+fn class_of(hwnd: HWND) -> String {
+    let mut buffer = [0u16; 256];
+    // SAFETY: FFI with a writable buffer of the length passed.
+    let length = unsafe { GetClassNameW(hwnd, &mut buffer) };
+    String::from_utf16_lossy(&buffer[..length.max(0) as usize])
+}
+
+/// A window's title, or empty.
+fn title_of(hwnd: HWND) -> String {
+    // SAFETY: FFI; the buffer is sized from the length the window reports.
+    let length = unsafe { GetWindowTextLengthW(hwnd) };
+    if length <= 0 {
+        return String::new();
+    }
+    let mut buffer = vec![0u16; (length + 1) as usize];
+    let read = unsafe { GetWindowTextW(hwnd, &mut buffer) };
+    String::from_utf16_lossy(&buffer[..read.max(0) as usize])
+}
+
+/// Sends one key to `window`, which [`raise`] just brought forward — after
+/// verifying that it has the keyboard.
+///
+/// A raise proves the window is on top; it does not prove the keystrokes go
+/// there. Windows may have refused the activation (a press on a deck is not
+/// input to this process), or, in Windows Terminal, a tab selection may have
+/// left focus on the tab strip, where an arrow switches tabs. So: wait
+/// briefly for the foreground to be the window, ask UI Automation where the
+/// focus is when the window has tabs, and only then send. The activation is
+/// asynchronous, hence the wait; the budget is the tab selection's.
+pub fn type_key(window: isize, key: Key) -> Result<String, String> {
+    let hwnd = HWND(window as *mut c_void);
+    let mut in_front = false;
+    for attempt in 0..TAB_ATTEMPTS {
+        if attempt > 0 {
+            std::thread::sleep(TAB_RETRY_STEP);
+        }
+        // SAFETY: FFI, no arguments to get wrong.
+        if unsafe { GetForegroundWindow() } == hwnd {
+            in_front = true;
+            break;
+        }
+    }
+    let on_tab_strip = if in_front && class_of(hwnd) == TERMINAL_WINDOW_CLASS {
+        uia_tabs::focus_on_tab_strip(hwnd)
+    } else {
+        Some(false)
+    };
+    super::ready_to_type(in_front, on_tab_strip).map_err(str::to_owned)?;
+    send_key(key)?;
+    let title = title_of(hwnd);
+    let what = if title.is_empty() {
+        "the terminal".to_owned()
+    } else {
+        title
+    };
+    Ok(format!("sent {} to {what}", key.name()))
+}
+
+/// One press and release of `key`, as the keyboard would send it — scan code
+/// included, and the arrows flagged extended, which is what they are.
+fn send_key(key: Key) -> Result<(), String> {
+    let (vk, flags) = match key {
+        Key::Up => (VK_UP, KEYEVENTF_EXTENDEDKEY),
+        Key::Down => (VK_DOWN, KEYEVENTF_EXTENDEDKEY),
+        Key::Enter => (VK_RETURN, KEYBD_EVENT_FLAGS(0)),
+    };
+    // SAFETY: FFI, pure lookup.
+    let scan = unsafe { MapVirtualKeyW(u32::from(vk.0), MAPVK_VK_TO_VSC) } as u16;
+    let stroke = |flags: KEYBD_EVENT_FLAGS| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: vk,
+                wScan: scan,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let inputs = [stroke(flags), stroke(flags | KEYEVENTF_KEYUP)];
+    // SAFETY: FFI with a slice of fully initialised structures of the size
+    // stated.
+    let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+    if sent < inputs.len() as u32 {
+        return Err(
+            "Windows refused the keystroke — an elevated terminal cannot be typed into from here"
+                .to_owned(),
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
