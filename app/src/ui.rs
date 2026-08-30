@@ -1005,11 +1005,7 @@ fn lane_card(
                         }
                         match view {
                             Some(view) => {
-                                ui.label(
-                                    egui::RichText::new(tracker::elapsed(view.since, now))
-                                        .monospace(),
-                                );
-                                state_pill(ui, view.state);
+                                status_and_clock(ui, view, now);
                                 if let Some(word) = view.failure {
                                     let [r, g, b] = State::Error.tint();
                                     ui.label(
@@ -1339,10 +1335,7 @@ fn overflow_card(
                         {
                             actions.promote = Some(key());
                         }
-                        ui.label(
-                            egui::RichText::new(tracker::elapsed(view.since, now)).monospace(),
-                        );
-                        state_pill(ui, view.state);
+                        status_and_clock(ui, view, now);
                         if let Some(word) = view.failure {
                             let [r, g, b] = State::Error.tint();
                             ui.label(
@@ -1438,15 +1431,31 @@ fn empty_overflow_slot(ui: &mut egui::Ui) {
         });
 }
 
-fn state_pill(ui: &mut egui::Ui, state: State) {
+/// The state and its clock, right to left: the stopwatch beside the pill —
+/// except in Waiting, where how long is the signal and rides in the pill
+/// itself, "Waiting 12m", one thing read in one glance.
+fn status_and_clock(ui: &mut egui::Ui, view: &LaneView, now: u64) {
+    let held = (view.state == State::Waiting).then(|| tracker::held(view.since, now));
+    if held.is_none() {
+        ui.label(egui::RichText::new(tracker::elapsed(view.since, now)).monospace());
+    }
+    state_pill(ui, view.state, held.as_deref());
+}
+
+/// The state as a tinted word — with how long after it, when given.
+fn state_pill(ui: &mut egui::Ui, state: State, held: Option<&str>) {
     let [r, g, b] = state.tint();
     let color = egui::Color32::from_rgb(r, g, b);
+    let text = match held {
+        Some(held) => format!("{} {held}", state.label()),
+        None => state.label().to_owned(),
+    };
     egui::Frame::new()
         .inner_margin(egui::Margin::symmetric(6, 1))
         .corner_radius(4.0)
         .fill(color.gamma_multiply(0.22))
         .show(ui, |ui| {
-            ui.label(egui::RichText::new(state.label()).color(color).strong());
+            ui.label(egui::RichText::new(text).color(color).strong());
         });
 }
 

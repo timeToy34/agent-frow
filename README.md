@@ -74,7 +74,8 @@ you dismiss it, so the board you left is the board you come back to.
 ### In the window
 
 The lanes, each with its state, the last thing the agent did, how long it has
-been like that, and a **Focus** button — and, when known, the numbers:
+been like that — a Waiting lane counts it in its pill, "Waiting 12m", since
+how long you have been asked is the signal — and a **Focus** button — and, when known, the numbers:
 context used, the five-hour and seven-day limits; in Error, the reason
 beside the state ("rate limit", "overloaded", "auth"). Sessions beyond the lane count live
 **off the keyboard** — fully tracked, no key or light — and take the next lane
@@ -91,8 +92,9 @@ preference or forget it.
 off-keyboard card, folds the window down to a Stream Deck's picture of the
 agents: one row per agent with a session — lanes first, then the off-keyboard
 ones — five keys to a row: the name, context used, the five-hour and
-seven-day limits, and the state over how long, lit exactly as on the
-keyboard. No title bar: drag the background to move it, the bottom-right
+seven-day limits, and the state over how long — in Waiting, how long over
+the state, the minutes as the headline — lit exactly as on the keyboard. No
+title bar: drag the background to move it, the bottom-right
 corner to resize it, and it opens next time where you left it, at the size
 you left it, on top of everything. Clicking a key focuses that agent, and
 what the focus did shows over the rows for a few seconds; double-click
@@ -178,7 +180,8 @@ five-key F-row, in the same colours and motion as on the keyboard: the left
 key is the lane's name — on an empty lane, what it is for: "next agent
 here" on the lowest free lane, "free" on the rest; the three between show **context used, the five-hour
 limit and the seven-day limit** as percentages (a dash until known); the
-right key is the state over how long — or, in Error, over why: "rate limit",
+right key is the state over how long — in Waiting, how long over the state,
+the minutes as the headline; in Error, over why: "rate limit",
 "overloaded", "auth". While a lane is Waiting the three middle keys become
 **Up, Down and Enter**, so a question gets answered from the deck; the app
 never presses anything on its own, and sends the key only into a terminal

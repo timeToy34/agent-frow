@@ -183,6 +183,8 @@ pub struct Caption {
     pub name: String,
     /// `None` for a lane with nobody on it.
     pub state: Option<&'static str>,
+    /// How long the lane has been as it is — a stopwatch, or in Waiting a
+    /// count of minutes. Empty for a preview and for an empty lane.
     pub elapsed: String,
     /// The numbers, for a lane with a session on it; a preview has none.
     pub gauges: Option<Gauges>,
@@ -219,7 +221,7 @@ pub fn captions(tracker: &Tracker, now: u64) -> Vec<Caption> {
                 Some(session) => Caption {
                     name: settings.display_name(lane, session.project().as_deref()),
                     state: Some(session.effective_state().label()),
-                    elapsed: tracker::elapsed(session.since, now),
+                    elapsed: tracker::clock(session.effective_state(), session.since, now),
                     gauges: Some(session.gauges),
                     reason: session.failure,
                 },
@@ -254,9 +256,10 @@ pub fn pressed(before: &[bool], after: &[bool]) -> Vec<usize> {
 
 /// What every key should show, row-major: row `r` is lane `r`, its keys
 /// coloured by [`row_colors`] and labelled by role — the name first, the
-/// state last, and between them the lane's numbers: context used, the
-/// five-hour limit, the seven-day limit — except in Waiting, where those
-/// three carry the answers instead. Rows past the lanes are blank.
+/// state over how long last (in Waiting, how long over the state), and
+/// between them the lane's numbers: context used, the five-hour limit, the
+/// seven-day limit — except in Waiting, where those three carry the answers
+/// instead. Rows past the lanes are blank.
 pub fn faces(frame: &Frame<'_>, captions: &[Caption], rows: usize, cols: usize) -> Vec<Face> {
     let settings = frame.settings;
     let shown = shown_lanes(rows, settings.lane_count);
@@ -299,6 +302,17 @@ pub fn faces(frame: &Frame<'_>, captions: &[Caption], rows: usize, cols: usize) 
                                 .and_then(|c| c.reason)
                                 .unwrap_or_default()
                                 .to_owned(),
+                        }
+                    }
+                    // In Waiting how long is the news: the count as the
+                    // headline, the word as its caption. A preview has no
+                    // clock and keeps the word alone.
+                    (Some(State::Waiting), Some(word))
+                        if caption.is_some_and(|c| !c.elapsed.is_empty()) =>
+                    {
+                        Label::Wait {
+                            state: word,
+                            held: caption.map(|c| c.elapsed.clone()).unwrap_or_default(),
                         }
                     }
                     (_, Some(word)) => Label::Status {
@@ -709,7 +723,7 @@ mod tests {
         assert_eq!(captions.len(), 4);
         assert_eq!(captions[1].name, "agent-frow");
         assert_eq!(captions[1].state, Some("Waiting"));
-        assert_eq!(captions[1].elapsed, "1m 20s");
+        assert_eq!(captions[1].elapsed, "1m", "Waiting counts in minutes");
         assert_eq!(captions[0].name, NEXT_HERE, "the lowest free lane");
         assert_eq!(captions[0].state, None);
         assert_eq!(captions[0].elapsed, "");
@@ -820,13 +834,16 @@ mod tests {
             palette::base(colour),
             "the status key does not pulse"
         );
-        assert!(matches!(
-            faces[4].label,
-            Label::Status {
-                state: "Waiting",
-                ..
-            }
-        ));
+        assert!(
+            matches!(
+                faces[4].label,
+                Label::Wait {
+                    state: "Waiting",
+                    ..
+                }
+            ),
+            "the status key leads with how long"
+        );
 
         let narrow = faces_of(&tracker, &mut scene, 1_100, 2, 3);
         assert!(
@@ -988,6 +1005,73 @@ mod tests {
             "and only its status key was written"
         );
         assert_eq!(deck.flushes, 2);
+    }
+
+    #[test]
+    fn a_waiting_row_leads_with_how_long() {
+        let tracker = Mutex::new(tracker(3));
+        tracker
+            .lock()
+            .unwrap()
+            .sessions
+            .push(session(State::Waiting, 0, 0));
+        let mut scene = Scene::new();
+        let faces = faces_of(&tracker, &mut scene, 80_000, ROWS, COLS);
+        assert_eq!(
+            faces[4].label,
+            Label::Wait {
+                state: "Waiting",
+                held: "1m".to_owned()
+            }
+        );
+        assert_eq!(faces[1].label, Label::Up, "the answer keys stay");
+        assert_eq!(faces[2].label, Label::Down);
+        assert_eq!(faces[3].label, Label::Enter);
+    }
+
+    #[test]
+    fn a_waiting_status_key_is_written_once_a_minute() {
+        let tracker = Mutex::new(tracker(4));
+        tracker
+            .lock()
+            .unwrap()
+            .sessions
+            .push(session(State::Waiting, 2, 0));
+        let mut scene = Scene::new();
+        let mut deck = Recorder::new(15);
+        let mut shown = vec![None; 15];
+
+        let wanted = faces_of(&tracker, &mut scene, 61_000, ROWS, COLS);
+        paint_changed(&mut deck, &mut shown, &wanted).unwrap();
+        assert_eq!(
+            shown[14].as_ref().unwrap().label,
+            Label::Wait {
+                state: "Waiting",
+                held: "1m".to_owned()
+            }
+        );
+
+        let before = deck.writes.len();
+        let wanted = faces_of(&tracker, &mut scene, 61_900, ROWS, COLS);
+        paint_changed(&mut deck, &mut shown, &wanted).unwrap();
+        assert!(
+            deck.writes[before..].iter().all(|(key, _)| *key != 14),
+            "inside the minute the status key holds; the pulse may move the others"
+        );
+
+        let wanted = faces_of(&tracker, &mut scene, 120_000, ROWS, COLS);
+        paint_changed(&mut deck, &mut shown, &wanted).unwrap();
+        assert!(
+            deck.writes[before..].iter().any(|(key, _)| *key == 14),
+            "and it turns over at the minute"
+        );
+        assert_eq!(
+            shown[14].as_ref().unwrap().label,
+            Label::Wait {
+                state: "Waiting",
+                held: "2m".to_owned()
+            }
+        );
     }
 
     #[test]

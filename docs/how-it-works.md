@@ -408,7 +408,8 @@ layout, image size, rotation and encoding; no driver, nothing linked.
   the Windows font folder, so nothing is shipped, and bold because a light
   face on a small LCD could not be read at arm's length; the window's own
   Ubuntu stands in if the file is missing: the name on the first key, the
-  state word over the elapsed time on the last, and in Waiting an up
+  state word over the elapsed time on the last (in Waiting the time, counted
+  in minutes, as the headline over the word), and in Waiting an up
   triangle, a down triangle and the word Enter on the three middle keys in
   place of the numbers — the triangles drawn, not typeset, about the height
   of the text's capitals, and Enter set by the same rule as a name. The
@@ -436,7 +437,8 @@ layout, image size, rotation and encoding; no driver, nothing linked.
   the elapsed time on a key ticks while the lane's state stands still, so
   every key is compared with what it was last told, and only a changed one
   is rasterised, encoded and sent. A resting deck costs nothing; a lane in
-  motion rewrites its row ten times a second.
+  motion rewrites its row ten times a second — its status key, counting
+  minutes in Waiting, once a minute.
 - **One thread for both directions.** The device handle cannot be shared,
   so the wait between frames is spent listening for a press, and a press is
   answered at once. Every key of a row summons its lane through the same
@@ -519,8 +521,9 @@ sessions every frame, so lanes stay honest in the tray.
 The screen is the fourth surface, in `app/src/surface/monitor.rs`. Mini mode
 folds the window down to the deck's picture: one row per lane with a session
 on it, then one per off-keyboard session, five keys to a row — the name, ctx,
-5h, 7d, the state over how long — built from the deck's own key vocabulary
-(`Face`, `Label`, `Ink`, `role`) and lit by the deck's `row_colors`, which is
+5h, 7d, the state over how long, or in Waiting how long over the state —
+built from the deck's own key vocabulary (`Face`, `Label`, `Ink`, `role`)
+and lit by the deck's `row_colors`, which is
 the keyboards' `palette::lane_colors` with the state key held steady. It
 paints at ~30 frames a second while a row moves and at the window's resting
 pace otherwise. A name is set the deck's way too — `name_words`, dots and

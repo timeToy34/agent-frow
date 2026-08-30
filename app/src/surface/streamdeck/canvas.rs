@@ -4,7 +4,8 @@
 //! lane, as many keys wide as the deck has columns, like the F-row — so a key
 //! is one colour from the palette, as an LED would be. What an LED cannot do
 //! is the label: the lane's name on the first key, its state and how long on
-//! the last, and in Waiting an up, a down and an Enter on the three between.
+//! the last — in Waiting, how long over its state — and in Waiting an up, a
+//! down and an Enter on the three between.
 //! The words are ink, not light, and the triangles are drawn, not typeset.
 //!
 //! The font is Segoe UI Bold, read from the Windows font folder: every
@@ -91,6 +92,13 @@ pub enum Label {
     Status {
         state: &'static str,
         elapsed: String,
+    },
+    /// A Waiting lane's last key: how long, as the headline, under the word
+    /// as its caption. Once the colour and the answer keys have said the
+    /// word, the number is the news.
+    Wait {
+        state: &'static str,
+        held: String,
     },
     Up,
     Down,
@@ -234,6 +242,18 @@ pub fn render_key(size: (usize, usize), colour: Rgb, label: &Label, ink: Ink) ->
                     &lines,
                     rows(0.08, 0.92),
                     20.0 * scale,
+                    paint,
+                );
+            }
+        }
+        Label::Wait { state, held } => {
+            if let Some(font) = font() {
+                draw_stack(
+                    &mut canvas,
+                    font,
+                    &[((*state).to_owned(), CAPTION), (held.clone(), 1.0)],
+                    rows(0.08, 0.92),
+                    HEADLINE * scale,
                     paint,
                 );
             }
@@ -444,6 +464,68 @@ fn draw_lines(
     let (room, height) = room_in(canvas, band);
     let scale = fit_lines(font, lines, room, height, px);
     draw_block(canvas, font, lines, band, scale, paint);
+}
+
+/// The headline's size on a 72 px key — larger than a state word, since it
+/// is one short number — and the caption's size as a share of it.
+const HEADLINE: f32 = 26.0;
+const CAPTION: f32 = 0.6;
+
+/// A line's height at `scale`: ascent to descent.
+fn line_height(font: &FontArc, scale: f32) -> f32 {
+    let scaled = font.as_scaled(PxScale::from(scale));
+    scaled.ascent() - scaled.descent()
+}
+
+/// The largest size, from `px` down to a floor, at which every line of a
+/// stack — each `(text, share)` set at its share of the size — fits `room`
+/// wide, and all of them together fit `height` tall. At the floor, whatever
+/// still does not fit is cut when drawn, as a single line is.
+fn fit_stack(font: &FontArc, lines: &[(String, f32)], room: f32, height: f32, px: f32) -> f32 {
+    let floor = (px * 0.45).max(7.0);
+    let mut scale = px;
+    while scale > floor {
+        let wide = lines
+            .iter()
+            .any(|(line, share)| measure(font, scale * share, line) > room);
+        let tall: f32 = lines
+            .iter()
+            .map(|(_, share)| line_height(font, scale * share))
+            .sum();
+        if !wide && tall <= height {
+            return scale;
+        }
+        scale -= 1.0;
+    }
+    floor
+}
+
+/// Lines at their own shares of one size — a caption over a headline — as
+/// large as the key allows, one under the other, the block centred in
+/// `band`. Each line is drawn in its own band, so it is centred in its own
+/// height rather than the block's.
+fn draw_stack(
+    canvas: &mut Canvas,
+    font: &FontArc,
+    lines: &[(String, f32)],
+    band: (usize, usize),
+    px: f32,
+    paint: Paint,
+) {
+    let (room, height) = room_in(canvas, band);
+    let scale = fit_stack(font, lines, room, height, px);
+    let block: f32 = lines
+        .iter()
+        .map(|(_, share)| line_height(font, scale * share))
+        .sum();
+    let mut top = band.0 as f32 + ((height - block) / 2.0).max(0.0);
+    for (line, share) in lines {
+        let size = scale * share;
+        let bottom = top + line_height(font, size);
+        let rows = (top.round() as usize, (bottom.round() as usize).min(band.1));
+        draw_text(canvas, font, line, rows, size, paint);
+        top = bottom;
+    }
 }
 
 /// How wide and tall the text may be inside `band`.
@@ -800,6 +882,50 @@ mod tests {
     fn a_triangle_is_a_fifth_of_the_key() {
         let (_, _, width, height) = triangle_box(SIZE);
         assert_eq!((width, height), (14, 14));
+    }
+
+    #[test]
+    fn waiting_puts_how_long_first_and_larger() {
+        let wait = Label::Wait {
+            state: "Waiting",
+            held: "12m".to_owned(),
+        };
+        let key = render_key(SIZE, RED, &wait, Ink::BRIGHT);
+        let as_status = render_key(
+            SIZE,
+            RED,
+            &Label::Status {
+                state: "Waiting",
+                elapsed: "12m".to_owned(),
+            },
+            Ink::BRIGHT,
+        );
+        assert_ne!(key, as_status, "not the state key's two lines of one size");
+        assert_ne!(key, render_key(SIZE, RED, &Label::None, Ink::BRIGHT));
+        assert_eq!(
+            key,
+            render_key(SIZE, RED, &wait, Ink::BRIGHT),
+            "deterministic"
+        );
+        // The ink falls in two bands, a caption over a headline, and the
+        // lower one — the count — is the taller.
+        let inked: Vec<bool> = (0..key.height)
+            .map(|y| (0..key.width).any(|x| !is(key.pixel(x, y), RED)))
+            .collect();
+        let mut bands: Vec<(usize, usize)> = Vec::new();
+        for (y, &ink) in inked.iter().enumerate() {
+            match (ink, bands.last_mut()) {
+                (true, Some(band)) if band.1 == y => band.1 = y + 1,
+                (true, _) => bands.push((y, y + 1)),
+                (false, _) => {}
+            }
+        }
+        assert_eq!(bands.len(), 2, "a caption and a headline: {bands:?}");
+        let (caption, headline) = (bands[0], bands[1]);
+        assert!(
+            headline.1 - headline.0 > caption.1 - caption.0,
+            "the count is the larger line: {bands:?}"
+        );
     }
 
     #[test]

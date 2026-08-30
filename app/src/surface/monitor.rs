@@ -188,7 +188,7 @@ fn row_of(
             session.effective_state(),
             colour,
             &name,
-            &tracker::elapsed(session.since, now),
+            &tracker::clock(session.effective_state(), session.since, now),
             Some(session.gauges),
             session.failure,
             elapsed_ms,
@@ -206,9 +206,10 @@ fn row_of(
 
 /// One row's keys, the deck's way: the name first, the state over how long
 /// last, and between them the numbers — context used, the five-hour limit,
-/// the seven-day limit. In Error the reason takes the time's place under the
-/// word, when there is one. Idle is one dim name key and the rest dark, words
-/// included; a preview has no time and no numbers.
+/// the seven-day limit. In Waiting how long is the news, and goes over the
+/// word as its headline; in Error the reason takes the time's place under
+/// the word, when there is one. Idle is one dim name key and the rest dark,
+/// words included; a preview has no time and no numbers.
 fn faces(
     state: State,
     colour: Rgb,
@@ -230,6 +231,10 @@ fn faces(
             let label = match role(col, COLS) {
                 Role::Name => Label::Name(name.to_owned()),
                 Role::Status if state == State::Idle => Label::None,
+                Role::Status if state == State::Waiting && !elapsed.is_empty() => Label::Wait {
+                    state: state.label(),
+                    held: elapsed.to_owned(),
+                },
                 Role::Status => Label::Status {
                     state: state.label(),
                     elapsed: match (state, reason) {
@@ -451,6 +456,11 @@ fn key(painter: &egui::Painter, rect: egui::Rect, face: &Face, hovered: bool) {
         Label::Status { state, elapsed } => vec![
             fit(&painter, state, big, colour, room),
             fit(&painter, elapsed, small, colour, room),
+        ],
+        // The gauge's shape: the word as caption, the count as headline.
+        Label::Wait { state, held } => vec![
+            fit(&painter, state, small, colour, room),
+            fit(&painter, held, big, colour, room),
         ],
         Label::Gauge { name, value } => vec![
             fit(&painter, name, small, colour, room),
@@ -725,6 +735,11 @@ mod tests {
                 palette::base(colour),
                 "the state key holds still, as on the deck"
             );
+            assert!(
+                matches!(row.keys[4].label, Label::Wait { .. }),
+                "and leads with how long: {:?}",
+                row.keys[4].label
+            );
             for key in &row.keys[1..4] {
                 assert!(
                     matches!(key.label, Label::Gauge { .. }),
@@ -742,6 +757,23 @@ mod tests {
         assert!(
             seen_high && seen_low,
             "the pulse beats between glow and full"
+        );
+    }
+
+    #[test]
+    fn a_waiting_row_leads_with_how_long() {
+        let mut tracker = tracker(3);
+        tracker
+            .sessions
+            .push(session(State::Waiting, Some(0), "/home/j/api"));
+        let row = rows(&tracker, 80_000, 0).remove(0);
+        assert_eq!(
+            *label(&row, 4),
+            Label::Wait {
+                state: "Waiting",
+                held: "1m".to_owned()
+            },
+            "the minutes as the headline, the word as the caption"
         );
     }
 

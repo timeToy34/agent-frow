@@ -704,6 +704,29 @@ pub fn elapsed(since_ms: u64, now_ms: u64) -> String {
     }
 }
 
+/// "12s", "12m", "1h 12m" — how long a lane has been waiting on the user.
+/// Seconds only inside the first minute, when they say the question just
+/// appeared; past that, minutes: the number is a count, not a stopwatch,
+/// and a key that changes once a minute is written once a minute.
+pub fn held(since_ms: u64, now_ms: u64) -> String {
+    let secs = now_ms.saturating_sub(since_ms) / 1000;
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m", secs / 60),
+        _ => format!("{}h {}m", secs / 3600, (secs % 3600) / 60),
+    }
+}
+
+/// What a surface shows for a lane in `state` — the state it shows, which
+/// for a lane with subagents may not be the one it holds: [`held`] in
+/// Waiting, [`elapsed`] anywhere else.
+pub fn clock(state: State, since_ms: u64, now_ms: u64) -> String {
+    match state {
+        State::Waiting => held(since_ms, now_ms),
+        _ => elapsed(since_ms, now_ms),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -719,5 +742,35 @@ mod tests {
         assert_eq!(f_row.detail, "V3 Ultra", "a whole row is just the model");
         let partial = KeyboardStatus::connected("Keychron", "V0", 10);
         assert!(partial.detail.contains("only 10 of the 12"));
+    }
+
+    #[test]
+    fn elapsed_is_a_stopwatch() {
+        assert_eq!(elapsed(0, 3_000), "3s");
+        assert_eq!(elapsed(0, 80_000), "1m 20s");
+        assert_eq!(elapsed(0, 7_500_000), "2h 5m");
+        assert_eq!(
+            elapsed(10, 0),
+            "0s",
+            "a clock behind the event is not negative"
+        );
+    }
+
+    #[test]
+    fn held_is_a_count() {
+        assert_eq!(held(0, 0), "0s");
+        assert_eq!(held(0, 59_000), "59s");
+        assert_eq!(held(0, 60_000), "1m");
+        assert_eq!(held(0, 80_000), "1m", "no seconds past the first minute");
+        assert_eq!(held(0, 3_599_000), "59m");
+        assert_eq!(held(0, 3_600_000), "1h 0m");
+        assert_eq!(held(0, 5_400_000), "1h 30m");
+    }
+
+    #[test]
+    fn the_clock_counts_in_waiting_and_ticks_everywhere_else() {
+        assert_eq!(clock(State::Waiting, 0, 80_000), "1m");
+        assert_eq!(clock(State::Running, 0, 80_000), "1m 20s");
+        assert_eq!(clock(State::Done, 0, 80_000), "1m 20s");
     }
 }
