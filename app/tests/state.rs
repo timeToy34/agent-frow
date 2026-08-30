@@ -395,3 +395,30 @@ fn a_session_we_have_never_seen_is_read_from_the_event_that_introduced_it() {
         assert_eq!(state::adopt(&event(name, extra)), expected, "{name}");
     }
 }
+
+#[test]
+fn a_status_line_changes_no_state_and_adopts_nothing() {
+    // Numbers, not news. It also fires on a config edit, so it may not
+    // even revive an Idle lane.
+    let status = event("StatusLine", json!({ "gauges": { "ctx": 42, "h5": 10 } }));
+    for current in State::ALL {
+        assert_eq!(state::step(current, &status), Step::Stay, "{current:?}");
+    }
+    assert_eq!(state::adopt(&status), None);
+    assert_eq!(status.gauges.map(|g| g.context_used), Some(Some(42)));
+}
+
+#[test]
+fn a_stop_failure_names_its_reason() {
+    let limited = event("StopFailure", json!({ "error_type": "rate_limit" }));
+    assert_eq!(
+        state::step(State::Running, &limited),
+        Step::Set(State::Error)
+    );
+    assert_eq!(limited.note(), "StopFailure rate limit");
+    assert_eq!(
+        event("StopFailure", json!({ "error_type": "something_new" })).note(),
+        "StopFailure failed"
+    );
+    assert_eq!(event("StopFailure", json!({})).note(), "StopFailure");
+}

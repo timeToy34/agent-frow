@@ -207,6 +207,10 @@ pub fn step(current: State, event: &Event) -> Step {
         Kind::Stop => Step::Set(State::Done),
         Kind::StopFailure => Step::Set(State::Error),
         Kind::SessionEnd => Step::Release,
+        // Numbers, not news: a status line says how full the context is,
+        // never what the agent is doing — and it also fires on a config
+        // edit, so it must not so much as revive an Idle lane.
+        Kind::StatusLine => Step::Stay,
     }
 }
 
@@ -253,6 +257,8 @@ pub fn adopt(event: &Event) -> Option<State> {
         Kind::Stop if event.proposed_plan => State::Waiting,
         Kind::Stop => State::Done,
         Kind::StopFailure => State::Error,
-        Kind::SessionEnd => return None,
+        // Neither of these can introduce a session: one ends it, the other
+        // only ever adds numbers to one we hold.
+        Kind::SessionEnd | Kind::StatusLine => return None,
     })
 }

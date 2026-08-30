@@ -23,7 +23,20 @@ use crate::install;
 use crate::lastseen;
 use crate::settings::{self, AgentFilter, LANE_COUNTS, Rgb, SavedAgent};
 use crate::state::State;
+use crate::surface::monitor::{self, Target};
 use crate::tracker::{self, Tracker};
+
+/// The full window's size when first opened, and the smallest it may be
+/// made — also what mini mode puts back on the way out.
+pub const FULL_SIZE: [f32; 2] = [760.0, 720.0];
+pub const FULL_MIN_SIZE: [f32; 2] = [420.0, 300.0];
+
+/// How long the mini rows show what the last focus did.
+const NOTICE_FOR: std::time::Duration = std::time::Duration::from_secs(6);
+
+/// How long the mini window has to hold still before its place and size are
+/// written down — a drag is many frames, and one write.
+const GEOMETRY_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// One detected agent and everything the window says about it.
 pub struct Row {
@@ -62,6 +75,26 @@ pub struct App {
     /// Whether the Run-key startup entry exists. Read once and kept, so the
     /// registry is not asked twice a second for something only a click changes.
     autostart: bool,
+    /// Mini mode: only the rows, small and on top — the monitor as a surface.
+    mini: bool,
+    /// The full window's size and place, kept while in mini mode so leaving
+    /// it puts the window back the way it was.
+    full_size: Option<egui::Vec2>,
+    full_pos: Option<egui::Pos2>,
+    /// How many rows the mini window was last sized for.
+    mini_rows: usize,
+    /// The size the mini window was last told to be, until it gets there —
+    /// so our own resize is not read back as the user's.
+    expected_size: Option<egui::Vec2>,
+    /// The mini window's size last frame, to tell a change from a still.
+    last_inner: Option<egui::Vec2>,
+    /// When the mini window's place or size last changed without yet being
+    /// written down.
+    geometry_dirty: Option<std::time::Instant>,
+    /// What the last focus said, and when it was first seen — shown over the
+    /// mini rows for a moment.
+    notice: Option<String>,
+    notice_at: Option<std::time::Instant>,
 }
 
 impl App {
@@ -71,6 +104,10 @@ impl App {
         settings_path: Option<PathBuf>,
         notice: Option<String>,
     ) -> Self {
+        let mini = tracker
+            .lock()
+            .map(|tracker| tracker.settings.mini)
+            .unwrap_or(false);
         Self {
             tracker,
             rows: agents::detect().into_iter().map(Row::scan).collect(),
@@ -82,6 +119,15 @@ impl App {
             hwnd: Arc::new(AtomicIsize::new(0)),
             quitting: false,
             autostart: crate::autostart::enabled(),
+            mini,
+            full_size: None,
+            full_pos: None,
+            mini_rows: 0,
+            expected_size: None,
+            last_inner: None,
+            geometry_dirty: None,
+            notice: None,
+            notice_at: None,
         }
     }
 
@@ -189,11 +235,16 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if self.mini {
+            self.mini_ui(ui);
+            return;
+        }
         let now = crate::now_ms();
         let mut rescan = false;
         let mut action: Option<(usize, bool)> = None;
         let mut settings_changed = false;
         let mut focus: Option<FocusRequest> = None;
+        let mut enter_mini = false;
         let mut autostart_error: Option<String> = None;
 
         {
@@ -265,7 +316,8 @@ impl eframe::App for App {
                     .id_salt("window")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        settings_changed = lanes_panel(ui, &mut tracker, now, &mut focus);
+                        settings_changed =
+                            lanes_panel(ui, &mut tracker, now, &mut focus, &mut enter_mini);
                         ui.add_space(10.0);
                         ui.separator();
                         ui.add_space(6.0);
@@ -277,32 +329,11 @@ impl eframe::App for App {
             });
         }
 
-        // On its own thread, deliberately. Two reasons, and both were learned
-        // the hard way: raising a window can spend a quarter of a second
-        // waiting for the terminal to agree which tab is in front, which is a
-        // quarter of a second of frozen window; and UI Automation needs a COM
-        // apartment, which the window's own thread has already been put into a
-        // different mode of by the windowing library.
         if let Some(request) = focus {
-            let tracker = Arc::clone(&self.tracker);
-            let target = tracker.lock().ok().map(|tracker| match &request {
-                FocusRequest::Lane(lane) => tracker.summon_target(*lane),
-                FocusRequest::Session(source, id) => tracker.summon_session(source, id),
-            });
-            let ctx = ui.ctx().clone();
-            std::thread::spawn(move || {
-                let report = match target {
-                    Some(Ok((ancestors, names))) => crate::focus::raise(&ancestors, &names).detail,
-                    Some(Err(reason)) => reason,
-                    None => return,
-                };
-                if let Ok(mut tracker) = tracker.lock() {
-                    tracker.summon = Some(report);
-                }
-                // The window is behind the terminal we just raised and would
-                // otherwise not draw again until something else woke it.
-                ctx.request_repaint();
-            });
+            self.request_focus(ui.ctx(), request);
+        }
+        if enter_mini {
+            self.set_mini(ui.ctx(), true);
         }
         if let Some(error) = autostart_error {
             self.status = Some(error);
@@ -334,6 +365,245 @@ impl eframe::App for App {
 }
 
 impl App {
+    /// Mini mode: the monitor as a surface. Only the rows, at the pace the
+    /// palette asks for, and no settings — the way back is a double-click.
+    fn mini_ui(&mut self, ui: &mut egui::Ui) {
+        let now = crate::now_ms();
+        // egui's own clock, continuous across frames: the animation's time.
+        let elapsed_ms = (ui.input(|i| i.time) * 1000.0) as u64;
+        let (rows, summon) = {
+            let Ok(mut tracker) = self.tracker.lock() else {
+                return;
+            };
+            // The clock, as in the full view.
+            tracker.sweep(now);
+            // The report is cloned out once, when it changes, not per frame.
+            let changed = (tracker.summon != self.notice).then(|| tracker.summon.clone());
+            (monitor::rows(&tracker, now, elapsed_ms), changed)
+        };
+        let notice = self.notice(summon);
+        let mut action = None;
+        egui::CentralPanel::default()
+            .frame(monitor::panel_frame(ui.visuals()))
+            .show(ui, |ui| {
+                action = monitor::paint(ui, &rows, notice);
+            });
+        match action {
+            Some(monitor::Action::Focus(Target::Lane(lane))) => {
+                self.request_focus(ui.ctx(), FocusRequest::Lane(lane));
+            }
+            Some(monitor::Action::Focus(Target::Session { source, id })) => {
+                self.request_focus(ui.ctx(), FocusRequest::Session(source, id));
+            }
+            Some(monitor::Action::Leave) => self.set_mini(ui.ctx(), false),
+            // No title bar: the background is the handle and the corner the
+            // resize, and Windows runs the drag from there.
+            Some(monitor::Action::Move) => {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
+            Some(monitor::Action::Resize) => {
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::BeginResize(
+                        egui::ResizeDirection::SouthEast,
+                    ));
+            }
+            None => {}
+        }
+        if self.mini {
+            self.track_mini_geometry(ui.ctx(), rows.len());
+        }
+        // Thirty a second while something moves, the resting pace otherwise
+        // — and never for a hidden window, as in the full view.
+        if self.window_shown() {
+            ui.ctx()
+                .request_repaint_after(monitor::repaint_after(&rows));
+        }
+    }
+
+    /// What the last focus said, for a moment after it said it.
+    fn notice(&mut self, changed: Option<Option<String>>) -> Option<&str> {
+        if let Some(summon) = changed {
+            self.notice = summon;
+            self.notice_at = self.notice.as_ref().map(|_| std::time::Instant::now());
+        }
+        self.notice_at
+            .filter(|at| at.elapsed() < NOTICE_FOR)
+            .and(self.notice.as_deref())
+    }
+
+    /// Keeps the mini window the size of its rows, and remembers where the
+    /// user put it and how big they made it.
+    ///
+    /// The place is theirs entirely: wherever the window is dragged is
+    /// where it opens next time. The size is theirs by the row: a drag of
+    /// the corner is read back as a width and a height per row, so a row
+    /// arriving or leaving grows or shrinks the window by exactly one row
+    /// and the keys keep the size they were given. Written down once the
+    /// window has held still for a moment, not on every frame of a drag.
+    fn track_mini_geometry(&mut self, ctx: &egui::Context, rows: usize) {
+        let (outer, inner) = ctx.input(|i| (i.viewport().outer_rect, i.viewport().inner_rect));
+        let Ok(mut tracker) = self.tracker.lock() else {
+            return;
+        };
+        let known = tracker.settings.mini_window;
+        let mut window = known.unwrap_or(settings::MiniWindow {
+            x: outer.map_or(0.0, |rect| rect.min.x),
+            y: outer.map_or(0.0, |rect| rect.min.y),
+            width: monitor::DEFAULT_WIDTH,
+            row_height: monitor::DEFAULT_ROW_HEIGHT,
+        });
+        // A window that has never been written down is, as soon as it has a
+        // place at all.
+        let mut changed = known.is_none() && outer.is_some();
+        if let Some(outer) = outer
+            && (outer.min.x != window.x || outer.min.y != window.y)
+        {
+            window.x = outer.min.x;
+            window.y = outer.min.y;
+            changed = true;
+        }
+        if let Some(inner) = inner
+            && self.last_inner != Some(inner.size())
+        {
+            let size = inner.size();
+            // A change we asked for lands once; any other is the user's.
+            if self.expected_size.take().is_none() && self.last_inner.is_some() {
+                window.width = size.x;
+                window.row_height = monitor::row_height_for(size.y, rows);
+                changed = true;
+            }
+            self.last_inner = Some(size);
+        }
+        if rows != self.mini_rows {
+            self.mini_rows = rows;
+            let size = monitor::window_size(rows, window.width, window.row_height);
+            if self.last_inner != Some(size) {
+                self.expected_size = Some(size);
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+            }
+        }
+        if changed {
+            tracker.settings.mini_window = Some(window);
+            self.geometry_dirty = Some(std::time::Instant::now());
+        }
+        drop(tracker);
+        if self
+            .geometry_dirty
+            .is_some_and(|since| since.elapsed() >= GEOMETRY_SETTLE)
+        {
+            self.geometry_dirty = None;
+            self.save_settings();
+        }
+    }
+
+    /// Switches between the full window and mini mode, and remembers which.
+    ///
+    /// Mini has no title bar, is sized to its rows, and sits on top — a
+    /// surface on the desk rather than a window among windows — and opens
+    /// where it was last left. Leaving it puts back the size, place and
+    /// level the full window had.
+    fn set_mini(&mut self, ctx: &egui::Context, mini: bool) {
+        if mini == self.mini {
+            return;
+        }
+        let (outer, inner) = ctx.input(|i| (i.viewport().outer_rect, i.viewport().inner_rect));
+        let (rows, window, summon) = {
+            let Ok(mut tracker) = self.tracker.lock() else {
+                return;
+            };
+            tracker.settings.mini = mini;
+            // The first time in, the mini window is where the full window
+            // was, at the default size — written down now, with the mode,
+            // rather than by the geometry tracker half a second later.
+            if mini
+                && tracker.settings.mini_window.is_none()
+                && let Some(outer) = outer
+            {
+                tracker.settings.mini_window = Some(settings::MiniWindow {
+                    x: outer.min.x,
+                    y: outer.min.y,
+                    width: monitor::DEFAULT_WIDTH,
+                    row_height: monitor::DEFAULT_ROW_HEIGHT,
+                });
+            }
+            let rows = (0..tracker.settings.lane_count)
+                .filter(|lane| tracker.on_lane(*lane).is_some())
+                .count()
+                + tracker.overflow().len();
+            (rows, tracker.settings.mini_window, tracker.summon.clone())
+        };
+        self.mini = mini;
+        self.geometry_dirty = None;
+        self.save_settings();
+        if mini {
+            self.full_size = inner.map(|rect| rect.size());
+            self.full_pos = outer.map(|rect| rect.min);
+            // What the last focus said was read in the full view already.
+            self.notice = summon;
+            self.notice_at = None;
+            let (width, row_height) = window
+                .map(|window| (window.width, window.row_height))
+                .unwrap_or((monitor::DEFAULT_WIDTH, monitor::DEFAULT_ROW_HEIGHT));
+            let size = monitor::window_size(rows, width, row_height);
+            self.mini_rows = rows;
+            self.last_inner = inner.map(|rect| rect.size());
+            self.expected_size = Some(size);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(
+                monitor::MIN_SIZE.into(),
+            ));
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+            if let Some(window) = window {
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+                    window.x, window.y,
+                )));
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+                egui::WindowLevel::AlwaysOnTop,
+            ));
+        } else {
+            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+                egui::WindowLevel::Normal,
+            ));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(FULL_MIN_SIZE.into()));
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(
+                self.full_size.unwrap_or(FULL_SIZE.into()),
+            ));
+            if let Some(pos) = self.full_pos {
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+            }
+        }
+    }
+
+    /// Brings an agent's window forward — on its own thread, deliberately.
+    /// Two reasons, and both were learned the hard way: raising a window can
+    /// spend a quarter of a second waiting for the terminal to agree which
+    /// tab is in front, which is a quarter of a second of frozen window; and
+    /// UI Automation needs a COM apartment, which the window's own thread has
+    /// already been put into a different mode of by the windowing library.
+    fn request_focus(&self, ctx: &egui::Context, request: FocusRequest) {
+        let tracker = Arc::clone(&self.tracker);
+        let target = tracker.lock().ok().map(|tracker| match &request {
+            FocusRequest::Lane(lane) => tracker.summon_target(*lane),
+            FocusRequest::Session(source, id) => tracker.summon_session(source, id),
+        });
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let report = match target {
+                Some(Ok((ancestors, names))) => crate::focus::raise(&ancestors, &names).detail,
+                Some(Err(reason)) => reason,
+                None => return,
+            };
+            if let Ok(mut tracker) = tracker.lock() {
+                tracker.summon = Some(report);
+            }
+            // The window is behind the terminal we just raised and would
+            // otherwise not draw again until something else woke it.
+            ctx.request_repaint();
+        });
+    }
+
     fn save_settings(&mut self) {
         let Some(path) = self.settings_path.clone() else {
             return;
@@ -372,10 +642,17 @@ impl App {
             }
             Ok(plan) if plan.is_noop() => format!("{name}: nothing of ours to remove"),
             Ok(plan) => match install::apply(&plan) {
-                Ok(()) => format!(
-                    "{name}: {} — a backup is beside it",
-                    if installing { "installed" } else { "removed" }
-                ),
+                Ok(()) => {
+                    let notes = if plan.notes.is_empty() {
+                        String::new()
+                    } else {
+                        format!("; {}", plan.notes.join("; "))
+                    };
+                    format!(
+                        "{name}: {}{notes} — a backup is beside it",
+                        if installing { "installed" } else { "removed" }
+                    )
+                }
                 Err(error) => format!("{name}: {error}"),
             },
             Err(error) => format!("{name}: {error}"),
@@ -383,8 +660,6 @@ impl App {
     }
 }
 
-/// What one lane shows. Copied out of the tracker first, so the settings for
-/// the same lane can be edited in place without borrowing it twice.
 /// What the user asked to bring forward: a lane's session, or one named by
 /// identity because it has no lane (the off-keyboard cards).
 enum FocusRequest {
@@ -392,6 +667,8 @@ enum FocusRequest {
     Session(String, String),
 }
 
+/// What one lane shows. Copied out of the tracker first, so the settings for
+/// the same lane can be edited in place without borrowing it twice.
 struct LaneView {
     state: State,
     since: u64,
@@ -403,6 +680,10 @@ struct LaneView {
     source: String,
     /// Subagents still at work on this session.
     subagents: usize,
+    /// Context and limits, as last reported.
+    gauges: crate::gauges::Gauges,
+    /// Why the lane is in Error, when it is known.
+    failure: Option<&'static str>,
 }
 
 fn view_of(session: &tracker::Session) -> LaneView {
@@ -416,6 +697,8 @@ fn view_of(session: &tracker::Session) -> LaneView {
         agent: session.agent,
         source: session.source.clone(),
         subagents: session.subagents.len(),
+        gauges: session.gauges,
+        failure: session.failure,
     }
 }
 
@@ -425,12 +708,25 @@ fn lanes_panel(
     tracker: &mut Tracker,
     now: u64,
     focus: &mut Option<FocusRequest>,
+    mini: &mut bool,
 ) -> bool {
     let mut changed = false;
 
     ui.horizontal(|ui| {
         ui.heading("Lanes");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // Rightmost: the monitor as a surface.
+            if ui
+                .small_button("Mini mode")
+                .on_hover_text(
+                    "Only the lanes, small and on top — the monitor as a surface. \
+                     Double-click a lane to get there; double-click there to come back.",
+                )
+                .clicked()
+            {
+                *mini = true;
+            }
+            ui.add_space(8.0);
             let mut count = tracker.settings.lane_count;
             for option in LANE_COUNTS.iter().rev() {
                 let label = format!("{option} × {}", settings::KEYS / option);
@@ -478,6 +774,9 @@ fn lanes_panel(
         });
         ui.add_space(4.0);
     }
+    if actions.mini {
+        *mini = true;
+    }
     if let Some(lane) = actions.focus {
         *focus = Some(FocusRequest::Lane(lane));
     }
@@ -515,6 +814,9 @@ fn lanes_panel(
     }
     if every_lane_taken {
         empty_overflow_slot(ui);
+    }
+    if off.mini {
+        *mini = true;
     }
     if let Some((source, id)) = off.focus {
         *focus = Some(FocusRequest::Session(source, id));
@@ -577,6 +879,8 @@ struct LaneActions {
     focus: Option<usize>,
     moved: Option<(usize, usize)>,
     dismiss: Option<usize>,
+    /// A double-click on a card: into mini mode.
+    mini: bool,
 }
 
 fn lane_card(
@@ -598,159 +902,181 @@ fn lane_card(
         None => egui::Color32::TRANSPARENT,
     };
 
-    egui::Frame::new()
-        .inner_margin(egui::Margin::symmetric(8, 6))
-        .corner_radius(6.0)
-        .fill(tint)
-        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                // The lane's own colour, which is what it will be on the
-                // keyboard. Editing it here is the whole point of it being a
-                // setting rather than a constant.
-                let mut rgb = [lane_color.r, lane_color.g, lane_color.b];
-                if ui.color_edit_button_srgb(&mut rgb).changed() {
-                    config.lanes[index].color = Rgb::new(rgb[0], rgb[1], rgb[2]);
-                    changed = true;
-                }
-                ui.label(
-                    egui::RichText::new(format!("{}", index + 1))
-                        .monospace()
-                        .strong()
-                        .color(accent),
-                );
-                // The name is load-bearing: milestone 4 finds a terminal tab by
-                // it. Empty means "whatever project is on this lane".
-                let hint = view
-                    .and_then(|view| view.project.clone())
-                    .unwrap_or_else(|| format!("Lane {}", index + 1));
-                if ui
-                    .add(
-                        egui::TextEdit::singleline(&mut config.lanes[index].name)
-                            .desired_width(150.0)
-                            .hint_text(hint),
-                    )
-                    .changed()
-                {
-                    changed = true;
-                }
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Rightmost: dismiss the session, for the agent that died
-                    // without saying so. Only when there is one to dismiss.
-                    if view.is_some()
-                        && ui
-                            .add(egui::Button::new("❌").small())
-                            .on_hover_text(
-                                "Remove this session. If the agent is actually still \
-                                 alive, its next event brings it back.",
-                            )
-                            .clicked()
-                    {
-                        actions.dismiss = Some(index);
-                    }
-                    // Moving a lane is the user's call — the app itself never
-                    // reorders one. Everything travels together: session, name,
-                    // colour, saved preference, keys.
-                    if ui
-                        .add_enabled(
-                            index + 1 < config.lane_count,
-                            egui::Button::new("⏷").small(),
-                        )
-                        .on_hover_text("Move this lane down")
-                        .clicked()
-                    {
-                        actions.moved = Some((index, index + 1));
-                    }
-                    if ui
-                        .add_enabled(index > 0, egui::Button::new("⏶").small())
-                        .on_hover_text("Move this lane up")
-                        .clicked()
-                    {
-                        actions.moved = Some((index, index - 1));
-                    }
-                    match view {
-                        Some(view) => {
-                            ui.label(
-                                egui::RichText::new(tracker::elapsed(view.since, now)).monospace(),
-                            );
-                            state_pill(ui, view.state);
-                            // A turn can be done while its subagents are not —
-                            // say so, or a busy lane reads as finished.
-                            if view.subagents > 0 {
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "{} subagent{} busy",
-                                        view.subagents,
-                                        if view.subagents == 1 { "" } else { "s" }
-                                    ))
-                                    .small()
-                                    .color(egui::Color32::from_rgb(80, 170, 255)),
-                                );
-                            }
-                        }
-                        None => {
-                            // Information, not a reservation: whoever comes
-                            // next lands here, saved or not.
-                            let preferred: Vec<String> =
-                                config.preferring(index).map(SavedAgent::project).collect();
-                            let text = if preferred.is_empty() {
-                                "empty — the next free agent lands here".to_owned()
-                            } else {
-                                format!(
-                                    "empty — the next free agent lands here · preferred by {}",
-                                    preferred.join(", ")
-                                )
-                            };
-                            ui.label(egui::RichText::new(text).weak().small());
-                        }
-                    }
-                });
-            });
-
-            // An empty lane is one line. Six of them each explaining themselves
-            // is most of a window spent saying nothing is happening.
-            if let Some(view) = view {
-                let identity = ui.label(
-                    egui::RichText::new(format!(
-                        "{} · {} · {}",
-                        view.project
-                            .clone()
-                            .unwrap_or_else(|| "unknown project".to_owned()),
-                        view.agent
-                            .map(|agent| agent.label())
-                            .unwrap_or("unknown agent"),
-                        agents::host_label(&view.source),
-                    ))
-                    .small(),
-                );
-                if let Some(cwd) = &view.cwd {
-                    identity.on_hover_text(cwd.display().to_string());
-                }
-                // The last thing that happened, and the save, share a row. Six
-                // lanes each spending a row on a button nobody presses twice is
-                // most of a window.
+    // The card is a double-click into mini mode. Sensed *underneath* its own
+    // widgets — that is what `UiBuilder::sense` is for — so the colour
+    // button, the name and every button keep their clicks.
+    let card = ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
+        egui::Frame::new()
+            .inner_margin(egui::Margin::symmetric(8, 6))
+            .corner_radius(6.0)
+            .fill(tint)
+            .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(&view.note).small().weak().monospace());
+                    // The lane's own colour, which is what it will be on the
+                    // keyboard. Editing it here is the whole point of it being a
+                    // setting rather than a constant.
+                    let mut rgb = [lane_color.r, lane_color.g, lane_color.b];
+                    if ui.color_edit_button_srgb(&mut rgb).changed() {
+                        config.lanes[index].color = Rgb::new(rgb[0], rgb[1], rgb[2]);
+                        changed = true;
+                    }
+                    ui.label(
+                        egui::RichText::new(format!("{}", index + 1))
+                            .monospace()
+                            .strong()
+                            .color(accent),
+                    );
+                    // The name is load-bearing: milestone 4 finds a terminal tab by
+                    // it. Empty means "whatever project is on this lane".
+                    let hint = view
+                        .and_then(|view| view.project.clone())
+                        .unwrap_or_else(|| format!("Lane {}", index + 1));
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut config.lanes[index].name)
+                                .desired_width(150.0)
+                                .hint_text(hint),
+                        )
+                        .changed()
+                    {
+                        changed = true;
+                    }
+
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // Rightmost, because it is the one thing on this window
-                        // that does something to the world outside it.
+                        // Rightmost: dismiss the session, for the agent that died
+                        // without saying so. Only when there is one to dismiss.
+                        if view.is_some()
+                            && ui
+                                .add(egui::Button::new("❌").small())
+                                .on_hover_text(
+                                    "Remove this session. If the agent is actually still \
+                                     alive, its next event brings it back.",
+                                )
+                                .clicked()
+                        {
+                            actions.dismiss = Some(index);
+                        }
+                        // Moving a lane is the user's call — the app itself never
+                        // reorders one. Everything travels together: session, name,
+                        // colour, saved preference, keys.
                         if ui
-                            .small_button("Focus")
-                            .on_hover_text(
-                                "Bring this agent's terminal forward, with its tab in front. \
-                                 Also on the lane's marker key, F13–F24.",
+                            .add_enabled(
+                                index + 1 < config.lane_count,
+                                egui::Button::new("⏷").small(),
                             )
+                            .on_hover_text("Move this lane down")
                             .clicked()
                         {
-                            actions.focus = Some(index);
+                            actions.moved = Some((index, index + 1));
                         }
-                        changed |= save_controls(ui, index, view, config, actions);
+                        if ui
+                            .add_enabled(index > 0, egui::Button::new("⏶").small())
+                            .on_hover_text("Move this lane up")
+                            .clicked()
+                        {
+                            actions.moved = Some((index, index - 1));
+                        }
+                        match view {
+                            Some(view) => {
+                                ui.label(
+                                    egui::RichText::new(tracker::elapsed(view.since, now))
+                                        .monospace(),
+                                );
+                                state_pill(ui, view.state);
+                                if let Some(word) = view.failure {
+                                    let [r, g, b] = State::Error.tint();
+                                    ui.label(
+                                        egui::RichText::new(word)
+                                            .small()
+                                            .color(egui::Color32::from_rgb(r, g, b)),
+                                    );
+                                }
+                                // A turn can be done while its subagents are not —
+                                // say so, or a busy lane reads as finished.
+                                if view.subagents > 0 {
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "{} subagent{} busy",
+                                            view.subagents,
+                                            if view.subagents == 1 { "" } else { "s" }
+                                        ))
+                                        .small()
+                                        .color(egui::Color32::from_rgb(80, 170, 255)),
+                                    );
+                                }
+                            }
+                            None => {
+                                // Information, not a reservation: whoever comes
+                                // next lands here, saved or not.
+                                let preferred: Vec<String> =
+                                    config.preferring(index).map(SavedAgent::project).collect();
+                                let text = if preferred.is_empty() {
+                                    "empty — the next free agent lands here".to_owned()
+                                } else {
+                                    format!(
+                                        "empty — the next free agent lands here · preferred by {}",
+                                        preferred.join(", ")
+                                    )
+                                };
+                                ui.label(egui::RichText::new(text).weak().small());
+                            }
+                        }
                     });
                 });
-            }
-        });
+
+                // An empty lane is one line. Six of them each explaining themselves
+                // is most of a window spent saying nothing is happening.
+                if let Some(view) = view {
+                    let identity = ui.label(
+                        egui::RichText::new(format!(
+                            "{} · {} · {}",
+                            view.project
+                                .clone()
+                                .unwrap_or_else(|| "unknown project".to_owned()),
+                            view.agent
+                                .map(|agent| agent.label())
+                                .unwrap_or("unknown agent"),
+                            agents::host_label(&view.source),
+                        ))
+                        .small(),
+                    );
+                    if let Some(cwd) = &view.cwd {
+                        identity.on_hover_text(cwd.display().to_string());
+                    }
+                    // The numbers, when any are known: how full the context is,
+                    // and how much of the two limits is used.
+                    if let Some(line) = view.gauges.sentence() {
+                        ui.label(egui::RichText::new(line).small().weak().monospace());
+                    }
+                    // The last thing that happened, and the save, share a row. Six
+                    // lanes each spending a row on a button nobody presses twice is
+                    // most of a window.
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(&view.note).small().weak().monospace());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            // Rightmost, because it is the one thing on this window
+                            // that does something to the world outside it.
+                            if ui
+                                .small_button("Focus")
+                                .on_hover_text(
+                                    "Bring this agent's terminal forward, with its tab in front. \
+                                     Also on the lane's marker key, F13–F24.",
+                                )
+                                .clicked()
+                            {
+                                actions.focus = Some(index);
+                            }
+                            changed |= save_controls(ui, index, view, config, actions);
+                        });
+                    });
+                }
+            });
+    });
+    if card.response.double_clicked() {
+        actions.mini = true;
+    }
 
     changed
 }
@@ -927,6 +1253,8 @@ struct OverflowActions {
     promote: Option<(String, String)>,
     dismiss: Option<(String, String)>,
     focus: Option<(String, String)>,
+    /// A double-click on a card: into mini mode.
+    mini: bool,
 }
 
 /// One off-keyboard session: the same card as a lane, minus the colour and the
@@ -943,95 +1271,116 @@ fn overflow_card(
         let [r, g, b] = view.state.tint();
         egui::Color32::from_rgb(r, g, b).gamma_multiply(0.10)
     };
-    egui::Frame::new()
-        .inner_margin(egui::Margin::symmetric(8, 6))
-        .corner_radius(6.0)
-        .fill(tint)
-        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("off keyboard").small().weak());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add(egui::Button::new("❌").small())
-                        .on_hover_text(
-                            "Remove this session. If the agent is actually still \
-                             alive, its next event brings it back.",
-                        )
-                        .clicked()
-                    {
-                        actions.dismiss = Some(key());
-                    }
-                    if ui
-                        .add(egui::Button::new("⏶").small())
-                        .on_hover_text(
-                            "Take the bottom lane. Its session steps off the keyboard; \
-                             the lane arrows move this one up from there.",
-                        )
-                        .clicked()
-                    {
-                        actions.promote = Some(key());
-                    }
-                    ui.label(egui::RichText::new(tracker::elapsed(view.since, now)).monospace());
-                    state_pill(ui, view.state);
-                    if view.subagents > 0 {
+    // The card is a double-click into mini mode, sensed *underneath* its own
+    // widgets — `UiBuilder::sense` — so its buttons keep their clicks.
+    let card = ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
+        egui::Frame::new()
+            .inner_margin(egui::Margin::symmetric(8, 6))
+            .corner_radius(6.0)
+            .fill(tint)
+            .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("off keyboard").small().weak());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(egui::Button::new("❌").small())
+                            .on_hover_text(
+                                "Remove this session. If the agent is actually still \
+                                 alive, its next event brings it back.",
+                            )
+                            .clicked()
+                        {
+                            actions.dismiss = Some(key());
+                        }
+                        if ui
+                            .add(egui::Button::new("⏶").small())
+                            .on_hover_text(
+                                "Take the bottom lane. Its session steps off the keyboard; \
+                                 the lane arrows move this one up from there.",
+                            )
+                            .clicked()
+                        {
+                            actions.promote = Some(key());
+                        }
                         ui.label(
-                            egui::RichText::new(format!(
-                                "{} subagent{} busy",
-                                view.subagents,
-                                if view.subagents == 1 { "" } else { "s" }
-                            ))
-                            .small()
-                            .color(egui::Color32::from_rgb(80, 170, 255)),
+                            egui::RichText::new(tracker::elapsed(view.since, now)).monospace(),
                         );
-                    }
+                        state_pill(ui, view.state);
+                        if let Some(word) = view.failure {
+                            let [r, g, b] = State::Error.tint();
+                            ui.label(
+                                egui::RichText::new(word)
+                                    .small()
+                                    .color(egui::Color32::from_rgb(r, g, b)),
+                            );
+                        }
+                        if view.subagents > 0 {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} subagent{} busy",
+                                    view.subagents,
+                                    if view.subagents == 1 { "" } else { "s" }
+                                ))
+                                .small()
+                                .color(egui::Color32::from_rgb(80, 170, 255)),
+                            );
+                        }
+                    });
+                });
+                let identity = ui.label(
+                    egui::RichText::new(format!(
+                        "{} · {} · {}",
+                        view.project
+                            .clone()
+                            .unwrap_or_else(|| "unknown project".to_owned()),
+                        view.agent
+                            .map(|agent| agent.label())
+                            .unwrap_or("unknown agent"),
+                        agents::host_label(&view.source),
+                    ))
+                    .small(),
+                );
+                if let Some(cwd) = &view.cwd {
+                    identity.on_hover_text(cwd.display().to_string());
+                }
+                if let Some(line) = view.gauges.sentence() {
+                    ui.label(egui::RichText::new(line).small().weak().monospace());
+                }
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(&view.note).small().weak().monospace());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .small_button("Focus")
+                            .on_hover_text(
+                                "Bring this agent's window forward. Off the keyboard there \
+                                 is no marker key; this button is it.",
+                            )
+                            .clicked()
+                        {
+                            actions.focus = Some(key());
+                        }
+                        // A saved agent that did not get a lane is still a saved
+                        // agent; say so, and say where it would rather be.
+                        if let Some(saved) = config.saved_matching(view.agent, view.cwd.as_deref())
+                        {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "saved · prefers lane {}",
+                                    config.saved[saved].lane + 1
+                                ))
+                                .small()
+                                .weak(),
+                            );
+                        }
+                    });
                 });
             });
-            let identity = ui.label(
-                egui::RichText::new(format!(
-                    "{} · {} · {}",
-                    view.project
-                        .clone()
-                        .unwrap_or_else(|| "unknown project".to_owned()),
-                    view.agent
-                        .map(|agent| agent.label())
-                        .unwrap_or("unknown agent"),
-                    agents::host_label(&view.source),
-                ))
-                .small(),
-            );
-            if let Some(cwd) = &view.cwd {
-                identity.on_hover_text(cwd.display().to_string());
-            }
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(&view.note).small().weak().monospace());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .small_button("Focus")
-                        .on_hover_text(
-                            "Bring this agent's window forward. Off the keyboard there \
-                             is no marker key; this button is it.",
-                        )
-                        .clicked()
-                    {
-                        actions.focus = Some(key());
-                    }
-                    // A saved agent that did not get a lane is still a saved
-                    // agent; say so, and say where it would rather be.
-                    if let Some(saved) = config.saved_matching(view.agent, view.cwd.as_deref()) {
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "saved · prefers lane {}",
-                                config.saved[saved].lane + 1
-                            ))
-                            .small()
-                            .weak(),
-                        );
-                    }
-                });
-            });
-        });
+    });
+    if card.response.double_clicked() {
+        actions.mini = true;
+    }
 }
 
 /// The landing spot for the next agent, drawn whenever every lane is taken —
@@ -1239,45 +1588,11 @@ fn keyboard_panel(ui: &mut egui::Ui, tracker: &mut Tracker) -> bool {
     ui.horizontal(|ui| {
         ui.strong("Keyboard");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let mut brightness = tracker.settings.brightness;
-            if ui
-                .add(
-                    egui::Slider::new(&mut brightness, settings::MIN_BRIGHTNESS..=1.0)
-                        .show_value(false),
-                )
-                .changed()
-            {
-                tracker.settings.brightness = brightness;
-                changed = true;
-            }
-            ui.label(egui::RichText::new("Brightness").weak());
-            ui.add_space(10.0);
-            // Calibration, rightmost after brightness: B, G, R added
-            // right-to-left so they read R G B left-to-right.
-            for (label, slot) in ["B", "G", "R"]
-                .into_iter()
-                .zip(tracker.settings.color_gain.iter_mut().rev())
-            {
-                if ui
-                    .add(
-                        egui::DragValue::new(slot)
-                            .range(settings::COLOR_GAIN_RANGE.0..=settings::COLOR_GAIN_RANGE.1)
-                            .speed(0.01)
-                            .fixed_decimals(2),
-                    )
-                    .on_hover_text(
-                        "Multiplies what the keys are sent — for a keyboard whose LEDs \
-                         do not match the screen. Above 1.00 clips on full channels, so \
-                         prefer pulling the strong channels down; the window is never \
-                         corrected. Tune with a Preview pattern playing.",
-                    )
-                    .changed()
-                {
-                    changed = true;
-                }
-                ui.label(egui::RichText::new(label).weak());
-            }
-            ui.label(egui::RichText::new("Color balance").weak());
+            ui.label(
+                egui::RichText::new("brightness and colour balance are each device's own")
+                    .small()
+                    .weak(),
+            );
         });
     });
 
@@ -1302,8 +1617,35 @@ fn keyboard_panel(ui: &mut egui::Ui, tracker: &mut Tracker) -> bool {
             ui.colored_label(colour, detail);
         }
     } else {
+        // Each device on its line with its own controls: a keyboard whose
+        // blue runs hot and a deck whose LCD is true are two different
+        // corrections, and the deck — a screen — takes no colour balance.
         for status in connected {
-            ui.colored_label(egui::Color32::from_rgb(80, 200, 120), status.detail.clone());
+            // Controls first, at the right; the device's line takes what is
+            // left and gives way, so a long name never runs under a slider.
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let balance = status.surface != crate::surface::streamdeck::surface::SURFACE;
+                    // Drawn from a copy and written back only on a change: a
+                    // device gets an entry of its own when its slider moves,
+                    // never from being looked at.
+                    let mut tuning = tracker.settings.tuning(status.surface);
+                    if device_tuning(ui, &mut tuning, balance) {
+                        *tracker.settings.tuning_mut(status.surface) = tuning;
+                        changed = true;
+                    }
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(status.detail.as_str())
+                                    .color(egui::Color32::from_rgb(80, 200, 120)),
+                            )
+                            .truncate(),
+                        )
+                        .on_hover_text(status.detail.as_str());
+                    });
+                });
+            });
         }
     }
 
@@ -1379,6 +1721,53 @@ fn keyboard_panel(ui: &mut egui::Ui, tracker: &mut Tracker) -> bool {
             );
         }
     });
+    changed
+}
+
+/// One device's brightness and, for a keyboard, its colour balance. In a
+/// right-to-left row, so brightness is rightmost and the balance to its
+/// left. Returns whether anything changed.
+fn device_tuning(ui: &mut egui::Ui, tuning: &mut settings::Tuning, balance: bool) -> bool {
+    let mut changed = false;
+    if ui
+        .add(
+            egui::Slider::new(&mut tuning.brightness, settings::MIN_BRIGHTNESS..=1.0)
+                .show_value(false),
+        )
+        .changed()
+    {
+        changed = true;
+    }
+    ui.label(egui::RichText::new("Brightness").weak());
+    if !balance {
+        return changed;
+    }
+    ui.add_space(10.0);
+    // Calibration: B, G, R added right-to-left so they read R G B.
+    for (label, slot) in ["B", "G", "R"]
+        .into_iter()
+        .zip(tuning.color_gain.iter_mut().rev())
+    {
+        if ui
+            .add(
+                egui::DragValue::new(slot)
+                    .range(settings::COLOR_GAIN_RANGE.0..=settings::COLOR_GAIN_RANGE.1)
+                    .speed(0.01)
+                    .fixed_decimals(2),
+            )
+            .on_hover_text(
+                "Multiplies what this keyboard is sent — for LEDs that do not match \
+                 the screen. Above 1.00 clips on full channels, so prefer pulling the \
+                 strong channels down; the window is never corrected. Tune with a \
+                 Preview pattern playing.",
+            )
+            .changed()
+        {
+            changed = true;
+        }
+        ui.label(egui::RichText::new(label).weak());
+    }
+    ui.label(egui::RichText::new("Color balance").weak());
     changed
 }
 

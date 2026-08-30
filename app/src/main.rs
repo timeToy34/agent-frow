@@ -167,6 +167,17 @@ fn doctor() -> Result<(), String> {
             }
         );
 
+        if let Some(installed) = install::status_line_installed(entry) {
+            println!(
+                "    status line {}",
+                if installed {
+                    "registered"
+                } else {
+                    "not registered — install adds it (the numbers on the deck come through it)"
+                }
+            );
+        }
+
         let stale = install::stale_events(entry);
         if !stale.is_empty() {
             println!(
@@ -259,6 +270,9 @@ fn report(entry: &Found, plan: &install::Plan, dry_run: bool) {
     }
     if !plan.events_removed.is_empty() {
         println!("  removing     {}", plan.events_removed.join(", "));
+    }
+    for note in &plan.notes {
+        println!("  {note}");
     }
     if dry_run {
         println!("  --dry-run: not written. Proposed file:\n");
@@ -588,6 +602,9 @@ fn run(dialog_on_busy: bool, notice: Option<String>) -> Result<(), String> {
         _ => (settings::Settings::default(), None),
     };
 
+    // Read before the settings move into the tracker: the window is built
+    // for the mode it was left in.
+    let (mini, mini_window) = (saved.mini, saved.mini_window);
     let mut started = tracker::Tracker::new(saved, lastseen::load(&last_seen_path));
     started.settings_error = settings_error;
     let tracker = Arc::new(Mutex::new(started));
@@ -604,11 +621,15 @@ fn run(dialog_on_busy: bool, notice: Option<String>) -> Result<(), String> {
     // unbounded memory.
     let (ingest_send, ingest_recv) = std::sync::mpsc::sync_channel::<(serde_json::Value, u64)>(256);
     std::thread::spawn(move || {
-        for (value, now) in ingest_recv {
+        // A Codex event names its rollout; its numbers are read from there,
+        // here on the worker, never on the accept path.
+        let mut rollouts = agent_frow::gauges::Rollouts::default();
+        for (mut value, now) in ingest_recv {
             // Diagnostic (only when AGENT_FROW_DEBUG is set): raw cwd/agent
             // per event, to see what an agent actually reports for its
             // working directory.
             log_event(&value);
+            rollouts.attach(&mut value);
             let parsed = event::Event::parse(&value, now);
             // Recorded on disk as well as in memory, so `doctor` can answer
             // "is it actually working?" with the app not running.
@@ -646,16 +667,41 @@ fn run(dialog_on_busy: bool, notice: Option<String>) -> Result<(), String> {
     // to. Kept alive for the life of the app; dropping it unregisters them.
     let _keys = keys::start(Arc::clone(&tracker));
 
+    // The window opens the way it was left. In mini mode that means already
+    // small and on top, rather than full size for a frame and then shrinking.
+    let viewport = eframe::egui::ViewportBuilder::default()
+        .with_title("Agent F-Row")
+        .with_icon(eframe::egui::IconData {
+            rgba: agent_frow::icon::rgba(64),
+            width: 64,
+            height: 64,
+        });
+    let viewport = if mini {
+        // No title bar: the rows are the window. It opens where it was
+        // left, at the width and row height it was left with; the rows
+        // arrive with the first events and size it from there.
+        let (width, row_height) = mini_window
+            .map(|window| (window.width, window.row_height))
+            .unwrap_or((
+                surface::monitor::DEFAULT_WIDTH,
+                surface::monitor::DEFAULT_ROW_HEIGHT,
+            ));
+        let viewport = viewport
+            .with_decorations(false)
+            .with_inner_size(surface::monitor::window_size(0, width, row_height))
+            .with_min_inner_size(surface::monitor::MIN_SIZE)
+            .with_always_on_top();
+        match mini_window {
+            Some(window) => viewport.with_position([window.x, window.y]),
+            None => viewport,
+        }
+    } else {
+        viewport
+            .with_inner_size(ui::FULL_SIZE)
+            .with_min_inner_size(ui::FULL_MIN_SIZE)
+    };
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([760.0, 720.0])
-            .with_min_inner_size([420.0, 300.0])
-            .with_title("Agent F-Row")
-            .with_icon(eframe::egui::IconData {
-                rgba: agent_frow::icon::rgba(64),
-                width: 64,
-                height: 64,
-            }),
+        viewport,
         ..eframe::NativeOptions::default()
     };
     eframe::run_native(

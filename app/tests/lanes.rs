@@ -15,12 +15,30 @@ use agent_frow::tracker::{ACTIVE_IDLE_MS, RESTING_IDLE_MS, Tracker};
 use serde_json::{Value, json};
 
 fn send(tracker: &mut Tracker, source: &str, session: &str, name: &str, cwd: &str, at: u64) {
-    let payload: Value = json!({
+    send_with(tracker, source, session, name, cwd, at, json!({}));
+}
+
+/// `send`, with more fields on the payload.
+fn send_with(
+    tracker: &mut Tracker,
+    source: &str,
+    session: &str,
+    name: &str,
+    cwd: &str,
+    at: u64,
+    extra: Value,
+) {
+    let mut payload: Value = json!({
         "src": source,
         "hook_event_name": name,
         "session_id": session,
         "cwd": cwd,
     });
+    if let (Some(target), Some(extra)) = (payload.as_object_mut(), extra.as_object()) {
+        for (key, value) in extra {
+            target.insert(key.clone(), value.clone());
+        }
+    }
     tracker.accept(Event::parse(&payload, at), at);
 }
 
@@ -1175,4 +1193,221 @@ fn a_hook_event_we_do_not_register_is_named_and_counted() {
     assert!(tracker.sessions.is_empty());
     // It still proves that flavor is alive.
     assert_eq!(tracker.last_seen.get("claude-win").copied(), Some(10));
+}
+
+#[test]
+fn a_status_line_fills_the_numbers_without_counting_as_activity() {
+    let mut tracker = tracker(4);
+    send(
+        &mut tracker,
+        "claude-win",
+        "s1",
+        "SessionStart",
+        "C:\\dev\\a",
+        1_000,
+    );
+    send(
+        &mut tracker,
+        "claude-win",
+        "s1",
+        "Stop",
+        "C:\\dev\\a",
+        2_000,
+    );
+    let before = tracker.sessions[0].clone();
+    let counted = tracker.events;
+
+    send_with(
+        &mut tracker,
+        "claude-win",
+        "s1",
+        "StatusLine",
+        "C:\\dev\\a",
+        3_000,
+        json!({ "gauges": { "ctx": 42, "h5": 10, "d7": 3 } }),
+    );
+    let after = &tracker.sessions[0];
+    assert_eq!(after.gauges.context_used, Some(42));
+    assert_eq!(after.gauges.five_hour, Some(10));
+    assert_eq!(after.gauges.seven_day, Some(3));
+    assert_eq!(after.state, State::Done);
+    assert_eq!(after.last_event, before.last_event, "not activity");
+    assert_eq!(after.events, before.events, "not an event of the session's");
+    assert_eq!(after.note, before.note, "not the last thing that happened");
+    assert_eq!(tracker.events, counted, "not counted at all");
+}
+
+#[test]
+fn a_status_line_never_revives_an_idle_lane() {
+    let mut tracker = tracker(4);
+    send(
+        &mut tracker,
+        "claude-win",
+        "s1",
+        "SessionStart",
+        "C:\\dev\\a",
+        0,
+    );
+    send(
+        &mut tracker,
+        "claude-win",
+        "s1",
+        "Stop",
+        "C:\\dev\\a",
+        1_000,
+    );
+    tracker.sweep(1_000 + RESTING_IDLE_MS + 1);
+    assert_eq!(tracker.sessions[0].state, State::Idle);
+    send_with(
+        &mut tracker,
+        "claude-win",
+        "s1",
+        "StatusLine",
+        "C:\\dev\\a",
+        2_000 + RESTING_IDLE_MS,
+        json!({ "gauges": { "ctx": 42 } }),
+    );
+    assert_eq!(
+        tracker.sessions[0].state,
+        State::Idle,
+        "a config edit is not a return"
+    );
+    assert_eq!(tracker.sessions[0].gauges.context_used, Some(42));
+}
+
+#[test]
+fn a_status_line_for_a_session_we_do_not_hold_creates_nothing() {
+    let mut tracker = tracker(4);
+    send_with(
+        &mut tracker,
+        "claude-win",
+        "ghost",
+        "StatusLine",
+        "C:\\dev\\a",
+        1_000,
+        json!({ "gauges": { "ctx": 42 } }),
+    );
+    assert!(tracker.sessions.is_empty());
+    assert_eq!(
+        tracker.last_seen.get("claude-win"),
+        Some(&1_000),
+        "the flavor did run"
+    );
+}
+
+#[test]
+fn numbers_arrive_a_field_at_a_time() {
+    let mut tracker = tracker(4);
+    send(
+        &mut tracker,
+        "claude-win",
+        "s1",
+        "SessionStart",
+        "C:\\dev\\a",
+        0,
+    );
+    send_with(
+        &mut tracker,
+        "claude-win",
+        "s1",
+        "StatusLine",
+        "C:\\dev\\a",
+        1,
+        json!({ "gauges": { "ctx": 10 } }),
+    );
+    send_with(
+        &mut tracker,
+        "claude-win",
+        "s1",
+        "StatusLine",
+        "C:\\dev\\a",
+        2,
+        json!({ "gauges": { "h5": 20, "d7": 30 } }),
+    );
+    send_with(
+        &mut tracker,
+        "claude-win",
+        "s1",
+        "StatusLine",
+        "C:\\dev\\a",
+        3,
+        json!({ "gauges": { "ctx": 11 } }),
+    );
+    let gauges = tracker.sessions[0].gauges;
+    assert_eq!(
+        (gauges.context_used, gauges.five_hour, gauges.seven_day),
+        (Some(11), Some(20), Some(30))
+    );
+}
+
+#[test]
+fn a_stop_failure_keeps_its_reason_until_the_lane_leaves_error() {
+    let mut tracker = tracker(4);
+    send(
+        &mut tracker,
+        "claude-win",
+        "s1",
+        "SessionStart",
+        "C:\\dev\\a",
+        0,
+    );
+    send_with(
+        &mut tracker,
+        "claude-win",
+        "s1",
+        "StopFailure",
+        "C:\\dev\\a",
+        1,
+        json!({ "error_type": "rate_limit" }),
+    );
+    assert_eq!(tracker.sessions[0].state, State::Error);
+    assert_eq!(tracker.sessions[0].failure, Some("rate limit"));
+    assert_eq!(tracker.sessions[0].note, "StopFailure rate limit");
+    // A straggling PostToolUse leaves Error alone, and the reason with it.
+    send(
+        &mut tracker,
+        "claude-win",
+        "s1",
+        "PostToolUse",
+        "C:\\dev\\a",
+        2,
+    );
+    assert_eq!(tracker.sessions[0].failure, Some("rate limit"));
+    // The next prompt is a new turn: Running, and no reason to give.
+    send(
+        &mut tracker,
+        "claude-win",
+        "s1",
+        "UserPromptSubmit",
+        "C:\\dev\\a",
+        3,
+    );
+    assert_eq!(tracker.sessions[0].state, State::Running);
+    assert_eq!(tracker.sessions[0].failure, None);
+}
+
+#[test]
+fn a_codex_event_carries_numbers_from_its_rollout() {
+    // The worker attaches `gauges` to a Codex event from its rollout; here
+    // they simply arrive on the event, as any other field does.
+    let mut tracker = tracker(4);
+    send_with(
+        &mut tracker,
+        "codex-wsl",
+        "c1",
+        "SessionStart",
+        "/home/me/p",
+        0,
+        json!({ "gauges": { "ctx": 82, "d7": 5 } }),
+    );
+    let gauges = tracker.sessions[0].gauges;
+    assert_eq!(
+        (gauges.context_used, gauges.five_hour, gauges.seven_day),
+        (Some(82), None, Some(5))
+    );
+    assert_eq!(
+        tracker.sessions[0].state,
+        State::Connected,
+        "and the event is still the event"
+    );
 }

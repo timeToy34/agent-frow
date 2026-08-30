@@ -19,3 +19,8 @@
 # The Keychron firmware build: a clone of Keychron's fork and the built image.
 /firmware/keychron-ultra/zmk/
 /firmware/keychron-ultra/out/
+# The demo video: too big for the repository, and a README only plays one
+# served by GitHub's own uploader. Kept beside the checkout, never committed.
+*.mp4
+# Windows' download-origin sidecars.
+*:Zone.Identifier

@@ -197,6 +197,7 @@ fn render(tracker: &Mutex<Tracker>) {
         let colours = palette::frame(
             frame.states,
             frame.settings,
+            frame.settings.tuning(SURFACE),
             frame.elapsed_ms,
             &ready.available,
         );

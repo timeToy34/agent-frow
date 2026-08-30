@@ -8,7 +8,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::agents::Agent;
-use crate::event::{Ancestor, Event, Kind, Parsed};
+use crate::event::{Ancestor, Event, Kind, Parsed, failure_word};
+use crate::gauges::Gauges;
 use crate::settings::{SavedAgent, Settings};
 use crate::state::{self, Note, State, Step};
 
@@ -56,6 +57,12 @@ pub struct Session {
     /// pid had at event time — what summon walks to find and verify the
     /// window the agent is sitting in.
     pub ancestors: Vec<Ancestor>,
+    /// Context and limits, as last reported; unknown until something
+    /// reports them.
+    pub gauges: Gauges,
+    /// Why the lane is in Error, while it is: the word a `StopFailure`
+    /// carried. Cleared the moment the lane is anything else.
+    pub failure: Option<&'static str>,
 }
 
 impl Session {
@@ -231,16 +238,30 @@ impl Tracker {
 
     /// Takes one arriving event.
     pub fn accept(&mut self, parsed: Parsed, now: u64) {
-        self.events += 1;
         let event = match parsed {
             Parsed::Event(event) => *event,
             Parsed::Unrecognised { source, name } => {
+                self.events += 1;
                 self.last_seen.insert(source, now);
                 *self.unrecognised_events.entry(name).or_default() += 1;
                 return;
             }
         };
         self.last_seen.insert(event.source.clone(), event.at);
+
+        // A status line is numbers for a session we hold, and nothing else:
+        // not an event to count, not activity, not a session to introduce.
+        // One for a session we do not hold is ordinary — Claude re-runs it
+        // after a session has ended, and the app may have started late.
+        if event.kind == Kind::StatusLine {
+            if let Some(gauges) = event.gauges
+                && let Some(index) = self.find(&event.source, &event.session_id)
+            {
+                self.sessions[index].gauges.merge(gauges);
+            }
+            return;
+        }
+        self.events += 1;
 
         if event.kind == Kind::Notification
             && let Some(kind) = event.notification.as_deref()
@@ -307,12 +328,21 @@ impl Tracker {
             if !event.ancestors.is_empty() {
                 session.ancestors.clone_from(&event.ancestors);
             }
+            if let Some(gauges) = event.gauges {
+                session.gauges.merge(gauges);
+            }
+            if event.kind == Kind::StopFailure {
+                session.failure = Some(failure_word(event.error_type.as_deref()));
+            }
             match step {
                 Step::Stay => {}
                 Step::Set(next) if next == session.state => {}
                 Step::Set(next) => {
                     session.state = next;
                     session.since = event.at;
+                    if next != State::Error {
+                        session.failure = None;
+                    }
                 }
                 Step::Release => {}
             }
@@ -357,6 +387,9 @@ impl Tracker {
             lane: None,
             wt_session: event.wt_session.clone(),
             ancestors: event.ancestors.clone(),
+            gauges: event.gauges.unwrap_or_default(),
+            failure: (event.kind == Kind::StopFailure)
+                .then(|| failure_word(event.error_type.as_deref())),
         });
         self.fill_lanes();
     }

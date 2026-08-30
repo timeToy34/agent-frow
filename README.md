@@ -6,7 +6,20 @@ Your coding agents, on your keyboard's F-row. Each agent gets a lane of lit
 keys that shows what it is doing — working, done, **waiting for you** — and one
 press on the lane's key brings that agent's window to the front.
 
-![The Agent F-Row window: three lanes, the saved agents, and the settings](docs/screenshot.png)
+https://github.com/user-attachments/assets/2d799d6d-d815-481b-9ae2-f113a0af6aeb
+
+## Supported devices
+
+| Device | Shows | Needs | Status |
+|---|---|---|---|
+| **Corsair** keyboards through iCUE — K65 Plus Wireless, K70 TKL | the F-row as lanes: colour and motion per state; F13–F24 as summon keys | iCUE with third-party control on; the F-row remapped to F13–F24 in the default profile | verified |
+| **Keychron Ultra** — V3 Ultra 8K (the other Ultras speak the same protocol) | the F-row as lanes; summon keys from the Launcher keymap | the cable or the 2.4 GHz receiver, not Bluetooth; Keychron's per-key-brightness fix for true darks | verified |
+| **Elgato Stream Deck** — 2019 V2, 15 keys (every model with a screen, through the driver) | one row per lane: name, context, 5h, 7d, state; every key a summon; ▲▼Enter while Waiting | USB; the Stream Deck app closed | verified |
+| **The monitor** — mini mode | the same rows on screen, five keys each; click a key to summon | nothing | verified |
+| **Keychron V0** | the F-row as lanes | — | **next** |
+
+Without any of them the window shows everything; the keys and the light are
+the part you would be missing.
 
 ## Why
 
@@ -27,7 +40,10 @@ it.
   empty. A lane's key brings the agent's window forward. On a Stream Deck,
   while a lane is Waiting, its three middle keys send one Up, Down or Enter —
   only into a terminal that verifiably has the keyboard. The agents talk to
-  it over loopback on your machine, and nothing leaves it.
+  it over loopback on your machine, and nothing leaves it. Of Claude's
+  status-line JSON, three percentages reach the app — context used, the
+  five-hour and seven-day limits — and the JSON goes on to your own status
+  line untouched.
 
 ## What you see
 
@@ -55,7 +71,9 @@ you dismiss it, so the board you left is the board you come back to.
 ### In the window
 
 The lanes, each with its state, the last thing the agent did, how long it has
-been like that, and a **Focus** button. Sessions beyond the lane count live
+been like that, and a **Focus** button — and, when known, the numbers:
+context used, the five-hour and seven-day limits; in Error, the reason
+beside the state ("rate limit", "overloaded", "auth"). Sessions beyond the lane count live
 **off the keyboard** — fully tracked, no key or light — and take the next lane
 that frees up. The ⏶⏷ arrows reorder lanes; nothing else ever moves a lane out
 from under you.
@@ -65,6 +83,17 @@ project folder, with that lane as its preferred one. Next time the agent
 starts it lands there if the lane is free, otherwise on another lane. The
 saved roster lists the ones that are not running, and is where you change a
 preference or forget it.
+
+**Mini mode.** The *Mini mode* button, or a double-click on a lane or an
+off-keyboard card, folds the window down to a Stream Deck's picture of the
+agents: one row per agent with a session — lanes first, then the off-keyboard
+ones — five keys to a row: the name, context used, the five-hour and
+seven-day limits, and the state over how long, lit exactly as on the
+keyboard. No title bar: drag the background to move it, the bottom-right
+corner to resize it, and it opens next time where you left it, at the size
+you left it, on top of everything. Clicking a key focuses that agent, and
+what the focus did shows over the rows for a few seconds; double-click
+anywhere else to get the full window back.
 
 ### Focus
 
@@ -135,29 +164,42 @@ so every lit key shows at full and dark keys show white until Keychron ships
 firmware with the fix applied and explains how the Launcher flashes it — read
 it before deciding. `agent-frow doctor` lists what it finds on the bus.
 
-**Elgato Stream Deck (MK.2 verified; the driver knows every model with a
-screen).** Plain USB, no driver, nothing to install. One row per lane, like a
-five-key F-row: the left key is the lane's name, the right key its state and
-how long, and the three between are the lane's body — the same colours and
-motion as on the keyboard. While a lane is Waiting those three are **Up, Down
-and Enter**, so a question gets answered from the deck; the app never presses
-anything on its own, and sends the key only into a terminal that verifiably
-has the keyboard. Every key of a row focuses the lane. A 15-key deck shows
-lanes 1–3, and the window says which lanes are on it. The deck cannot be
-shared with the Stream Deck app, which repaints every key and reads every
-press, so **quit the Stream Deck app** and Agent F-Row takes the deck; start
-it again and the deck is handed back within ten seconds. On Quit the deck goes
-back to its logo. `agent-frow doctor` lists it too.
+**Elgato Stream Deck (a 2019 V2 with 15 keys verified; the driver knows
+every model with a screen).** Plain USB, no driver, nothing to install. One row per lane, like a
+five-key F-row, in the same colours and motion as on the keyboard: the left
+key is the lane's name; the three between show **context used, the five-hour
+limit and the seven-day limit** as percentages (a dash until known); the
+right key is the state over how long — or, in Error, over why: "rate limit",
+"overloaded", "auth". While a lane is Waiting the three middle keys become
+**Up, Down and Enter**, so a question gets answered from the deck; the app
+never presses anything on its own, and sends the key only into a terminal
+that verifiably has the keyboard. Every key of a row focuses the lane. A
+15-key deck shows lanes 1–3, and the window says which lanes are on it. The
+deck cannot be shared with the Stream Deck app, which repaints every key and
+reads every press, so **quit the Stream Deck app** and Agent F-Row takes the
+deck; start it again and the deck is handed back within ten seconds. On Quit
+the deck goes back to its logo. `agent-frow doctor` lists it too.
+
+The numbers come from where the agents keep them: for Claude, its status
+line — `install` registers Agent F-Row as the status-line command, or wraps
+the one you have so it keeps rendering exactly as before; for Codex, the
+session's own log, read by the app. The limits are your account's, so every
+lane of one account shows the same two. `agent-frow doctor` says whether the
+status line is registered.
 
 ## Settings
 
 - Lane count — 3 × 4, 4 × 3 or 6 × 2 keys — and each lane's name and colour.
-- Brightness, and **Color balance**: a per-channel gain for keyboards whose
-  LEDs do not match the screen. Tune it with a **Preview** pattern playing on
-  the keys.
+- Brightness, and **Color balance** — a per-channel gain for keyboards whose
+  LEDs do not match the screen — **per connected device**: each has its own
+  line, brightness for all of them and colour balance for the keyboards (the
+  deck is a screen and takes none). Tune it with a **Preview** pattern
+  playing on the keys.
 - Everything lives in `%LOCALAPPDATA%\agent-frow\settings.json`, written
   atomically. A file that does not parse is refused and left alone, and the
   window says so.
+
+![The full window: three lanes, the saved agents, and the settings](docs/screenshot.png)
 
 ## Building from source
 

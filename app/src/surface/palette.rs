@@ -12,7 +12,7 @@
 //! brightness and in some motion, which is what lets a glance answer "which
 //! lane" and "how bad" as two separate questions.
 
-use crate::settings::{KEYS, Rgb, Settings};
+use crate::settings::{KEYS, Rgb, Settings, Tuning};
 use crate::state::State;
 
 /// A lane with no session. The one colour that is not a preference: darkness is
@@ -163,10 +163,13 @@ pub fn lane_colors(
 /// changes — the difference between a resting app and one that allocates and
 /// writes the SDK thirty times a second to say nothing.
 pub fn animated(states: &[Option<State>]) -> bool {
-    states
-        .iter()
-        .flatten()
-        .any(|state| matches!(state, State::Running | State::Waiting))
+    states.iter().flatten().any(|state| moves(*state))
+}
+
+/// Whether this one state moves: Running's light travels and Waiting beats;
+/// everything else holds still.
+pub fn moves(state: State) -> bool {
+    matches!(state, State::Running | State::Waiting)
 }
 
 /// One frame: which key gets which colour, by F-row position.
@@ -178,15 +181,17 @@ pub fn animated(states: &[Option<State>]) -> bool {
 /// other key to the user's own lighting, whichever keyboard renders it.
 ///
 /// `available` is which of the twelve the device actually has, so a keyboard
-/// without a full F-row is never handed keys it does not have.
+/// without a full F-row is never handed keys it does not have; `tuning` is
+/// that device's own brightness and colour balance.
 pub fn frame(
     states: &[Option<State>],
     settings: &Settings,
+    tuning: Tuning,
     elapsed_ms: u64,
     available: &[usize],
 ) -> Vec<(usize, Rgb)> {
     let keys = settings.keys_per_lane();
-    let brightness = settings.brightness.clamp(0.0, 1.0);
+    let brightness = tuning.brightness.clamp(0.0, 1.0);
     let mut frame = Vec::with_capacity(KEYS);
     for lane in 0..settings.lane_count {
         let lane_color = settings
@@ -201,10 +206,7 @@ pub fn frame(
         {
             let key = lane * keys + offset;
             if available.contains(&key) {
-                frame.push((
-                    key,
-                    corrected(scale(color, brightness), settings.color_gain),
-                ));
+                frame.push((key, corrected(scale(color, brightness), tuning.color_gain)));
             }
         }
     }
@@ -219,9 +221,13 @@ mod tests {
     fn settings(lane_count: usize) -> Settings {
         let mut settings = Settings::default();
         settings.set_lane_count(lane_count);
-        settings.brightness = 1.0;
         settings
     }
+
+    const FULL: Tuning = Tuning {
+        brightness: 1.0,
+        color_gain: [1.0, 1.0, 1.0],
+    };
 
     const LANE: Rgb = Rgb::new(80, 170, 255);
 
@@ -276,7 +282,7 @@ mod tests {
         let available: Vec<usize> = (0..200).collect();
         for lanes in [3, 4, 6] {
             let states = vec![Some(State::Running); lanes];
-            let frame = frame(&states, &settings(lanes), 0, &available);
+            let frame = frame(&states, &settings(lanes), FULL, 0, &available);
             assert_eq!(frame.len(), KEYS, "{lanes} lanes");
             for (key, _) in frame {
                 assert!(key < KEYS, "key {key} is not one of ours");
@@ -287,7 +293,13 @@ mod tests {
     #[test]
     fn a_keyboard_missing_those_keys_is_never_handed_them() {
         let available = [0, 1, 2];
-        let frame = frame(&[Some(State::Running); 4], &settings(4), 0, &available);
+        let frame = frame(
+            &[Some(State::Running); 4],
+            &settings(4),
+            FULL,
+            0,
+            &available,
+        );
         assert_eq!(frame.len(), 3);
     }
 
@@ -378,15 +390,16 @@ mod tests {
 
     #[test]
     fn brightness_scales_everything_and_never_inverts_it() {
-        let mut bright = settings(4);
-        bright.brightness = 1.0;
-        let mut dim = bright.clone();
-        dim.brightness = 0.25;
+        let settings = settings(4);
+        let dim = Tuning {
+            brightness: 0.25,
+            ..FULL
+        };
         let available: Vec<usize> = (0..KEYS).collect();
         let states = vec![Some(State::Done); 4];
-        for ((_, full), (_, low)) in frame(&states, &bright, 0, &available)
+        for ((_, full), (_, low)) in frame(&states, &settings, FULL, 0, &available)
             .into_iter()
-            .zip(frame(&states, &dim, 0, &available))
+            .zip(frame(&states, &settings, dim, 0, &available))
         {
             assert!(low.r <= full.r && low.g <= full.g && low.b <= full.b);
         }

@@ -31,18 +31,25 @@ https://github.com/timeToy34/agent-frow
 
 1. Unzip anywhere and run agent-frow.exe once. It installs itself to
    %LOCALAPPDATA%\agent-frow, registers its hooks with every agent it
-   finds, and continues from the installed copy; this folder can then be
-   deleted. Upgrading is the same gesture with a newer zip.
+   finds - and, for Claude, its status line, wrapping the one you have so
+   it renders exactly as before - and continues from the installed copy;
+   this folder can then be deleted. Upgrading is the same gesture with a
+   newer zip.
 2. Restart your agents. For Codex, also run /hooks inside it and trust the
    entry, or its hooks will never run.
 
-Keyboard (optional), with the F-row remapped to F13-F24:
-- Corsair: iCUE running, the remap in the DEFAULT profile - a profile switch
-  takes the summon keys with it.
-- Keychron Ultra: the remap in the Launcher keymap; light over the cable or
+Devices (all optional; the app runs fine without any, the window shows
+everything):
+- Corsair, the F-row remapped to F13-F24: iCUE running, the remap in the
+  DEFAULT profile - a profile switch takes the summon keys with it.
+- Keychron Ultra, the remap in the Launcher keymap; light over the cable or
   the 2.4 GHz receiver, not Bluetooth. Per-key brightness needs Keychron's
   firmware fix (Keychron/zmk pull request 9).
-The app runs fine without any of this; the window shows everything.
+- Stream Deck: quit the Stream Deck app. One row per lane - name, numbers,
+  state; every key summons, and while a lane waits the middle keys answer.
+- The monitor: the Mini mode button, or a double-click on a lane, folds the
+  window to one row per agent. Drag it anywhere, resize it by its corner,
+  double-click to come back; it reopens where you left it.
 
 Windows may warn on first run (SmartScreen): the zip is not code-signed.
 

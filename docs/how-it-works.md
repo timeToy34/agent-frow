@@ -25,7 +25,11 @@ is readable from Windows, so WSL agents are found and configured from here.
 The hook's reply to every event is empty, and it never prints to stdout: it is
 registered on `PermissionRequest`, which is a decision hook on both agents, so
 anything it printed that parsed could approve a real tool call.
-`hook/tests/silence.rs` asserts zero bytes. The registered command string
+`hook/tests/silence.rs` asserts zero bytes. The one exception is not a hook:
+as Claude's status-line command (`--status`, see [Numbers](#numbers-context-and-limits))
+it may, with `--tee`, write back exactly the bytes it was given so the user's
+own status line after the pipe still renders — never a byte of its own, and
+`silence.rs` asserts that too. The registered command string
 must never change either — Codex records trust against a hash of it — which is
 why it names `%LOCALAPPDATA%` rather than a build directory, and why the token
 lives in a file rather than in the command.
@@ -119,8 +123,9 @@ Manager's Startup tab like any other. Not done: code signing.
 
 ### Diagnostics
 
-`agent-frow.exe doctor` reports what is installed and whether each agent has
-actually been heard from. Launching the app with `AGENT_FROW_DEBUG` set (any
+`agent-frow.exe doctor` reports what is installed, whether each agent has
+actually been heard from, and whether Claude's status line is registered —
+the numbers arrive through it. Launching the app with `AGENT_FROW_DEBUG` set (any
 value) appends every hook event's identity fields — `src`, event name, session
 id, `cwd`, agent id and type — to `~/.agent-frow/events.log`, the diagnostic
 for questions like "what does this agent actually report as its working
@@ -246,13 +251,47 @@ agent preferring that lane and never written back.
 
 The lane name is load-bearing: focus finds a terminal tab by it.
 
+### Numbers: context and limits
+
+Hooks carry none of these, on either side. The three a lane shows — how
+much of the context window is used, and how much of the five-hour and the
+seven-day limit — come from where each agent keeps them, and `app/src/gauges.rs`
+turns both into one shape: three percentages, each possibly unknown.
+
+- **Claude** hands them to its status-line command on every assistant
+  message (and on a compact, a mode change, a config edit). `install` makes
+  the hook that command, in `--status` mode: it posts a `StatusLine` record
+  with the session id and three percentages, and nothing else out of that
+  JSON — not the model, not the cost, not the directory. Where a status
+  line already exists it is wrapped, not replaced: `hook --status --tee … |
+  <yours>`, and `--tee` writes back exactly the bytes it read, so your line
+  renders as it always did. `remove` unwraps it. The limits appear only for
+  a Pro or Max account, and only after the first reply; until then the key
+  shows a dash.
+- **Codex** writes them into the session's rollout, one `token_count` line
+  after each model response, and every Codex hook names that file
+  (`transcript_path`). The hook forwards the path; the *app* reads the
+  file's tail on its worker thread — the hook is a Windows process even for
+  a WSL agent and cannot see `/home`, while the app knows every
+  distribution and reaches it through `\\wsl.localhost`. Context follows
+  the Codex TUI's arithmetic (twelve thousand tokens of baseline subtracted
+  from both usage and window); the two limits are told apart by the length
+  of their window, not by which slot they arrived in — the five-hour window
+  is `primary` on one plan and absent on another.
+- **A status line is numbers, not news.** It changes no state, counts as no
+  event, revives no Idle lane — it also fires on a config edit — and one
+  for a session the app does not hold is dropped, since Claude re-runs it
+  after a session has ended. The limits are an account's, not a lane's:
+  every lane of one account reads the same two.
+
 ## The keyboard
 
-Three surfaces, one palette. `app/src/surface/palette.rs` says what the twelve
+Four surfaces, one palette. `app/src/surface/palette.rs` says what the twelve
 keys look like, by F-row position and never by LED; each surface maps a
-position to what its device calls that LED, and writes. All three threads run
-for the life of the app: whatever is plugged in lights up, and all of it does
-if all of it is. Each is also a clock — through `surface/scene.rs`, which
+position to what its device calls that LED, and writes. The three device
+threads run for the life of the app: whatever is plugged in lights up, and
+all of it does if all of it is; the fourth surface is the screen, below under
+[The monitor](#the-monitor). Each is also a clock — through `surface/scene.rs`, which
 decides when a frame is due — so lanes stay honest while the window is hidden.
 
 ### Corsair, through the iCUE SDK
@@ -271,7 +310,11 @@ undershoots until a colour set on screen is unrecognisable on the keys.
 **Color balance** (next to Brightness) is a per-channel gain, 0.25–2.00,
 multiplied into what the keys are sent and nothing else — the window is never
 corrected. Calibrate with a **Preview** pattern playing; above 1.00 clips on
-already-full channels, so prefer pulling the strong channels down.
+already-full channels, so prefer pulling the strong channels down. Both are
+**per device** (`Settings::tuning(surface)`, keyed by the surface's name):
+each connected keyboard and the deck has its own line of controls, and a
+settings file from before that has its one slider read as the tuning every
+device starts from.
 
 ### Keychron Ultra, through its Launcher protocol
 
@@ -345,7 +388,12 @@ layout, image size, rotation and encoding; no driver, nothing linked.
   reset is also the exit, tray Quit included; "as found" for a deck is the
   logo.
 - **One row per lane**, like the F-row: the first key is the lane's name,
-  the last its state, and the keys between are the lane's body. The colours
+  the last its state, and the keys between are the lane's body — carrying
+  its numbers: context used, the five-hour limit, the seven-day limit, each
+  as its short name over a percentage, or over a dash until it is known (on
+  a three-key row, the context alone). In Error the state key's second line
+  is the reason when there is one — "rate limit", "overloaded", "auth" —
+  rather than the clock. The colours
   are `lane_colors` over the row — the marker, the runner crossing, the
   double-pulse, the dark red of Error — with the state key steadied: it
   rests at the lane's glow through Waiting's pulse, Error's red and Done's
@@ -354,8 +402,10 @@ layout, image size, rotation and encoding; no driver, nothing linked.
   face on a small LCD could not be read at arm's length; the window's own
   Ubuntu stands in if the file is missing: the name on the first key, the
   state word over the elapsed time on the last, and in Waiting an up
-  triangle, a down triangle and the word Enter on the three middle keys —
-  the triangles drawn, not typeset. The name is set as words — a dot or a
+  triangle, a down triangle and the word Enter on the three middle keys in
+  place of the numbers — the triangles drawn, not typeset, about the height
+  of the text's capitals, and Enter set by the same rule as a name. The
+  name is set as words — a dot or a
   dash breaks like a space, on the deck only — over up to three lines, as
   large as the key allows. Ink is grey on a key that is dark on purpose (an
   empty lane is black with its name in grey, Idle is one dim name key and
@@ -365,8 +415,9 @@ layout, image size, rotation and encoding; no driver, nothing linked.
   on a 15-key deck — and the window says which; the rows past the lanes are
   black. `surface/streamdeck/canvas.rs` is the drawing and has no device in
   it.
-- **Brightness is the deck's own**, set from the slider; the pixels are never
-  scaled and never colour-corrected — an LCD is a screen, like the window.
+- **Brightness is the deck's own**, set from the deck's own slider; the
+  pixels are never scaled and never colour-corrected — an LCD is a screen,
+  like the window, so the deck's line has no colour balance.
 - **A key is written when its face changes**, not when the scene says so:
   the elapsed time on a key ticks while the lane's state stands still, so
   every key is compared with what it was last told, and only a changed one
@@ -431,6 +482,42 @@ the rest, so an iCUE restart or a sleep left the F-row dark, silently, until the
 application was restarted. It paints only on change or animation, and it is
 also the application's clock while the window is hidden: it sweeps stale
 sessions every frame, so lanes stay honest in the tray.
+
+## The monitor
+
+The screen is the fourth surface, in `app/src/surface/monitor.rs`. Mini mode
+folds the window down to the deck's picture: one row per lane with a session
+on it, then one per off-keyboard session, five keys to a row — the name, ctx,
+5h, 7d, the state over how long — built from the deck's own key vocabulary
+(`Face`, `Label`, `Ink`, `role`) and lit by the deck's `row_colors`, which is
+the keyboards' `palette::lane_colors` with the state key held steady. It
+paints at ~30 frames a second while a row moves and at the window's resting
+pace otherwise. A name is set the deck's way too — `name_words`, dots and
+dashes breaking like spaces, the largest size that fits whole on up to three
+lines, every row centred. Like the window it lives in, it is never
+brightness-scaled or colour-corrected: those exist to make LEDs match the
+screen. A row past the lanes is drawn in a neutral grey, since it has no lane
+colour; an empty lane has no row, since a row that says nothing only costs
+the space it takes.
+
+- **A key is a summon and nothing more.** No ▲▼Enter here — the middle keys
+  stay the numbers through Waiting: a click is a click, and the surface
+  mirrors the agents rather than driving them. What the last focus did is
+  shown over the rows for a few seconds, so a focus that found no tab is not
+  silent.
+- **No title bar, and the window is the user's to place.** The background is
+  the drag handle (`ViewportCommand::StartDrag`), the bottom-right corner the
+  resize (`BeginResize`), and it sits on top. Its place, width and *row
+  height* are written to the settings file once it has held still for half a
+  second — the size is kept by the row, so a row arriving or leaving changes
+  the window by exactly one row and the keys keep the size the user gave
+  them. A resize we asked for is not read back as the user's. At launch the
+  viewport is built for the persisted mode and place, so a restart in mini
+  mode opens where it was left and never flashes the full window.
+- **The way in is the *Mini mode* button or a double-click on a card; the way
+  back is a double-click.** Both are sensed *underneath* the widgets with
+  `UiBuilder::sense`, so a card's own controls keep their clicks (see
+  lessons).
 
 ## Focus
 

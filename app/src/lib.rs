@@ -8,6 +8,7 @@ pub mod agents;
 pub mod autostart;
 pub mod event;
 pub mod focus;
+pub mod gauges;
 pub mod icon;
 pub mod ingress;
 pub mod install;

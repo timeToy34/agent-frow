@@ -120,6 +120,9 @@ pub struct Plan {
     pub after: String,
     pub events_added: Vec<String>,
     pub events_removed: Vec<String>,
+    /// What else changed, in sentences: the status line, registered,
+    /// wrapped around the user's own, or taken back out.
+    pub notes: Vec<String>,
 }
 
 impl Plan {
@@ -142,6 +145,27 @@ impl Plan {
 /// `C:\Users\...` became `C:Users...: command not found`, a hook that
 /// silently never ran.
 pub fn command_for(flavor: &Flavor, install_dir: &Path) -> String {
+    format!(
+        "{} --source {}",
+        exe_word(flavor, install_dir),
+        flavor.source()
+    )
+}
+
+/// The command Claude's status line should run, for this flavor: the same
+/// executable in its `--status` mode — with `--tee` when the user's own
+/// status-line command follows it on a pipe and must still see the JSON.
+pub fn status_command_for(flavor: &Flavor, install_dir: &Path, tee: bool) -> String {
+    let tee = if tee { " --tee" } else { "" };
+    format!(
+        "{} --status{tee} --source {}",
+        exe_word(flavor, install_dir),
+        flavor.source()
+    )
+}
+
+/// The installed executable, spelled for the host that will run it.
+fn exe_word(flavor: &Flavor, install_dir: &Path) -> String {
     let exe = install_dir.join(format!("{BRIDGE_NAME}.exe"));
     let path = match &flavor.host {
         Host::Windows => exe.display().to_string().replace('\\', "/"),
@@ -150,7 +174,7 @@ pub fn command_for(flavor: &Flavor, install_dir: &Path) -> String {
         // for any component inside the distribution.
         Host::Wsl { .. } => windows_path_to_wsl(&exe),
     };
-    format!("{} --source {}", shell_word(&path), flavor.source())
+    shell_word(&path)
 }
 
 /// `C:\Users\me\AppData\Local\...` as WSL sees it.
@@ -179,13 +203,16 @@ fn shell_word(path: &str) -> String {
 
 pub fn plan_install(found: &Found, install_dir: &Path) -> Result<Plan, Error> {
     let command = command_for(&found.flavor, install_dir);
-    rewrite(found, |hooks, agent| {
+    let flavor = found.flavor.clone();
+    let dir = install_dir.to_path_buf();
+    rewrite(found, move |root, agent| {
+        let mut edited = Edited::default();
+        let hooks = hooks_of(root)?;
         // Strip every entry of ours first, everywhere — not just from the
         // events we are about to register. An older version of this app
         // registered `PreToolUse`, and adding only what we want now would leave
         // that behind: 46% of all hook traffic, still being paid for, with
         // nothing reading it.
-        let mut removed = Vec::new();
         let existing: Vec<String> = hooks.keys().cloned().collect();
         for name in existing {
             let Some(list) = hooks.get_mut(&name).and_then(Value::as_array_mut) else {
@@ -194,14 +221,12 @@ pub fn plan_install(found: &Found, install_dir: &Path) -> Result<Plan, Error> {
             let before = list.len();
             list.retain(|entry| !is_ours(entry));
             if list.len() != before && !events(agent).contains(&name.as_str()) {
-                removed.push(name.clone());
+                edited.removed.push(name.clone());
             }
             if list.is_empty() {
                 hooks.remove(&name);
             }
         }
-
-        let mut added = Vec::new();
         for event in events(agent) {
             let entries = hooks
                 .entry((*event).to_owned())
@@ -210,15 +235,50 @@ pub fn plan_install(found: &Found, install_dir: &Path) -> Result<Plan, Error> {
                 continue;
             };
             list.push(entry_for(agent, event, &command));
-            added.push((*event).to_owned());
+            edited.added.push((*event).to_owned());
         }
-        (added, removed)
+
+        // Claude's status line: the numbers a lane can show come through
+        // it. Registered where there is none; wrapped around the user's own
+        // where there is one, so theirs keeps rendering from the same JSON.
+        if agent == Agent::Claude {
+            let existing = root
+                .get("statusLine")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            let current = existing
+                .get("command")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let (wanted, note) = match current.as_deref().map(theirs) {
+                None => (
+                    status_command_for(&flavor, &dir, false),
+                    Some("status line registered"),
+                ),
+                Some(None) => (status_command_for(&flavor, &dir, false), None),
+                Some(Some(own)) => {
+                    let wrapped = format!("{} | {own}", status_command_for(&flavor, &dir, true));
+                    let fresh = !current.as_deref().is_some_and(|c| c.contains(BRIDGE_NAME));
+                    (wrapped, fresh.then_some("status line wrapped around yours"))
+                }
+            };
+            if let Some(note) = note {
+                edited.notes.push(note.to_owned());
+            }
+            let mut object = existing;
+            object.insert("type".to_owned(), Value::String("command".to_owned()));
+            object.insert("command".to_owned(), Value::String(wanted));
+            root.insert("statusLine".to_owned(), Value::Object(object));
+        }
+        Ok(edited)
     })
 }
 
 pub fn plan_remove(found: &Found) -> Result<Plan, Error> {
-    rewrite(found, |hooks, _| {
-        let mut removed = Vec::new();
+    rewrite(found, |root, _| {
+        let mut edited = Edited::default();
+        let hooks = hooks_of(root)?;
         let names: Vec<String> = hooks.keys().cloned().collect();
         for name in names {
             let Some(list) = hooks.get_mut(&name).and_then(Value::as_array_mut) else {
@@ -227,20 +287,97 @@ pub fn plan_remove(found: &Found) -> Result<Plan, Error> {
             let before = list.len();
             list.retain(|entry| !is_ours(entry));
             if list.len() != before {
-                removed.push(name.clone());
+                edited.removed.push(name.clone());
             }
             // An event left with no hooks at all is our leftover, not theirs.
             if list.is_empty() {
                 hooks.remove(&name);
             }
         }
-        (Vec::new(), removed)
+
+        // The status line: theirs comes back out from behind ours, and one
+        // that was only ours goes.
+        let current = root
+            .get("statusLine")
+            .and_then(Value::as_object)
+            .and_then(|object| object.get("command"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        if let Some(current) = current
+            && current.contains(BRIDGE_NAME)
+        {
+            match theirs(&current) {
+                Some(own) => {
+                    if let Some(object) = root.get_mut("statusLine").and_then(Value::as_object_mut)
+                    {
+                        object.insert("command".to_owned(), Value::String(own));
+                    }
+                    edited.notes.push("status line unwrapped".to_owned());
+                }
+                None => {
+                    root.remove("statusLine");
+                    edited.notes.push("status line removed".to_owned());
+                }
+            }
+        }
+        Ok(edited)
     })
+}
+
+/// What an edit did, for the report.
+#[derive(Default)]
+struct Edited {
+    added: Vec<String>,
+    removed: Vec<String>,
+    notes: Vec<String>,
+}
+
+/// The `hooks` object, made if missing.
+fn hooks_of(root: &mut Map<String, Value>) -> Result<&mut Map<String, Value>, Error> {
+    root.entry("hooks".to_owned())
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .ok_or(Error::NotAnObject)
+}
+
+/// The user's own part of a status-line command: all of it when it is not
+/// ours, what follows our pipe when it is, and nothing when it was ours
+/// alone. Our command never contains `" | "`, which is what makes the cut
+/// unambiguous — and idempotent, since wrapping what this returns yields
+/// the same text again.
+fn theirs(command: &str) -> Option<String> {
+    let Some(at) = command.find(BRIDGE_NAME) else {
+        return Some(command.to_owned());
+    };
+    command[at..]
+        .split_once(" | ")
+        .map(|(_, rest)| rest.trim().to_owned())
+        .filter(|rest| !rest.is_empty())
+}
+
+/// Whether a Claude configuration runs our status line. `None` for an agent
+/// that has no status line to run.
+pub fn status_line_installed(found: &Found) -> Option<bool> {
+    if found.flavor.agent != Agent::Claude {
+        return None;
+    }
+    let Ok(text) = std::fs::read_to_string(&found.config) else {
+        return Some(false);
+    };
+    let Ok(document) = serde_json::from_str::<Value>(&text) else {
+        return Some(false);
+    };
+    Some(
+        document
+            .pointer("/statusLine/command")
+            .and_then(Value::as_str)
+            .is_some_and(|command| command.contains(BRIDGE_NAME)),
+    )
 }
 
 fn rewrite(
     found: &Found,
-    edit: impl FnOnce(&mut Map<String, Value>, Agent) -> (Vec<String>, Vec<String>),
+    edit: impl FnOnce(&mut Map<String, Value>, Agent) -> Result<Edited, Error>,
 ) -> Result<Plan, Error> {
     let before = match std::fs::read_to_string(&found.config) {
         Ok(text) => text,
@@ -257,14 +394,12 @@ fn rewrite(
     .map_err(|error| Error::Unparseable(error.to_string()))?;
 
     let root = document.as_object_mut().ok_or(Error::NotAnObject)?;
-    let hooks = root
-        .entry("hooks".to_owned())
-        .or_insert_with(|| Value::Object(Map::new()))
-        .as_object_mut()
-        .ok_or(Error::NotAnObject)?;
-
-    let (events_added, events_removed) = edit(hooks, found.flavor.agent);
-    if hooks.is_empty() {
+    let edited = edit(root, found.flavor.agent)?;
+    if root
+        .get("hooks")
+        .and_then(Value::as_object)
+        .is_some_and(Map::is_empty)
+    {
         root.remove("hooks");
     }
 
@@ -276,8 +411,9 @@ fn rewrite(
         path: found.config.clone(),
         before,
         after,
-        events_added,
-        events_removed,
+        events_added: edited.added,
+        events_removed: edited.removed,
+        notes: edited.notes,
     })
 }
 

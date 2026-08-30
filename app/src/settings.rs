@@ -8,6 +8,7 @@
 //! defaults is recoverable; silently overwriting colours somebody hand-edited
 //! is not.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
@@ -169,6 +170,39 @@ pub const MIN_BRIGHTNESS: f32 = 0.05;
 /// channels, so the range leaves headroom without pretending it is free.
 pub const COLOR_GAIN_RANGE: (f32, f32) = (0.25, 2.0);
 
+/// What a device is sent beyond the palette: how bright, and a per-channel
+/// gain. One per connected device, because a keyboard whose blue runs hot
+/// and a deck whose LCD is true are two different corrections.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Tuning {
+    pub brightness: f32,
+    /// Per-channel gain (R, G, B) multiplied into what the keys are sent —
+    /// calibration for LEDs that do not match the screen. Unity is
+    /// untouched; the window is never corrected.
+    pub color_gain: [f32; 3],
+}
+
+impl Default for Tuning {
+    fn default() -> Self {
+        Self {
+            brightness: 0.8,
+            color_gain: [1.0, 1.0, 1.0],
+        }
+    }
+}
+
+/// Where the mini window was left, and how big: its top-left corner on the
+/// screen, its width, and the height of one of its rows — the size is kept
+/// by the row so that a row arriving or leaving changes the window by
+/// exactly one row.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MiniWindow {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub row_height: f32,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     pub lane_count: usize,
@@ -177,14 +211,19 @@ pub struct Settings {
     /// The roster, in the order the user saved them. Earlier entries win when
     /// two would claim the same lane at once.
     pub saved: Vec<SavedAgent>,
-    pub brightness: f32,
-    /// Per-channel gain (R, G, B) multiplied into what the keys are sent —
-    /// calibration for a keyboard whose LEDs do not match the screen. Unity
-    /// is untouched; the window is never corrected.
-    pub color_gain: [f32; 3],
+    /// What a device is sent when it has no tuning of its own — and what a
+    /// settings file from before per-device tuning meant by its one slider.
+    pub tuning: Tuning,
+    /// Each connected device's own tuning, by the surface's name.
+    pub devices: BTreeMap<String, Tuning>,
     /// Whether the Settings section of the window is unfolded. Remembered so
     /// the window opens the way it was left.
     pub settings_open: bool,
+    /// Whether the window is in mini mode — only the lanes, small and on
+    /// top. Remembered for the same reason.
+    pub mini: bool,
+    /// Where the mini window was left and how big, once it has been placed.
+    pub mini_window: Option<MiniWindow>,
 }
 
 impl Default for Settings {
@@ -193,14 +232,29 @@ impl Default for Settings {
             lane_count: 4,
             lanes: (0..MAX_LANES).map(Lane::default_at).collect(),
             saved: Vec::new(),
-            brightness: 0.8,
-            color_gain: [1.0, 1.0, 1.0],
+            tuning: Tuning::default(),
+            devices: BTreeMap::new(),
             settings_open: false,
+            mini: false,
+            mini_window: None,
         }
     }
 }
 
 impl Settings {
+    /// What `surface` is sent: its own tuning, or the shared one until it
+    /// has been given one.
+    pub fn tuning(&self, surface: &str) -> Tuning {
+        self.devices.get(surface).copied().unwrap_or(self.tuning)
+    }
+
+    /// `surface`'s own tuning, to edit — started from the shared one the
+    /// first time.
+    pub fn tuning_mut(&mut self, surface: &str) -> &mut Tuning {
+        let fallback = self.tuning;
+        self.devices.entry(surface.to_owned()).or_insert(fallback)
+    }
+
     /// How many keys each lane gets on the keyboard.
     pub fn keys_per_lane(&self) -> usize {
         KEYS / self.lane_count.max(1)
@@ -287,18 +341,40 @@ pub fn parse(text: &str) -> Result<Settings, String> {
     if let Some(count) = object.get("lane_count").and_then(Value::as_u64) {
         settings.set_lane_count(count as usize);
     }
-    if let Some(brightness) = object.get("brightness").and_then(Value::as_f64) {
-        settings.brightness = (brightness as f32).clamp(MIN_BRIGHTNESS, 1.0);
-    }
-    if let Some(gain) = object.get("color_gain").and_then(Value::as_object) {
-        for (key, slot) in ["r", "g", "b"].into_iter().zip(&mut settings.color_gain) {
-            if let Some(value) = gain.get(key).and_then(Value::as_f64) {
-                *slot = (value as f32).clamp(COLOR_GAIN_RANGE.0, COLOR_GAIN_RANGE.1);
+    // The shared tuning keeps the keys a pre-device file used, so an old
+    // file still means what it meant.
+    read_tuning(&object, &mut settings.tuning);
+    if let Some(devices) = object.get("devices").and_then(Value::as_object) {
+        for (surface, value) in devices {
+            if let Some(entry) = value.as_object() {
+                let mut tuning = settings.tuning;
+                read_tuning(entry, &mut tuning);
+                settings.devices.insert(surface.clone(), tuning);
             }
+        }
+    }
+    if let Some(window) = object.get("mini_window").and_then(Value::as_object) {
+        let number = |key: &str| window.get(key).and_then(Value::as_f64).map(|v| v as f32);
+        if let (Some(x), Some(y), Some(width), Some(row_height)) = (
+            number("x"),
+            number("y"),
+            number("width"),
+            number("row_height"),
+        ) && [x, y, width, row_height].iter().all(|v| v.is_finite())
+        {
+            settings.mini_window = Some(MiniWindow {
+                x,
+                y,
+                width,
+                row_height,
+            });
         }
     }
     if let Some(open) = object.get("settings_open").and_then(Value::as_bool) {
         settings.settings_open = open;
+    }
+    if let Some(mini) = object.get("mini").and_then(Value::as_bool) {
+        settings.mini = mini;
     }
     if let Some(saved) = object.get("saved").and_then(Value::as_array) {
         for entry in saved.iter().filter_map(Value::as_object) {
@@ -357,19 +433,54 @@ fn saved_agent(object: &Map<String, Value>, lane: usize) -> Option<SavedAgent> {
     })
 }
 
+/// `brightness` and `color_gain`, from any object that carries them: the
+/// file's root for the shared tuning, an entry under `devices` for a device's.
+fn read_tuning(object: &Map<String, Value>, tuning: &mut Tuning) {
+    if let Some(brightness) = object.get("brightness").and_then(Value::as_f64) {
+        tuning.brightness = (brightness as f32).clamp(MIN_BRIGHTNESS, 1.0);
+    }
+    if let Some(gain) = object.get("color_gain").and_then(Value::as_object) {
+        for (key, slot) in ["r", "g", "b"].into_iter().zip(&mut tuning.color_gain) {
+            if let Some(value) = gain.get(key).and_then(Value::as_f64) {
+                *slot = (value as f32).clamp(COLOR_GAIN_RANGE.0, COLOR_GAIN_RANGE.1);
+            }
+        }
+    }
+}
+
+fn write_tuning(object: &mut Map<String, Value>, tuning: Tuning) {
+    object.insert("brightness".to_owned(), Value::from(tuning.brightness));
+    let mut gain = Map::new();
+    for (key, value) in ["r", "g", "b"].into_iter().zip(tuning.color_gain) {
+        gain.insert(key.to_owned(), Value::from(value));
+    }
+    object.insert("color_gain".to_owned(), Value::Object(gain));
+}
+
 pub fn to_json(settings: &Settings) -> String {
     let mut root = Map::new();
     root.insert("lane_count".to_owned(), Value::from(settings.lane_count));
-    root.insert("brightness".to_owned(), Value::from(settings.brightness));
-    let mut gain = Map::new();
-    for (key, value) in ["r", "g", "b"].into_iter().zip(settings.color_gain) {
-        gain.insert(key.to_owned(), Value::from(value));
+    write_tuning(&mut root, settings.tuning);
+    let mut devices = Map::new();
+    for (surface, tuning) in &settings.devices {
+        let mut entry = Map::new();
+        write_tuning(&mut entry, *tuning);
+        devices.insert(surface.clone(), Value::Object(entry));
     }
-    root.insert("color_gain".to_owned(), Value::Object(gain));
+    root.insert("devices".to_owned(), Value::Object(devices));
     root.insert(
         "settings_open".to_owned(),
         Value::Bool(settings.settings_open),
     );
+    root.insert("mini".to_owned(), Value::Bool(settings.mini));
+    if let Some(window) = settings.mini_window {
+        let mut out = Map::new();
+        out.insert("x".to_owned(), Value::from(window.x));
+        out.insert("y".to_owned(), Value::from(window.y));
+        out.insert("width".to_owned(), Value::from(window.width));
+        out.insert("row_height".to_owned(), Value::from(window.row_height));
+        root.insert("mini_window".to_owned(), Value::Object(out));
+    }
     let lanes: Vec<Value> = settings
         .lanes
         .iter()
@@ -420,17 +531,76 @@ mod tests {
 
     #[test]
     fn colour_gain_round_trips_and_clamps() {
-        let mut settings = Settings::default();
-        settings.color_gain = [0.8, 1.0, 0.6];
+        let settings = Settings {
+            tuning: Tuning {
+                color_gain: [0.8, 1.0, 0.6],
+                ..Tuning::default()
+            },
+            ..Settings::default()
+        };
         let text = to_json(&settings);
-        assert_eq!(parse(&text).unwrap().color_gain, [0.8, 1.0, 0.6]);
+        assert_eq!(parse(&text).unwrap().tuning.color_gain, [0.8, 1.0, 0.6]);
 
         // Out of range clamps; a missing channel stays at unity.
         let parsed = parse(r#"{"color_gain": {"r": 99.0, "b": -3}}"#).unwrap();
-        assert_eq!(parsed.color_gain, [2.0, 1.0, 0.25]);
+        assert_eq!(parsed.tuning.color_gain, [2.0, 1.0, 0.25]);
 
         // A settings file from before the field existed is untouched.
-        assert_eq!(parse("{}").unwrap().color_gain, [1.0, 1.0, 1.0]);
+        assert_eq!(parse("{}").unwrap().tuning.color_gain, [1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn each_device_has_its_own_tuning_and_the_old_slider_is_the_fallback() {
+        // A pre-device file: its one brightness is what every device gets.
+        let old = parse(r#"{"brightness": 0.5}"#).unwrap();
+        assert_eq!(old.tuning("Keychron").brightness, 0.5);
+        assert_eq!(old.tuning("Stream Deck").brightness, 0.5);
+
+        let mut settings = old;
+        settings.tuning_mut("Stream Deck").brightness = 1.0;
+        assert_eq!(settings.tuning("Stream Deck").brightness, 1.0);
+        assert_eq!(
+            settings.tuning("Keychron").brightness,
+            0.5,
+            "one device's slider moves nothing else"
+        );
+        // The device's entry started from the shared tuning, gain included.
+        assert_eq!(settings.tuning("Stream Deck").color_gain, [1.0, 1.0, 1.0]);
+
+        let parsed = parse(&to_json(&settings)).unwrap();
+        assert_eq!(parsed.devices, settings.devices);
+        assert_eq!(parsed.tuning, settings.tuning);
+        // A device entry missing a field fills it from the shared tuning.
+        let partial =
+            parse(r#"{"color_gain": {"r": 0.5}, "devices": {"Corsair": {"brightness": 0.3}}}"#)
+                .unwrap();
+        assert_eq!(partial.tuning("Corsair").color_gain, [0.5, 1.0, 1.0]);
+        assert_eq!(partial.tuning("Corsair").brightness, 0.3);
+    }
+
+    #[test]
+    fn the_mini_window_is_remembered_whole_or_not_at_all() {
+        let settings = Settings {
+            mini_window: Some(MiniWindow {
+                x: 1900.0,
+                y: 40.0,
+                width: 440.0,
+                row_height: 64.0,
+            }),
+            ..Settings::default()
+        };
+        assert_eq!(
+            parse(&to_json(&settings)).unwrap().mini_window,
+            settings.mini_window
+        );
+        assert_eq!(parse("{}").unwrap().mini_window, None);
+        // Half a window is no window: it would open somewhere absurd.
+        assert_eq!(
+            parse(r#"{"mini_window": {"x": 10, "y": 10}}"#)
+                .unwrap()
+                .mini_window,
+            None
+        );
     }
 
     #[test]
@@ -450,6 +620,21 @@ mod tests {
             lane: 5,
         });
         settings.settings_open = true;
+        settings.mini = true;
+        settings.tuning.brightness = 0.6;
+        settings.devices.insert(
+            "Stream Deck".to_owned(),
+            Tuning {
+                brightness: 1.0,
+                color_gain: [1.0, 0.9, 0.8],
+            },
+        );
+        settings.mini_window = Some(MiniWindow {
+            x: 12.0,
+            y: 34.0,
+            width: 500.0,
+            row_height: 70.0,
+        });
         assert_eq!(parse(&to_json(&settings)).unwrap(), settings);
     }
 

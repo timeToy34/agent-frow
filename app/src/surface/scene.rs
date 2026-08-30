@@ -165,6 +165,8 @@ mod tests {
             lane: Some(lane),
             wt_session: None,
             ancestors: Vec::new(),
+            gauges: Default::default(),
+            failure: None,
         }
     }
 
@@ -197,9 +199,9 @@ mod tests {
         let frame = scene.tick(&tracker, 1).unwrap().expect("a lane appeared");
         assert_eq!(frame.states[1], Some(State::Done));
         assert!(scene.tick(&tracker, 2).unwrap().is_none());
-        tracker.lock().unwrap().settings.brightness = 0.5;
+        tracker.lock().unwrap().settings.tuning.brightness = 0.5;
         let frame = scene.tick(&tracker, 3).unwrap().expect("settings changed");
-        assert_eq!(frame.settings.brightness, 0.5);
+        assert_eq!(frame.settings.tuning.brightness, 0.5);
     }
 
     #[test]

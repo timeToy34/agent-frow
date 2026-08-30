@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use super::canvas::{self, Ink, Label};
 use super::device::{self, Deck, Found};
 use crate::focus::Key;
+use crate::gauges::Gauges;
 use crate::settings::Rgb;
 use crate::state::State;
 use crate::surface::palette;
@@ -162,10 +163,9 @@ pub fn row_colors(state: Option<State>, colour: Rgb, cols: usize, elapsed_ms: u6
     let mut row = palette::lane_colors(state, colour, cols, elapsed_ms);
     if cols >= 2
         && let Some(last) = row.last_mut()
+        && let Some(State::Waiting | State::Error | State::Done) = state
     {
-        if let Some(State::Waiting | State::Error | State::Done) = state {
-            *last = palette::base(colour);
-        }
+        *last = palette::base(colour);
     }
     row
 }
@@ -183,6 +183,10 @@ pub struct Caption {
     /// `None` for a lane with nobody on it.
     pub state: Option<&'static str>,
     pub elapsed: String,
+    /// The numbers, for a lane with a session on it; a preview has none.
+    pub gauges: Option<Gauges>,
+    /// Why the lane is in Error, when it is and when it is known.
+    pub reason: Option<&'static str>,
 }
 
 /// One caption per lane: what the lane is called, the state it shows, and
@@ -198,6 +202,8 @@ pub fn captions(tracker: &Tracker, now: u64) -> Vec<Caption> {
                     name: settings.display_name(lane, None),
                     state: Some(preview.state.label()),
                     elapsed: String::new(),
+                    gauges: None,
+                    reason: None,
                 };
             }
             match tracker.on_lane(lane) {
@@ -205,11 +211,15 @@ pub fn captions(tracker: &Tracker, now: u64) -> Vec<Caption> {
                     name: settings.display_name(lane, session.project().as_deref()),
                     state: Some(session.effective_state().label()),
                     elapsed: tracker::elapsed(session.since, now),
+                    gauges: Some(session.gauges),
+                    reason: session.failure,
                 },
                 None => Caption {
                     name: settings.display_name(lane, None),
                     state: None,
                     elapsed: String::new(),
+                    gauges: None,
+                    reason: None,
                 },
             }
         })
@@ -229,8 +239,9 @@ pub fn pressed(before: &[bool], after: &[bool]) -> Vec<usize> {
 
 /// What every key should show, row-major: row `r` is lane `r`, its keys
 /// coloured by [`row_colors`] and labelled by role — the name first, the
-/// state last, and between them nothing, except in Waiting, where the first
-/// three carry the answers. Rows past the lanes are blank.
+/// state last, and between them the lane's numbers: context used, the
+/// five-hour limit, the seven-day limit — except in Waiting, where those
+/// three carry the answers instead. Rows past the lanes are blank.
 pub fn faces(frame: &Frame<'_>, captions: &[Caption], rows: usize, cols: usize) -> Vec<Face> {
     let settings = frame.settings;
     let shown = shown_lanes(rows, settings.lane_count);
@@ -262,6 +273,19 @@ pub fn faces(frame: &Frame<'_>, captions: &[Caption], rows: usize, cols: usize) 
                 Role::Status => match (state, caption.and_then(|c| c.state)) {
                     // Idle is one dim key and the rest off, words included.
                     (Some(State::Idle), _) | (_, None) => Label::None,
+                    // In Error the second line is the reason, when there is
+                    // one: "rate limit" says more than how long ago.
+                    (Some(State::Error), Some(word))
+                        if caption.and_then(|c| c.reason).is_some() =>
+                    {
+                        Label::Status {
+                            state: word,
+                            elapsed: caption
+                                .and_then(|c| c.reason)
+                                .unwrap_or_default()
+                                .to_owned(),
+                        }
+                    }
                     (_, Some(word)) => Label::Status {
                         state: word,
                         elapsed: caption.map(|c| c.elapsed.clone()).unwrap_or_default(),
@@ -275,7 +299,25 @@ pub fn faces(frame: &Frame<'_>, captions: &[Caption], rows: usize, cols: usize) 
                         _ => Label::None,
                     }
                 }
-                Role::Middle(_) => Label::None,
+                // The numbers, on the keys a narrow deck has: ctx alone on
+                // three columns, all three on five or more. Idle shows
+                // nothing but its name; a preview has no numbers to show.
+                Role::Middle(index) => match (state, caption.and_then(|c| c.gauges), index) {
+                    (Some(State::Idle), _, _) | (None, _, _) | (_, None, _) => Label::None,
+                    (_, Some(gauges), 0) => Label::Gauge {
+                        name: "ctx",
+                        value: gauges.context_used,
+                    },
+                    (_, Some(gauges), 1) => Label::Gauge {
+                        name: "5h",
+                        value: gauges.five_hour,
+                    },
+                    (_, Some(gauges), 2) => Label::Gauge {
+                        name: "7d",
+                        value: gauges.seven_day,
+                    },
+                    _ => Label::None,
+                },
             };
             faces.push(Face {
                 colour: key_colour,
@@ -471,7 +513,8 @@ fn step(tracker: &Arc<Mutex<Tracker>>, scene: &Scene, ready: &mut Live) -> Resul
 
     let cols = ready.layout.cols.max(1);
     if let Some(frame) = scene.current() {
-        let percent = (frame.settings.brightness.clamp(0.0, 1.0) * 100.0).round() as u8;
+        let percent =
+            (frame.settings.tuning(SURFACE).brightness.clamp(0.0, 1.0) * 100.0).round() as u8;
         if ready.brightness != Some(percent) {
             ready.deck.set_brightness(percent)?;
             ready.brightness = Some(percent);
@@ -596,6 +639,8 @@ mod tests {
             lane: Some(lane),
             wt_session: None,
             ancestors: Vec::new(),
+            gauges: Default::default(),
+            failure: None,
         }
     }
 
@@ -689,7 +734,11 @@ mod tests {
         assert_eq!(row[0].label, Label::Name("agent-frow".to_owned()));
         for key in &row[1..4] {
             assert_eq!(key.colour, palette::base(colour), "the body rests");
-            assert_eq!(key.label, Label::None);
+            assert!(
+                matches!(key.label, Label::Gauge { value: None, .. }),
+                "unknown numbers, dashes: {:?}",
+                key.label
+            );
         }
         assert_eq!(
             row[4].colour,
@@ -743,10 +792,10 @@ mod tests {
         ));
 
         let narrow = faces_of(&tracker, &mut scene, 1_100, 2, 3);
-        assert_eq!(
-            narrow[1].label,
-            Label::None,
-            "no answers on a three-key row"
+        assert!(
+            matches!(narrow[1].label, Label::Gauge { name: "ctx", .. }),
+            "no answers on a three-key row — the context instead: {:?}",
+            narrow[1].label
         );
     }
 
@@ -932,5 +981,126 @@ mod tests {
             second.detail
         );
         assert_eq!(second.driven, 15, "the deck still drives every key it has");
+    }
+
+    #[test]
+    fn a_lane_with_numbers_shows_them_on_the_middle_keys() {
+        let tracker = Mutex::new(tracker(3));
+        {
+            let mut session = session(State::Running, 0, 0);
+            session.gauges = Gauges {
+                context_used: Some(42),
+                five_hour: Some(10),
+                seven_day: None,
+            };
+            tracker.lock().unwrap().sessions.push(session);
+        }
+        let mut scene = Scene::new();
+        let faces = faces_of(&tracker, &mut scene, 0, ROWS, COLS);
+        assert_eq!(
+            faces[1].label,
+            Label::Gauge {
+                name: "ctx",
+                value: Some(42)
+            }
+        );
+        assert_eq!(
+            faces[2].label,
+            Label::Gauge {
+                name: "5h",
+                value: Some(10)
+            }
+        );
+        assert_eq!(
+            faces[3].label,
+            Label::Gauge {
+                name: "7d",
+                value: None
+            }
+        );
+        assert!(matches!(
+            faces[4].label,
+            Label::Status {
+                state: "Running",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_preview_row_has_no_gauges() {
+        let tracker = Mutex::new(tracker(3));
+        tracker.lock().unwrap().preview = Some(Preview {
+            state: State::Done,
+            expires_at: u64::MAX,
+        });
+        let mut scene = Scene::new();
+        let faces = faces_of(&tracker, &mut scene, 0, ROWS, COLS);
+        assert!(faces[1..4].iter().all(|key| key.label == Label::None));
+        assert!(matches!(
+            faces[4].label,
+            Label::Status { state: "Done", .. }
+        ));
+    }
+
+    #[test]
+    fn an_error_row_says_why_on_the_status_key() {
+        let limited = Mutex::new(tracker(3));
+        {
+            let mut session = session(State::Error, 0, 0);
+            session.failure = Some("rate limit");
+            limited.lock().unwrap().sessions.push(session);
+        }
+        let mut scene = Scene::new();
+        let faces = faces_of(&limited, &mut scene, 80_000, ROWS, COLS);
+        assert_eq!(
+            faces[4].label,
+            Label::Status {
+                state: "Error",
+                elapsed: "rate limit".to_owned()
+            }
+        );
+        // Without a reason, the clock as usual.
+        let plain = Mutex::new(tracker(3));
+        plain
+            .lock()
+            .unwrap()
+            .sessions
+            .push(session(State::Error, 0, 0));
+        let faces = faces_of(&plain, &mut scene, 80_000, ROWS, COLS);
+        assert_eq!(
+            faces[4].label,
+            Label::Status {
+                state: "Error",
+                elapsed: "1m 20s".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn a_narrow_deck_shows_what_fits() {
+        let tracker = Mutex::new(tracker(3));
+        {
+            let mut session = session(State::Done, 0, 0);
+            session.gauges = Gauges {
+                context_used: Some(42),
+                five_hour: Some(10),
+                seven_day: Some(3),
+            };
+            tracker.lock().unwrap().sessions.push(session);
+        }
+        let mut scene = Scene::new();
+        let faces = faces_of(&tracker, &mut scene, 0, 2, 3);
+        assert_eq!(
+            faces[1].label,
+            Label::Gauge {
+                name: "ctx",
+                value: Some(42)
+            },
+            "three columns: the context alone"
+        );
+        let faces = faces_of(&tracker, &mut scene, 0, 4, 8);
+        assert!(matches!(faces[3].label, Label::Gauge { name: "7d", .. }));
+        assert_eq!(faces[4].label, Label::None, "and nothing after the third");
     }
 }

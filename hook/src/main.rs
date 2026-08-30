@@ -14,6 +14,12 @@
 //! safe exit is success. `tests/silence.rs` runs this binary against real
 //! payload shapes and asserts stdout is exactly zero bytes.
 //!
+//! One exception, and it is not a hook: as Claude's *status line* command
+//! (`--status`), this binary is handed a JSON the agent renders as text, not
+//! a decision. It posts three percentages out of it and, with `--tee`,
+//! writes back exactly the bytes it read so the user's own status-line
+//! command after the pipe sees what it always saw. Never a byte of its own.
+//!
 //! Diagnostics therefore go to a file, never to a stream the agent reads.
 
 mod ancestry;
@@ -39,18 +45,35 @@ fn main() {
     std::process::exit(0);
 }
 
+/// What we were run as: a lifecycle hook, or Claude's status-line command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Hook,
+    Status { tee: bool },
+}
+
 fn run() -> Result<(), String> {
     let source = source_from_args().unwrap_or_else(|| "unknown".to_owned());
+    let mode = mode_from_args();
 
-    let mut raw = String::new();
+    // Bytes, not a string: in status mode they go back out exactly as they
+    // came in, whatever they are.
+    let mut raw = Vec::new();
     std::io::stdin()
-        .read_to_string(&mut raw)
+        .read_to_end(&mut raw)
         .map_err(|error| format!("{source}: stdin unreadable ({})", error.kind()))?;
 
+    match mode {
+        Mode::Hook => run_hook(&source, &raw),
+        Mode::Status { tee } => run_status(&source, &raw, tee),
+    }
+}
+
+fn run_hook(source: &str, raw: &[u8]) -> Result<(), String> {
     // A payload we cannot parse still gets reported: "an event arrived and made
     // no sense" is a fact worth having, and far better than the agent's hook
     // appearing to do nothing at all.
-    let payload = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+    let payload = serde_json::from_slice(raw).unwrap_or(serde_json::Value::Null);
     if !payload.is_object() {
         log(&format!(
             "{source}: payload not a JSON object ({} bytes on stdin)",
@@ -58,24 +81,72 @@ fn run() -> Result<(), String> {
         ));
     }
 
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|since| since.as_millis())
-        .unwrap_or(0);
     let record = wire::project(
         &payload,
-        &source,
+        source,
         wt_session(),
         &ancestry::ancestors(),
-        now_ms,
+        now_ms(),
     );
-    let body = serde_json::to_vec(&record)
-        .map_err(|error| format!("{source}: record not serializable ({error})"))?;
+    post_record(source, &record)
+}
 
-    let token = read_token().ok_or_else(|| format!("{source}: no token file"))?;
+/// The status line: pass it on first, then report from it.
+///
+/// The bytes go out first, flushed, so the user's own status-line command
+/// after the pipe has them before we so much as look for the app. It sees
+/// our end of file when we exit, after the post — refused at once when the
+/// app is not running (loopback, nobody listening), milliseconds when it is.
+/// Nothing about the bytes is inspected on the way through — they are not
+/// ours.
+fn run_status(source: &str, raw: &[u8], tee: bool) -> Result<(), String> {
+    if tee {
+        use std::io::Write;
+        let mut out = std::io::stdout().lock();
+        if let Err(error) = out.write_all(raw).and_then(|()| out.flush()) {
+            log(&format!("{source} status: tee failed ({})", error.kind()));
+        }
+    }
+    let payload = serde_json::from_slice(raw).unwrap_or(serde_json::Value::Null);
+    let Some(record) = wire::status(&payload, source, now_ms()) else {
+        return Ok(());
+    };
+    post_record(&format!("{source} status"), &record)
+}
+
+fn post_record(who: &str, record: &serde_json::Value) -> Result<(), String> {
+    let body = serde_json::to_vec(record)
+        .map_err(|error| format!("{who}: record not serializable ({error})"))?;
+    let token = read_token().ok_or_else(|| format!("{who}: no token file"))?;
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), PORT);
     post::send(addr, &token, &body)
-        .map_err(|error| format!("{source}: post failed ({})", error.kind()))
+        .map_err(|error| format!("{who}: post failed ({})", error.kind()))
+}
+
+fn now_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.as_millis())
+        .unwrap_or(0)
+}
+
+/// `--status` makes us the status-line command; `--tee` passes the status
+/// JSON on to whatever follows the pipe. Anything else in argv is a hook.
+fn mode_from_args() -> Mode {
+    let mut status = false;
+    let mut tee = false;
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--status" => status = true,
+            "--tee" => tee = true,
+            _ => {}
+        }
+    }
+    if status {
+        Mode::Status { tee }
+    } else {
+        Mode::Hook
+    }
 }
 
 /// Which of the four flavors ran us, as the installer wrote it.

@@ -288,3 +288,170 @@ fn installing_clears_out_an_older_builds_registrations() {
     );
     assert!(install::stale_events(&entry).is_empty());
 }
+
+fn written(entry: &Found) -> serde_json::Value {
+    serde_json::from_str(&std::fs::read_to_string(&entry.config).unwrap()).unwrap()
+}
+
+const OURS_PLAIN: &str =
+    "C:/Users/someone/AppData/Local/agent-frow/agent-frow-hook.exe --status --source claude-win";
+const OURS_TEE: &str = "C:/Users/someone/AppData/Local/agent-frow/agent-frow-hook.exe --status --tee --source claude-win";
+const THEIRS: &str = "bash /home/me/.claude/statusline-command.sh";
+
+#[test]
+fn a_claude_install_registers_a_status_line_when_there_is_none() {
+    let dir = scratch("status-new");
+    let entry = found(Agent::Claude, &dir, None);
+    assert_eq!(install::status_line_installed(&entry), Some(false));
+    let plan = install::plan_install(&entry, &install_dir()).unwrap();
+    assert!(
+        plan.notes
+            .iter()
+            .any(|note| note == "status line registered"),
+        "{:?}",
+        plan.notes
+    );
+    install::apply(&plan).unwrap();
+    let document = written(&entry);
+    assert_eq!(document["statusLine"]["type"], "command");
+    assert_eq!(document["statusLine"]["command"], OURS_PLAIN);
+    assert_eq!(install::status_line_installed(&entry), Some(true));
+}
+
+#[test]
+fn an_existing_status_line_is_wrapped_and_its_other_keys_kept() {
+    let dir = scratch("status-wrap");
+    let entry = found(
+        Agent::Claude,
+        &dir,
+        Some(&format!(
+            r#"{{"statusLine":{{"type":"command","command":"{THEIRS}","padding":0}}}}"#
+        )),
+    );
+    let plan = install::plan_install(&entry, &install_dir()).unwrap();
+    assert!(
+        plan.notes
+            .iter()
+            .any(|note| note.starts_with("status line wrapped")),
+        "{:?}",
+        plan.notes
+    );
+    install::apply(&plan).unwrap();
+    let document = written(&entry);
+    assert_eq!(
+        document["statusLine"]["command"],
+        format!("{OURS_TEE} | {THEIRS}")
+    );
+    assert_eq!(
+        document["statusLine"]["padding"], 0,
+        "their other keys survive"
+    );
+    assert_eq!(document["statusLine"]["type"], "command");
+}
+
+#[test]
+fn a_wrapped_status_line_is_stable_across_installs() {
+    let dir = scratch("status-idempotent");
+    let entry = found(
+        Agent::Claude,
+        &dir,
+        Some(&format!(
+            r#"{{"statusLine":{{"type":"command","command":"{THEIRS}"}}}}"#
+        )),
+    );
+    install::apply(&install::plan_install(&entry, &install_dir()).unwrap()).unwrap();
+    let again = install::plan_install(&entry, &install_dir()).unwrap();
+    assert!(
+        again.is_noop(),
+        "wrapping what is already wrapped must change nothing"
+    );
+    assert!(again.notes.is_empty());
+}
+
+#[test]
+fn removing_unwraps_the_status_line() {
+    let dir = scratch("status-unwrap");
+    let entry = found(
+        Agent::Claude,
+        &dir,
+        Some(&format!(
+            r#"{{"statusLine":{{"type":"command","command":"{THEIRS}","padding":1}}}}"#
+        )),
+    );
+    install::apply(&install::plan_install(&entry, &install_dir()).unwrap()).unwrap();
+    let plan = install::plan_remove(&entry).unwrap();
+    assert!(
+        plan.notes
+            .iter()
+            .any(|note| note == "status line unwrapped")
+    );
+    install::apply(&plan).unwrap();
+    let document = written(&entry);
+    assert_eq!(
+        document["statusLine"]["command"], THEIRS,
+        "theirs, exactly as it was"
+    );
+    assert_eq!(document["statusLine"]["padding"], 1);
+    assert_eq!(install::status_line_installed(&entry), Some(false));
+}
+
+#[test]
+fn removing_deletes_a_status_line_that_was_only_ours() {
+    let dir = scratch("status-delete");
+    let entry = found(Agent::Claude, &dir, None);
+    install::apply(&install::plan_install(&entry, &install_dir()).unwrap()).unwrap();
+    let plan = install::plan_remove(&entry).unwrap();
+    assert!(plan.notes.iter().any(|note| note == "status line removed"));
+    install::apply(&plan).unwrap();
+    let document = written(&entry);
+    assert!(document.get("statusLine").is_none(), "{document}");
+    assert!(document.get("hooks").is_none(), "nothing of ours is left");
+}
+
+#[test]
+fn a_status_line_that_is_not_ours_is_left_alone_on_remove() {
+    let dir = scratch("status-theirs");
+    let entry = found(
+        Agent::Claude,
+        &dir,
+        Some(&format!(
+            "{}\n",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "statusLine": { "type": "command", "command": THEIRS }
+            }))
+            .unwrap()
+        )),
+    );
+    let plan = install::plan_remove(&entry).unwrap();
+    assert!(plan.is_noop(), "nothing of ours there, nothing to do");
+}
+
+#[test]
+fn codex_never_gets_a_status_line() {
+    let dir = scratch("status-codex");
+    let entry = found(Agent::Codex, &dir, None);
+    assert_eq!(install::status_line_installed(&entry), None);
+    let plan = install::plan_install(&entry, &install_dir()).unwrap();
+    assert!(plan.notes.is_empty());
+    install::apply(&plan).unwrap();
+    assert!(written(&entry).get("statusLine").is_none());
+}
+
+#[test]
+fn a_wsl_claude_status_command_names_the_windows_executable() {
+    let flavor = Flavor {
+        agent: Agent::Claude,
+        host: Host::Wsl {
+            distro: "Ubuntu".to_owned(),
+            user: "me".to_owned(),
+        },
+    };
+    assert_eq!(
+        install::status_command_for(&flavor, &install_dir(), true),
+        "/mnt/c/Users/someone/AppData/Local/agent-frow/agent-frow-hook.exe --status --tee --source claude-wsl"
+    );
+    assert_eq!(
+        install::status_command_for(&flavor, &install_dir(), false),
+        "/mnt/c/Users/someone/AppData/Local/agent-frow/agent-frow-hook.exe --status --source claude-wsl"
+    );
+}

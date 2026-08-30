@@ -14,7 +14,7 @@ use serde_json::{Map, Value};
 /// implies about an agent — that is the app's job, and keeping it there is what
 /// lets the state machine change without the hook command string changing, which
 /// is what stops Codex demanding to be re-trusted.
-const ALLOWED: [&str; 13] = [
+const ALLOWED: [&str; 15] = [
     "hook_event_name",
     "session_id",
     "cwd",
@@ -28,6 +28,14 @@ const ALLOWED: [&str; 13] = [
     "reason",
     "end_reason",
     "permission_mode",
+    // The path of the agent's own transcript — a name of a file on this
+    // machine, handed to a process on this machine. The app opens only a
+    // Codex rollout, read-only, and reads only its tail for the last
+    // `token_count` line: the numbers a lane can show. Never the content.
+    "transcript_path",
+    // Why a turn failed, as Claude classifies it: `rate_limit`,
+    // `overloaded`, `auth`. The message beside it is free text and stays.
+    "error_type",
 ];
 
 /// The tag Codex wraps a plan in when it ends a plan-mode turn by proposing
@@ -104,6 +112,57 @@ pub fn project(
     Value::Object(out)
 }
 
+/// The status line, projected: three percentages and the session they
+/// belong to, and nothing else. Claude hands its status-line command a JSON
+/// with the model, the cost, the working directory and more; a lane shows
+/// how full the context is and how much of the two limits is used, so
+/// those three are what leave. `None` when there is no session to attach
+/// them to or nothing yet to attach — before the first reply, or on a plan
+/// without limits.
+pub fn status(payload: &Value, source: &str, now_ms: u128) -> Option<Value> {
+    let session_id = payload
+        .get("session_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())?;
+    let mut gauges = Map::new();
+    let reading = |pointer: &str| payload.pointer(pointer).and_then(percent);
+    if let Some(value) = reading("/context_window/used_percentage") {
+        gauges.insert("ctx".to_owned(), value);
+    }
+    if let Some(value) = reading("/rate_limits/five_hour/used_percentage") {
+        gauges.insert("h5".to_owned(), value);
+    }
+    if let Some(value) = reading("/rate_limits/seven_day/used_percentage") {
+        gauges.insert("d7".to_owned(), value);
+    }
+    if gauges.is_empty() {
+        return None;
+    }
+    let mut out = Map::new();
+    out.insert("t".to_owned(), Value::from(now_ms as u64));
+    out.insert("src".to_owned(), Value::String(source.to_owned()));
+    out.insert(
+        "hook_event_name".to_owned(),
+        Value::String("StatusLine".to_owned()),
+    );
+    out.insert(
+        "session_id".to_owned(),
+        Value::String(session_id.to_owned()),
+    );
+    out.insert("gauges".to_owned(), Value::Object(gauges));
+    Some(Value::Object(out))
+}
+
+/// A JSON number as a whole percentage, or nothing.
+fn percent(value: &Value) -> Option<Value> {
+    let number = value.as_f64()?;
+    if !number.is_finite() {
+        return None;
+    }
+    Some(Value::from(number.round().clamp(0.0, 100.0) as u8))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -135,12 +194,82 @@ mod tests {
         for leaky in [
             "tool_input",
             "tool_response",
-            "transcript_path",
             "last_assistant_message",
             "prompt",
         ] {
             assert!(!out.contains_key(leaky), "{leaky} must not be forwarded");
         }
+        // The transcript's *path* does travel — it names a file on this
+        // machine, and the app reads only a Codex rollout's tail from it.
+        // Its content never does: nothing here opens it.
+        assert_eq!(
+            out.get("transcript_path"),
+            Some(&json!("/home/me/.claude/projects/x/transcript.jsonl"))
+        );
+    }
+
+    #[test]
+    fn a_status_line_keeps_three_numbers_and_nothing_else() {
+        let out = status(
+            &json!({
+                "session_id": "s1",
+                "cwd": "/home/me/project",
+                "model": { "id": "claude-opus-5", "display_name": "Opus" },
+                "cost": { "total_cost_usd": 1.42 },
+                "context_window": { "used_percentage": 41.6, "context_window_size": 200000 },
+                "rate_limits": {
+                    "five_hour": { "used_percentage": 10, "resets_at": 1788295730 },
+                    "seven_day": { "used_percentage": 3.2, "resets_at": 1788800000 }
+                }
+            }),
+            "claude-wsl",
+            1_700_000_000_000,
+        )
+        .unwrap();
+        assert_eq!(out["hook_event_name"], json!("StatusLine"));
+        assert_eq!(out["src"], json!("claude-wsl"));
+        assert_eq!(out["session_id"], json!("s1"));
+        assert_eq!(out["gauges"], json!({ "ctx": 42, "h5": 10, "d7": 3 }));
+        let keys: Vec<&String> = out.as_object().unwrap().keys().collect();
+        assert_eq!(
+            keys,
+            ["t", "src", "hook_event_name", "session_id", "gauges"]
+        );
+    }
+
+    #[test]
+    fn a_status_line_before_the_first_reply_is_nothing() {
+        let out = status(
+            &json!({
+                "session_id": "s1",
+                "context_window": { "used_percentage": null, "remaining_percentage": null }
+            }),
+            "claude-win",
+            0,
+        );
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn a_status_line_without_a_session_is_nothing() {
+        let out = status(
+            &json!({ "context_window": { "used_percentage": 50 } }),
+            "claude-win",
+            0,
+        );
+        assert!(out.is_none());
+        assert!(status(&json!("nonsense"), "claude-win", 0).is_none());
+    }
+
+    #[test]
+    fn a_status_line_without_limits_still_reports_context() {
+        let out = status(
+            &json!({ "session_id": "s1", "context_window": { "used_percentage": 50 } }),
+            "claude-win",
+            0,
+        )
+        .unwrap();
+        assert_eq!(out["gauges"], json!({ "ctx": 50 }));
     }
 
     #[test]

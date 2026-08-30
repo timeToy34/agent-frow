@@ -127,6 +127,11 @@ hook, or the lighting.
     the other one, and UIA then reads no tabs at all — and because it can
     spend a quarter of a second waiting for the terminal to agree which tab
     is in front.
+- **Hooks carry no numbers.** Neither agent's hook payloads say how full the
+  context is or how much of a limit is used — on either side, checked
+  against the docs and the hook structs. Claude says it to its status-line
+  command, Codex writes it into its session log; the app reads both and the
+  hook forwards, at most, the log's path.
 - **Two agents once came up reversed** — Agent A on B's lane and B on A's,
   each summon raising the other's window. Cause: lanes are claimed at first
   sight, hooks post concurrently, and a session adopted from a *subagent's*
@@ -218,6 +223,12 @@ hook, or the lighting.
   effect too, all its keys stored black — looks off, repaints everything,
   completes the frame. Not touched: the indicator-disable command, which
   would take the user's Caps light away.
+- **egui gives a tied click to the widget registered last.** A card-wide
+  `ui.interact` added after the card's buttons sits on top of them and takes
+  their clicks. A container that should sense clicks *under* its children is
+  `ui.scope_builder(UiBuilder::new().sense(..))`, which registers the sense
+  below whatever the closure adds — the mini-mode double-click on a card works
+  that way, and the buttons on it still work.
 
 ## State of the work
 
@@ -226,10 +237,13 @@ hook, or the lighting.
 - **M3 — Corsair lighting**, plus its setup UI. Done.
 - **M4 — click a lane to focus that agent's window and terminal tab.** Done.
 - **M5 — Keychron Ultra lighting**, through the keyboard's own protocol. Done.
-- **M6 — Stream Deck**, one lane per row, the keys as summon and — in
-  Waiting — as Up, Down and Enter. Lighting and summon verified on an MK.2;
-  the answer keys are built and tested against a recorded deck, awaiting the
-  hardware pass.
+- **M6 — Stream Deck**, one lane per row: the name, context used, the
+  five-hour and seven-day limits, the state — and in Waiting the middle keys
+  as Up, Down and Enter. Done: lighting, summon, the numbers and the answer
+  keys verified on a 2019 Stream Deck V2 (15 keys).
+- **M7 — the monitor**, mini mode: one row per agent with a session,
+  off-keyboard sessions included, five keys each, a key click as the summon;
+  no title bar, place and size remembered. Done.
 
 `app/src/surface/corsair/` and `app/src/focus/` are the only code carried over
 from the previous version, because they were the only parts that demonstrably

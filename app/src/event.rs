@@ -9,6 +9,8 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
+use crate::gauges::Gauges;
+
 /// The hook events we register. Anything else is recorded as unrecognised
 /// rather than guessed at — a new agent release should show up as a number in
 /// the window, not as behaviour nobody can explain.
@@ -29,6 +31,9 @@ pub enum Kind {
     Stop,
     StopFailure,
     SessionEnd,
+    /// Not a hook: Claude's status line, as the hook's `--status` mode
+    /// reports it — numbers for a session we already hold, never a state.
+    StatusLine,
 }
 
 impl Kind {
@@ -47,6 +52,7 @@ impl Kind {
             "Stop" => Self::Stop,
             "StopFailure" => Self::StopFailure,
             "SessionEnd" => Self::SessionEnd,
+            "StatusLine" => Self::StatusLine,
             _ => return None,
         })
     }
@@ -66,6 +72,7 @@ impl Kind {
             Self::Stop => "Stop",
             Self::StopFailure => "StopFailure",
             Self::SessionEnd => "SessionEnd",
+            Self::StatusLine => "StatusLine",
         }
     }
 }
@@ -113,6 +120,22 @@ pub struct Event {
     /// The processes above the agent, nearest first — what summon walks to
     /// find the window the agent is sitting in.
     pub ancestors: Vec<Ancestor>,
+    /// Context and limits, when the event brought any: a Claude status line,
+    /// or a Codex event whose rollout the worker read.
+    pub gauges: Option<Gauges>,
+    /// Why a `StopFailure` failed, as the agent classifies it.
+    pub error_type: Option<String>,
+}
+
+/// The word a lane shows for a failure: `rate_limit` is a limit, the rest
+/// say what they are, and anything new is simply a failure.
+pub fn failure_word(error_type: Option<&str>) -> &'static str {
+    match error_type {
+        Some("rate_limit") => "rate limit",
+        Some("overloaded") => "overloaded",
+        Some("auth") => "auth",
+        _ => "failed",
+    }
 }
 
 /// What arrived, once the shape is known.
@@ -200,6 +223,11 @@ impl Event {
             agent: text("agent_id"),
             wt_session: text("wt_session"),
             ancestors,
+            gauges: value
+                .get("gauges")
+                .and_then(Gauges::from_json)
+                .filter(|gauges| !gauges.is_empty()),
+            error_type: text("error_type"),
         }))
     }
 
@@ -210,7 +238,11 @@ impl Event {
             .as_deref()
             .or(self.notification.as_deref())
             .or(self.start_source.as_deref())
-            .or(self.proposed_plan.then_some("proposed plan"));
+            .or(self.proposed_plan.then_some("proposed plan"))
+            .or(self
+                .error_type
+                .as_deref()
+                .map(|kind| failure_word(Some(kind))));
         match detail {
             Some(detail) => format!("{} {detail}", self.kind.label()),
             None => self.kind.label().to_owned(),

@@ -36,8 +36,9 @@ const SHADOW: [u8; 3] = [0, 0, 0];
 /// neither a lane's colour nor red, and dim enough not to take the eye.
 const QUIET_INK: [u8; 3] = [120, 120, 120];
 
-/// How much of the key a triangle takes, each way.
-const TRIANGLE: f32 = 0.40;
+/// How much of the key a triangle takes, each way: about the height of the
+/// text's capitals, so an arrow and a word sit as one size.
+const TRIANGLE: f32 = 0.20;
 
 /// Packed RGB, row-major, top-left first — what the deck's encoder takes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,6 +96,12 @@ pub enum Label {
     Up,
     Down,
     Enter,
+    /// A number the lane can show — context used, a limit used — as its
+    /// short name over the value, or over a dash while it is unknown.
+    Gauge {
+        name: &'static str,
+        value: Option<u8>,
+    },
 }
 
 /// How the label is drawn: quietly on a key that is meant to be dark, and
@@ -218,12 +225,28 @@ pub fn render_key(size: (usize, usize), colour: Rgb, label: &Label, ink: Ink) ->
         Label::Down => draw_triangle(&mut canvas, false, paint),
         Label::Enter => {
             if let Some(font) = font() {
-                draw_text(
+                draw_lines(
                     &mut canvas,
                     font,
-                    "Enter",
-                    rows(0.30, 0.70),
-                    14.0 * scale,
+                    &["Enter".to_owned()],
+                    rows(0.08, 0.92),
+                    20.0 * scale,
+                    paint,
+                );
+            }
+        }
+        Label::Gauge { name, value } => {
+            if let Some(font) = font() {
+                let shown = match value {
+                    Some(value) => format!("{value}%"),
+                    None => "—".to_owned(),
+                };
+                draw_lines(
+                    &mut canvas,
+                    font,
+                    &[(*name).to_owned(), shown],
+                    rows(0.08, 0.92),
+                    20.0 * scale,
                     paint,
                 );
             }
@@ -612,7 +635,9 @@ mod tests {
     #[test]
     fn an_up_triangle_points_up() {
         let (x0, y0, width, height) = triangle_box(SIZE);
-        let apex_x = x0 + (width - 1) / 2;
+        // The apex pixel: the middle column, which for an even width is the
+        // right-hand one of the two, as the drawing rounds.
+        let apex_x = x0 + width / 2;
         let up = render_key(SIZE, RED, &Label::Up, Ink::Bright);
         assert_eq!(up.pixel(apex_x, y0), INK, "the apex is ink");
         assert!(is(up.pixel(x0, y0), RED), "the top-left corner is bare");
@@ -733,6 +758,75 @@ mod tests {
             name_layout(font, "anunbreakablenameoverflowsthekey", 63.0, 60.0, 20.0).unwrap();
         assert_eq!(lines.len(), 1);
         assert_eq!(floor, 9.0, "the floor, and the line is cut when drawn");
+    }
+
+    #[test]
+    fn enter_is_set_like_the_name() {
+        let enter = render_key(SIZE, RED, &Label::Enter, Ink::Bright);
+        let name = render_key(SIZE, RED, &Label::Name("Enter".to_owned()), Ink::Bright);
+        assert_eq!(enter, name);
+    }
+
+    #[test]
+    fn a_triangle_is_a_fifth_of_the_key() {
+        let (_, _, width, height) = triangle_box(SIZE);
+        assert_eq!((width, height), (14, 14));
+    }
+
+    #[test]
+    fn a_gauge_is_its_label_over_its_value() {
+        let gauge = render_key(
+            SIZE,
+            RED,
+            &Label::Gauge {
+                name: "ctx",
+                value: Some(42),
+            },
+            Ink::Bright,
+        );
+        let as_status = render_key(
+            SIZE,
+            RED,
+            &Label::Status {
+                state: "ctx",
+                elapsed: "42%".to_owned(),
+            },
+            Ink::Bright,
+        );
+        assert_eq!(gauge, as_status, "two lines by the one rule");
+        let unknown = render_key(
+            SIZE,
+            RED,
+            &Label::Gauge {
+                name: "ctx",
+                value: None,
+            },
+            Ink::Bright,
+        );
+        assert_ne!(gauge, unknown);
+    }
+
+    #[test]
+    fn an_unknown_gauge_is_a_dash() {
+        let unknown = render_key(
+            SIZE,
+            RED,
+            &Label::Gauge {
+                name: "5h",
+                value: None,
+            },
+            Ink::Bright,
+        );
+        let dash = render_key(
+            SIZE,
+            RED,
+            &Label::Status {
+                state: "5h",
+                elapsed: "—".to_owned(),
+            },
+            Ink::Bright,
+        );
+        assert_eq!(unknown, dash);
     }
 
     #[test]
