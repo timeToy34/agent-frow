@@ -175,7 +175,8 @@ it before deciding. `agent-frow doctor` lists what it finds on the bus.
 **Elgato Stream Deck (a 2019 V2 with 15 keys verified; the driver knows
 every model with a screen).** Plain USB, no driver, nothing to install. One row per lane, like a
 five-key F-row, in the same colours and motion as on the keyboard: the left
-key is the lane's name; the three between show **context used, the five-hour
+key is the lane's name — on an empty lane, what it is for: "next agent
+here" on the lowest free lane, "free" on the rest; the three between show **context used, the five-hour
 limit and the seven-day limit** as percentages (a dash until known); the
 right key is the state over how long — or, in Error, over why: "rate limit",
 "overloaded", "auth". While a lane is Waiting the three middle keys become

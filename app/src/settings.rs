@@ -293,6 +293,13 @@ impl Settings {
         }
     }
 
+    /// Whether the user gave this lane a name of its own.
+    pub fn named(&self, index: usize) -> bool {
+        self.lanes
+            .get(index)
+            .is_some_and(|lane| !lane.name.trim().is_empty())
+    }
+
     /// What a lane is called: what the user typed, or the project on it.
     pub fn display_name(&self, index: usize, project: Option<&str>) -> String {
         let named = self

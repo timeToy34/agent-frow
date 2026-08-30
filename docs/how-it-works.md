@@ -415,8 +415,10 @@ layout, image size, rotation and encoding; no driver, nothing linked.
   name is set as words — a dot or a
   dash breaks like a space, on the deck only — over up to three lines, as
   large as the key allows. Ink is grey on a key that is dark on purpose (an
-  empty lane is black with its name in grey, Idle is one dim name key and
-  the rest off), and otherwise decided for the lane rather than the
+  empty lane is black with what it is for in grey — "next agent here" on
+  the lowest free lane, "free" on the rest, its name if it has one — and
+  Idle is one dim name key and the rest off), and otherwise decided for
+  the lane rather than the
   instant: a lane's keys only ever run between its 20% glow and its full
   colour, so the ink that reads on each end is found (black above the
   luminance where black and white contrast equally, 0.179 by WCAG; white

@@ -190,12 +190,20 @@ pub struct Caption {
     pub reason: Option<&'static str>,
 }
 
+/// What an empty lane's name key says when the user has not named it: the
+/// lowest free lane is where the next agent lands, and says so in three
+/// words; the others are simply free. "Lane 2" told nobody anything.
+pub const NEXT_HERE: &str = "next agent here";
+pub const FREE: &str = "free";
+
 /// One caption per lane: what the lane is called, the state it shows, and
 /// how long it has shown it. A preview names every lane with its state and
-/// no time, since it is not a session; an empty lane has its name and
-/// nothing else, so the row still says which lane it is.
+/// no time, since it is not a session; an empty lane says what it is for —
+/// or its name, if the user gave it one, since a saved agent may be on its
+/// way back to it.
 pub fn captions(tracker: &Tracker, now: u64) -> Vec<Caption> {
     let settings = &tracker.settings;
+    let next_free = (0..settings.lane_count).find(|lane| tracker.on_lane(*lane).is_none());
     (0..settings.lane_count)
         .map(|lane| {
             if let Some(preview) = tracker.preview {
@@ -216,7 +224,13 @@ pub fn captions(tracker: &Tracker, now: u64) -> Vec<Caption> {
                     reason: session.failure,
                 },
                 None => Caption {
-                    name: settings.display_name(lane, None),
+                    name: if settings.named(lane) {
+                        settings.display_name(lane, None)
+                    } else if next_free == Some(lane) {
+                        NEXT_HERE.to_owned()
+                    } else {
+                        FREE.to_owned()
+                    },
                     state: None,
                     elapsed: String::new(),
                     gauges: None,
@@ -696,9 +710,24 @@ mod tests {
         assert_eq!(captions[1].name, "agent-frow");
         assert_eq!(captions[1].state, Some("Waiting"));
         assert_eq!(captions[1].elapsed, "1m 20s");
-        assert_eq!(captions[0].name, "Lane 1");
+        assert_eq!(captions[0].name, NEXT_HERE, "the lowest free lane");
         assert_eq!(captions[0].state, None);
         assert_eq!(captions[0].elapsed, "");
+        assert_eq!(captions[2].name, FREE);
+        assert_eq!(captions[3].name, FREE);
+    }
+
+    #[test]
+    fn a_named_empty_lane_keeps_its_name() {
+        let mut tracker = tracker(3);
+        tracker.settings.lanes[0].name = "Backend".to_owned();
+        let captions = captions(&tracker, 0);
+        assert_eq!(captions[0].name, "Backend");
+        // A name does not reserve a lane — only a saved agent's preference
+        // does — so the next agent still lands on lane 1, and the others
+        // are merely free.
+        assert_eq!(captions[1].name, FREE);
+        assert_eq!(captions[2].name, FREE);
     }
 
     #[test]
@@ -850,12 +879,12 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_lane_is_its_name_in_grey() {
+    fn an_empty_lane_says_what_it_is_for_in_grey() {
         let tracker = Mutex::new(tracker(3));
         let mut scene = Scene::new();
         let faces = faces_of(&tracker, &mut scene, 0, ROWS, COLS);
         assert_eq!(faces[0].colour, palette::OFF);
-        assert_eq!(faces[0].label, Label::Name("Lane 1".to_owned()));
+        assert_eq!(faces[0].label, Label::Name(NEXT_HERE.to_owned()));
         assert_eq!(faces[0].ink, Ink::Quiet);
         assert!(faces[1..5].iter().all(|key| *key == Face::BLANK));
     }
@@ -881,7 +910,7 @@ mod tests {
             faces[24..].iter().all(|key| *key == Face::BLANK),
             "an XL's fourth row"
         );
-        assert_eq!(faces[16].label, Label::Name("Lane 3".to_owned()));
+        assert_eq!(faces[16].label, Label::Name(FREE.to_owned()));
     }
 
     #[test]
