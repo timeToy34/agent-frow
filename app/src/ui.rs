@@ -754,7 +754,7 @@ fn lanes_panel(
         });
     });
     let keys = "Four keys per lane on the keyboard: any of them summons the agent, and while \
-                it is Waiting the three after the first are ▲ ▼ Enter. A lane keeps its \
+                it is Waiting the three after the first are ⏶ ⏷ Enter. A lane keeps its \
                 position for as long as its session lives.";
     let caption = if tracker.settings.lane_count > KEYBOARD_LANES {
         format!(
@@ -1545,7 +1545,7 @@ fn settings_section(
             .show_toggle_button(ui, egui::collapsing_header::paint_default_icon)
             .clicked();
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            settings_summary(ui, rows, &tracker.keyboards);
+            settings_summary(ui, rows, &tracker.keyboards, &tracker.settings);
         });
     });
     // The whole row is a handle, not only the caret. Registered after the
@@ -1578,7 +1578,12 @@ fn settings_section(
 
 /// What the folded Settings header says. Right-to-left: added last, read
 /// first.
-fn settings_summary(ui: &mut egui::Ui, rows: &[Row], keyboards: &[tracker::KeyboardStatus]) {
+fn settings_summary(
+    ui: &mut egui::Ui,
+    rows: &[Row],
+    keyboards: &[tracker::KeyboardStatus],
+    settings: &settings::Settings,
+) {
     let incomplete: Vec<String> = rows
         .iter()
         .filter(|row| !row.missing.is_empty() || !row.stale.is_empty())
@@ -1602,86 +1607,121 @@ fn settings_summary(ui: &mut egui::Ui, rows: &[Row], keyboards: &[tracker::Keybo
         );
     }
     ui.label(egui::RichText::new("·").small().weak());
-    // Any surface driving keys is "connected"; until every surface has
-    // given up it is still "looking".
-    let (colour, text) = if keyboards.iter().any(|status| status.connected) {
-        (egui::Color32::from_rgb(80, 200, 120), "keyboard connected")
+    // The devices by name, so "connected" says which; until every surface
+    // has given up it is still "looking".
+    let driving: Vec<&str> = keyboards
+        .iter()
+        .filter(|status| status.connected)
+        .map(|status| status.surface)
+        .collect();
+    let (colour, text) = if !driving.is_empty() {
+        (egui::Color32::from_rgb(80, 200, 120), driving.join(" + "))
     } else if keyboards.iter().all(|status| status.detail.is_empty()) {
-        (egui::Color32::GRAY, "looking for a keyboard…")
+        (egui::Color32::GRAY, "looking for a keyboard…".to_owned())
+    } else if keyboards
+        .iter()
+        .all(|status| !settings.device_enabled(status.surface))
+    {
+        (egui::Color32::GRAY, "devices off".to_owned())
     } else {
-        (egui::Color32::from_rgb(230, 180, 60), "no keyboard")
+        (
+            egui::Color32::from_rgb(230, 180, 60),
+            "no keyboard".to_owned(),
+        )
     };
     ui.label(egui::RichText::new(text).small().color(colour));
 }
 
-/// The keyboard: whether it is there, how bright, and what each state looks
-/// like. Returns whether anything about the settings changed.
+/// The devices: which are there, which are left alone, how bright, and what
+/// each state looks like. Returns whether anything about the settings changed.
 fn keyboard_panel(ui: &mut egui::Ui, tracker: &mut Tracker) -> bool {
     let mut changed = false;
     let keyboards = tracker.keyboards.clone();
 
     ui.horizontal(|ui| {
-        ui.strong("Keyboard");
+        ui.strong("Devices");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(
-                egui::RichText::new("brightness and colour balance are each device's own")
-                    .small()
-                    .weak(),
+                egui::RichText::new(
+                    "untick a device to leave it alone · ☀ brightness and 🎨 colour balance \
+                     are each device's own",
+                )
+                .small()
+                .weak(),
             );
         });
     });
 
-    // "Dark" and "broken" look identical from the desk, so this always says
-    // which one it is. A surface that is driving keys speaks for itself; only
-    // when none is does every surface get to say why not.
-    let connected: Vec<&tracker::KeyboardStatus> =
-        keyboards.iter().filter(|status| status.connected).collect();
-    if connected.is_empty() {
-        if keyboards.is_empty() {
-            ui.colored_label(egui::Color32::GRAY, "looking for a keyboard…");
-        }
-        for status in &keyboards {
-            let (colour, detail) = if status.detail.is_empty() {
-                (egui::Color32::GRAY, format!("{}: looking…", status.surface))
-            } else {
-                (
-                    egui::Color32::from_rgb(230, 180, 60),
-                    format!("{}: {}", status.surface, status.detail),
-                )
-            };
-            ui.colored_label(colour, detail);
-        }
-    } else {
-        // Each device on its line with its own controls: a keyboard whose
-        // blue runs hot and a deck whose LCD is true are two different
-        // corrections, and the deck — a screen — takes no colour balance.
-        for status in connected {
+    // "Dark" and "broken" look identical from the desk, so every surface
+    // always has its line, saying which it is: the device it found, why it
+    // found none, or that it was told to leave the device alone. The tick in
+    // front is that last thing — an unticked device stays plugged in and is
+    // simply not driven.
+    if keyboards.is_empty() {
+        ui.colored_label(egui::Color32::GRAY, "looking for a keyboard…");
+    }
+    let any_connected = keyboards.iter().any(|status| status.connected);
+    for status in &keyboards {
+        let mut enabled = tracker.settings.device_enabled(status.surface);
+        ui.horizontal(|ui| {
+            if ui
+                .checkbox(&mut enabled, "")
+                .on_hover_text(if enabled {
+                    "Untick to leave this device alone: it stays plugged in, the app just \
+                     stops driving it."
+                } else {
+                    "Tick to drive this device again."
+                })
+                .changed()
+            {
+                tracker.settings.set_device_enabled(status.surface, enabled);
+                changed = true;
+            }
             // Controls first, at the right; the device's line takes what is
             // left and gives way, so a long name never runs under a slider.
-            ui.horizontal(|ui| {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if enabled && status.connected {
+                    // Each device its own controls: a keyboard whose blue
+                    // runs hot and a deck whose LCD is true are two different
+                    // corrections, and the deck — a screen — takes no colour
+                    // balance. Drawn from a copy and written back only on a
+                    // change: a device gets an entry of its own when its
+                    // slider moves, never from being looked at.
                     let balance = status.surface != crate::surface::streamdeck::surface::SURFACE;
-                    // Drawn from a copy and written back only on a change: a
-                    // device gets an entry of its own when its slider moves,
-                    // never from being looked at.
                     let mut tuning = tracker.settings.tuning(status.surface);
                     if device_tuning(ui, &mut tuning, balance) {
                         *tracker.settings.tuning_mut(status.surface) = tuning;
                         changed = true;
                     }
-                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(status.detail.as_str())
-                                    .color(egui::Color32::from_rgb(80, 200, 120)),
-                            )
-                            .truncate(),
-                        )
-                        .on_hover_text(status.detail.as_str());
-                    });
+                }
+                let (colour, line) = if !enabled {
+                    (
+                        ui.visuals().weak_text_color(),
+                        format!("{} — off", status.surface),
+                    )
+                } else if status.connected {
+                    (egui::Color32::from_rgb(80, 200, 120), status.detail.clone())
+                } else if status.detail.is_empty() {
+                    (egui::Color32::GRAY, format!("{}: looking…", status.surface))
+                } else if any_connected {
+                    // Another device is lit, so this one's absence is a
+                    // footnote, not a warning.
+                    (
+                        ui.visuals().weak_text_color(),
+                        format!("{}: {}", status.surface, status.detail),
+                    )
+                } else {
+                    (
+                        egui::Color32::from_rgb(230, 180, 60),
+                        format!("{}: {}", status.surface, status.detail),
+                    )
+                };
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.add(egui::Label::new(egui::RichText::new(&line).color(colour)).truncate())
+                        .on_hover_text(&line);
                 });
             });
-        }
+        });
     }
 
     ui.add_space(4.0);
@@ -1760,9 +1800,10 @@ fn keyboard_panel(ui: &mut egui::Ui, tracker: &mut Tracker) -> bool {
     changed
 }
 
-/// One device's brightness and, for a keyboard, its colour balance. In a
-/// right-to-left row, so brightness is rightmost and the balance to its
-/// left. Returns whether anything changed.
+/// One device's brightness and, for a keyboard, its colour balance — each
+/// named by an icon that says what it is on hover, since the words took the
+/// room the sliders need. In a right-to-left row, so brightness is rightmost
+/// and the balance to its left. Returns whether anything changed.
 fn device_tuning(ui: &mut egui::Ui, tuning: &mut settings::Tuning, balance: bool) -> bool {
     let mut changed = false;
     if ui
@@ -1774,7 +1815,8 @@ fn device_tuning(ui: &mut egui::Ui, tuning: &mut settings::Tuning, balance: bool
     {
         changed = true;
     }
-    ui.label(egui::RichText::new("Brightness").weak());
+    ui.label(egui::RichText::new("☀").weak())
+        .on_hover_text("Brightness");
     if !balance {
         return changed;
     }
@@ -1803,7 +1845,8 @@ fn device_tuning(ui: &mut egui::Ui, tuning: &mut settings::Tuning, balance: bool
         }
         ui.label(egui::RichText::new(label).weak());
     }
-    ui.label(egui::RichText::new("Color balance").weak());
+    ui.label(egui::RichText::new("🎨").weak())
+        .on_hover_text("Colour balance — R, G and B, what this keyboard is sent");
     changed
 }
 

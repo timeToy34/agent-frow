@@ -352,9 +352,9 @@ pub fn press_of(key: usize, cols: usize, shown: usize, waiting: bool) -> Option<
     Some(Press::Summon(row))
 }
 
-/// Which lanes a deck shows, for the window: rows, keys, and the lanes that
-/// are on it — and, when the lane count runs past the rows, the ones that
-/// are not.
+/// What a deck shows, for the window: the model, the lanes on it and the
+/// keys each has — and, when the lane count runs past the rows, the lanes
+/// that are not on it. The serial is `doctor`'s business, not the window's.
 pub fn layout_sentence(found: &Found, lane_count: usize) -> String {
     fn lanes(from: usize, to: usize) -> String {
         if from == to {
@@ -365,16 +365,17 @@ pub fn layout_sentence(found: &Found, lane_count: usize) -> String {
     }
     let shown = shown_lanes(found.rows, lane_count);
     let mut sentence = format!(
-        "{} (serial {}): {} rows of {} keys — {} on the deck",
+        "{}: {shown} lane{} of {} keys",
         found.model,
-        found.serial,
-        found.rows,
-        found.cols,
-        lanes(1, shown)
+        if shown == 1 { "" } else { "s" },
+        found.cols
     );
     if lane_count > shown {
         let verb = if lane_count - shown == 1 { "is" } else { "are" };
-        sentence.push_str(&format!(", {} {verb} not", lanes(shown + 1, lane_count)));
+        sentence.push_str(&format!(
+            ", {} {verb} not on it",
+            lanes(shown + 1, lane_count)
+        ));
     }
     sentence
 }
@@ -449,12 +450,32 @@ fn render(tracker: &Arc<Mutex<Tracker>>) {
     let mut scene = Scene::new();
     let mut live: Option<Live> = None;
     let mut next_attempt = Instant::now();
+    let mut enabled = true;
 
     while RUNNING.load(Ordering::SeqCst) {
         // The clock, deck or no deck. What it says about change is not
         // this surface's to use: the keys are compared one by one below.
         if scene.tick(tracker, crate::now_ms()).is_err() {
             break;
+        }
+
+        // Unticked in the window: hand the deck back to its logo and leave
+        // it alone until ticked again, when it is looked for at once.
+        let wanted = crate::surface::enabled(tracker, SURFACE);
+        if wanted != enabled {
+            enabled = wanted;
+            if enabled {
+                next_attempt = Instant::now();
+            } else {
+                if let Some(mut ready) = live.take() {
+                    let _ = ready.deck.reset();
+                }
+                report(tracker, KeyboardStatus::off(SURFACE));
+            }
+        }
+        if !enabled {
+            std::thread::sleep(Duration::from_millis(200));
+            continue;
         }
 
         if live.is_none() {
@@ -894,19 +915,17 @@ mod tests {
     #[test]
     fn the_status_sentence_counts_the_lanes_on_the_deck() {
         let three = layout_sentence(&found(3, 5), 3);
-        assert!(
-            three.ends_with("3 rows of 5 keys — lanes 1–3 on the deck"),
-            "{three}"
-        );
+        assert!(three.ends_with(": 3 lanes of 5 keys"), "{three}");
+        assert!(!three.contains("serial"), "{three}");
         let six = layout_sentence(&found(3, 5), 6);
         assert!(
-            six.ends_with("lanes 1–3 on the deck, lanes 4–6 are not"),
+            six.ends_with("3 lanes of 5 keys, lanes 4–6 are not on it"),
             "{six}"
         );
         let four = layout_sentence(&found(3, 5), 4);
-        assert!(four.ends_with(", lane 4 is not"), "{four}");
+        assert!(four.ends_with(", lane 4 is not on it"), "{four}");
         let xl = layout_sentence(&found(4, 8), 3);
-        assert!(xl.ends_with("lanes 1–3 on the deck"), "{xl}");
+        assert!(xl.ends_with(": 3 lanes of 8 keys"), "{xl}");
     }
 
     #[test]
@@ -953,7 +972,7 @@ mod tests {
         assert!(first.connected);
         assert_eq!(first.driven, 15);
         assert!(
-            first.detail.ends_with("lanes 1–3 on the deck"),
+            first.detail.ends_with("3 lanes of 5 keys"),
             "{}",
             first.detail
         );
@@ -963,7 +982,7 @@ mod tests {
         step(&tracker, &scene, &mut live).unwrap();
         let second = tracker.lock().unwrap().keyboards[0].clone();
         assert!(
-            second.detail.ends_with("lanes 4–6 are not"),
+            second.detail.ends_with("lanes 4–6 are not on it"),
             "{}",
             second.detail
         );

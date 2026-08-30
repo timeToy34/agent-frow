@@ -199,10 +199,11 @@ status line is registered.
 
 - Lane count — three to six; the keyboard always carries lanes 1–3, four keys
   each, and the rest are off it — and each lane's name and colour.
-- Brightness, and **Color balance** — a per-channel gain for keyboards whose
-  LEDs do not match the screen — **per connected device**: each has its own
-  line, brightness for all of them and colour balance for the keyboards (the
-  deck is a screen and takes none). Tune it with a **Preview** pattern
+- Each device on its own line, with a tick in front: untick one to leave it
+  alone — plugged in, found, and not driven — and tick it to take it back.
+  Brightness (☀) for all of them and **colour balance** (🎨, a per-channel
+  gain for keyboards whose LEDs do not match the screen) for the keyboards —
+  the deck is a screen and takes none. Tune with a **Preview** pattern
   playing on the keys.
 - Everything lives in `%LOCALAPPDATA%\agent-frow\settings.json`, written
   atomically. A file that does not parse is refused and left alone, and the

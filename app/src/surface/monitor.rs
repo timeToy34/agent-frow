@@ -304,8 +304,12 @@ fn colour32(colour: Rgb) -> egui::Color32 {
 fn ink_colour(ink: Ink) -> egui::Color32 {
     match ink {
         Ink::Quiet => egui::Color32::from_gray(140),
-        Ink::Dark => egui::Color32::from_gray(16),
-        Ink::Bright => egui::Color32::WHITE,
+        // White through to near-black, as far along as the key's luminance
+        // has taken it — the deck's fade, on the screen.
+        Ink::Lit(darkness) => {
+            let travelled = (f32::from(darkness) * (255.0 - 16.0) / 255.0).round() as u8;
+            egui::Color32::from_gray(255 - travelled)
+        }
     }
 }
 
@@ -464,8 +468,9 @@ fn key(painter: &egui::Painter, rect: egui::Rect, face: &Face, hovered: bool) {
                 room,
             ),
         ],
-        Label::Up => vec![fit(&painter, "▲", big, colour, room)],
-        Label::Down => vec![fit(&painter, "▼", big, colour, room)],
+        // The triangles egui's own font has; ▲ and ▼ come out as boxes.
+        Label::Up => vec![fit(&painter, "⏶", big, colour, room)],
+        Label::Down => vec![fit(&painter, "⏷", big, colour, room)],
         Label::Enter => vec![fit(&painter, "Enter", big, colour, room)],
     };
     if galleys.is_empty() {

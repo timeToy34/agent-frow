@@ -11,3 +11,13 @@ pub mod monitor;
 pub mod palette;
 pub mod scene;
 pub mod streamdeck;
+
+/// Whether the user is driving `surface` at all — a device unticked in the
+/// window is left alone. Read by each device thread once a loop, so a tick
+/// takes effect within a frame.
+pub fn enabled(tracker: &std::sync::Mutex<crate::tracker::Tracker>, surface: &str) -> bool {
+    tracker
+        .lock()
+        .map(|tracker| tracker.settings.device_enabled(surface))
+        .unwrap_or(true)
+}

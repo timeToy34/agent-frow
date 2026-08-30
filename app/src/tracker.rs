@@ -127,11 +127,13 @@ pub struct KeyboardStatus {
 }
 
 impl KeyboardStatus {
-    /// Driving `driven` of the twelve F-row keys on `model`.
+    /// Driving `driven` of the twelve F-row keys on `model`. A whole row
+    /// says the model and nothing more — that it is driven is what the line
+    /// being lit means.
     pub fn connected(surface: &'static str, model: &str, driven: usize) -> Self {
         let keys = crate::settings::KEYS;
         let detail = if driven == keys {
-            format!("{model}: driving the {driven} F-row keys")
+            model.to_owned()
         } else {
             format!(
                 "{model}: only {driven} of the {keys} F-row keys exist here, so the lanes are incomplete"
@@ -164,6 +166,11 @@ impl KeyboardStatus {
     /// Not driving anything yet, and still looking.
     pub fn searching(surface: &'static str) -> Self {
         Self::unavailable(surface, String::new())
+    }
+
+    /// Left alone: unticked in the window.
+    pub fn off(surface: &'static str) -> Self {
+        Self::unavailable(surface, "off".to_owned())
     }
 }
 
@@ -709,6 +716,8 @@ mod tests {
         assert_eq!(status.driven, 15);
         assert_eq!(status.detail, "Mk2: 15 keys");
         let f_row = KeyboardStatus::connected("Keychron", "V3 Ultra", 12);
-        assert!(f_row.detail.contains("driving the 12 F-row keys"));
+        assert_eq!(f_row.detail, "V3 Ultra", "a whole row is just the model");
+        let partial = KeyboardStatus::connected("Keychron", "V0", 10);
+        assert!(partial.detail.contains("only 10 of the 12"));
     }
 }

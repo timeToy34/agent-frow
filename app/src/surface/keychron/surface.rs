@@ -149,12 +149,34 @@ fn render(tracker: &Mutex<Tracker>) {
     // and this is what it goes back to.
     let mut remembered: Option<Snapshot> = recall();
     let mut next_attempt = Instant::now();
+    let mut enabled = true;
 
     while RUNNING.load(Ordering::SeqCst) {
         // The clock, keyboard or no keyboard.
         let Ok(frame) = scene.tick(tracker, crate::now_ms()) else {
             break;
         };
+
+        // Unticked in the window: hand the keyboard back and leave it alone
+        // until ticked again, when it is looked for at once.
+        let wanted = crate::surface::enabled(tracker, SURFACE);
+        if wanted != enabled {
+            enabled = wanted;
+            if enabled {
+                next_attempt = Instant::now();
+            } else {
+                if let Some(mut ready) = live.take()
+                    && ready.board.restore(&ready.snapshot).is_ok()
+                {
+                    forget();
+                }
+                report(tracker, KeyboardStatus::off(SURFACE));
+            }
+        }
+        if !enabled {
+            std::thread::sleep(Duration::from_millis(200));
+            continue;
+        }
 
         if live.is_none() {
             if Instant::now() < next_attempt {

@@ -10,7 +10,7 @@
 //! defaults is recoverable; silently overwriting colours somebody hand-edited
 //! is not.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
@@ -230,6 +230,9 @@ pub struct Settings {
     pub tuning: Tuning,
     /// Each connected device's own tuning, by the surface's name.
     pub devices: BTreeMap<String, Tuning>,
+    /// Devices the user has unticked, by the surface's name: plugged in,
+    /// found, and left alone. Absent means on.
+    pub disabled: BTreeSet<String>,
     /// Whether the Settings section of the window is unfolded. Remembered so
     /// the window opens the way it was left.
     pub settings_open: bool,
@@ -248,6 +251,7 @@ impl Default for Settings {
             saved: Vec::new(),
             tuning: Tuning::default(),
             devices: BTreeMap::new(),
+            disabled: BTreeSet::new(),
             settings_open: false,
             mini: false,
             mini_window: None,
@@ -267,6 +271,20 @@ impl Settings {
     pub fn tuning_mut(&mut self, surface: &str) -> &mut Tuning {
         let fallback = self.tuning;
         self.devices.entry(surface.to_owned()).or_insert(fallback)
+    }
+
+    /// Whether `surface` is to be driven at all. An unticked device stays
+    /// plugged in and found; the app just leaves it alone.
+    pub fn device_enabled(&self, surface: &str) -> bool {
+        !self.disabled.contains(surface)
+    }
+
+    pub fn set_device_enabled(&mut self, surface: &str, enabled: bool) {
+        if enabled {
+            self.disabled.remove(surface);
+        } else {
+            self.disabled.insert(surface.to_owned());
+        }
     }
 
     pub fn set_lane_count(&mut self, count: usize) {
@@ -360,6 +378,11 @@ pub fn parse(text: &str) -> Result<Settings, String> {
                 read_tuning(entry, &mut tuning);
                 settings.devices.insert(surface.clone(), tuning);
             }
+        }
+    }
+    if let Some(off) = object.get("disabled").and_then(Value::as_array) {
+        for surface in off.iter().filter_map(Value::as_str) {
+            settings.disabled.insert(surface.to_owned());
         }
     }
     if let Some(window) = object.get("mini_window").and_then(Value::as_object) {
@@ -477,6 +500,18 @@ pub fn to_json(settings: &Settings) -> String {
         devices.insert(surface.clone(), Value::Object(entry));
     }
     root.insert("devices".to_owned(), Value::Object(devices));
+    if !settings.disabled.is_empty() {
+        root.insert(
+            "disabled".to_owned(),
+            Value::Array(
+                settings
+                    .disabled
+                    .iter()
+                    .map(|surface| Value::String(surface.clone()))
+                    .collect(),
+            ),
+        );
+    }
     root.insert(
         "settings_open".to_owned(),
         Value::Bool(settings.settings_open),
@@ -638,6 +673,7 @@ mod tests {
                 color_gain: [1.0, 0.9, 0.8],
             },
         );
+        settings.disabled.insert("Corsair".to_owned());
         settings.mini_window = Some(MiniWindow {
             x: 12.0,
             y: 34.0,

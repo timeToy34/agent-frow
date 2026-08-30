@@ -123,6 +123,7 @@ fn render(tracker: Arc<Mutex<Tracker>>, running: Arc<AtomicBool>) {
     let mut scene = Scene::new();
     let mut device: Option<Device> = None;
     let mut next_attempt = Instant::now();
+    let mut enabled = true;
 
     while running.load(Ordering::SeqCst) {
         // The clock, keyboard or no keyboard. Doing it here rather than only
@@ -131,6 +132,25 @@ fn render(tracker: Arc<Mutex<Tracker>>, running: Arc<AtomicBool>) {
         let Ok(frame) = scene.tick(&tracker, crate::now_ms()) else {
             break;
         };
+
+        // Unticked in the window: let go of iCUE and leave the keyboard
+        // alone until ticked again, when it is looked for at once.
+        let wanted = crate::surface::enabled(&tracker, SURFACE);
+        if wanted != enabled {
+            enabled = wanted;
+            if enabled {
+                next_attempt = Instant::now();
+            } else {
+                if device.take().is_some() {
+                    let _ = sdk.disconnect();
+                }
+                report(&tracker, KeyboardStatus::off(SURFACE));
+            }
+        }
+        if !enabled {
+            std::thread::sleep(Duration::from_millis(200));
+            continue;
+        }
 
         let Some(ready) = &device else {
             if Instant::now() < next_attempt {

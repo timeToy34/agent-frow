@@ -105,32 +105,58 @@ pub enum Label {
 }
 
 /// How the label is drawn: quietly on a key that is meant to be dark, and
-/// otherwise in whichever of black and white the key's colour contrasts
-/// with more — white text on a light blue is what an LCD makes of "white
-/// with a shadow", and nobody could read it.
+/// otherwise somewhere between white with a shadow on a dark key and black
+/// on a light one — white text on a light blue is what an LCD makes of
+/// "white with a shadow", and nobody could read it. Between the two the ink
+/// fades rather than flips, so a label on a pulsing key dims and darkens
+/// with the key instead of snapping the moment it crosses a line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ink {
     /// Grey, no shadow — for a key that is dark on purpose: an empty or
     /// idle lane.
     Quiet,
-    /// Black, for a light key.
-    Dark,
-    /// White with a shadow, for a dark key.
-    Bright,
+    /// On a lit key: how far from white with a shadow (0) towards black
+    /// without one (255).
+    Lit(u8),
 }
 
+/// The luminance band the ink crosses over in. Black and white contrast
+/// equally against a background of luminance 0.179 by the WCAG arithmetic —
+/// the one number in here that is not taste — so the band sits either side
+/// of it: white below, black above, and the fade between.
+const FADE_FROM: f32 = 0.08;
+const FADE_TO: f32 = 0.32;
+
 impl Ink {
-    /// The ink that reads on `colour`: black above the luminance where the
-    /// two contrast equally against a background, white below it. That
-    /// luminance is 0.179 by the WCAG arithmetic, the one number in here
-    /// that is not taste.
+    /// White with a shadow, for a dark key.
+    pub const BRIGHT: Self = Self::Lit(0);
+    /// Black, for a light key.
+    pub const DARK: Self = Self::Lit(255);
+
+    /// The ink that reads on `colour`: white on the dark side of the band,
+    /// black on the light side, and on its way from one to the other inside
+    /// it.
     pub fn on(colour: Rgb) -> Self {
-        if luminance(colour) > 0.179 {
-            Self::Dark
-        } else {
-            Self::Bright
-        }
+        let t = smoothstep(FADE_FROM, FADE_TO, luminance(colour));
+        Self::Lit((t * 255.0).round() as u8)
     }
+}
+
+/// 0.0 at `from`, 1.0 at `to`, eased between and flat outside.
+fn smoothstep(from: f32, to: f32, value: f32) -> f32 {
+    let t = ((value - from) / (to - from)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// `from` at 0, `to` at 255, straight between.
+fn mix(from: [u8; 3], to: [u8; 3], amount: u8) -> [u8; 3] {
+    let t = f32::from(amount) / 255.0;
+    let channel = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8;
+    [
+        channel(from[0], to[0]),
+        channel(from[1], to[1]),
+        channel(from[2], to[2]),
+    ]
 }
 
 /// Relative luminance, 0.0 black to 1.0 white, from sRGB.
@@ -152,20 +178,20 @@ struct Paint {
     shadow: Option<[u8; 3]>,
 }
 
-impl From<Ink> for Paint {
-    fn from(ink: Ink) -> Self {
+impl Paint {
+    /// The paint for `ink` on a key of `background`: a lit ink's colour is
+    /// its point between white and black, and its shadow sinks into the key
+    /// as the ink darkens, so neither arrives nor leaves all at once.
+    fn of(ink: Ink, background: Rgb) -> Self {
         match ink {
             Ink::Quiet => Paint {
                 colour: QUIET_INK,
                 shadow: None,
             },
-            Ink::Dark => Paint {
-                colour: SHADOW,
-                shadow: None,
-            },
-            Ink::Bright => Paint {
-                colour: INK,
-                shadow: Some(SHADOW),
+            Ink::Lit(darkness) => Paint {
+                colour: mix(INK, SHADOW, darkness),
+                shadow: (darkness < 255)
+                    .then(|| mix(SHADOW, [background.r, background.g, background.b], darkness)),
             },
         }
     }
@@ -181,7 +207,7 @@ pub fn blank(size: (usize, usize)) -> Canvas {
 /// whose inputs have not changed.
 pub fn render_key(size: (usize, usize), colour: Rgb, label: &Label, ink: Ink) -> Canvas {
     let mut canvas = Canvas::filled(size.0, size.1, colour);
-    let paint = Paint::from(ink);
+    let paint = Paint::of(ink, colour);
     // Sized for a 72 px key and scaled with the height for the larger ones.
     let height = canvas.height as f32;
     let scale = height / 72.0;
@@ -590,7 +616,7 @@ mod tests {
                 size,
                 RED,
                 &Label::Name("agent-frow".to_owned()),
-                Ink::Bright,
+                Ink::BRIGHT,
             );
             assert_eq!((key.width, key.height), size);
             assert_eq!(key.rgb.len(), size.0 * size.1 * 3);
@@ -599,8 +625,8 @@ mod tests {
 
     #[test]
     fn rendering_is_deterministic() {
-        let once = render_key(SIZE, RED, &status(), Ink::Bright);
-        let twice = render_key(SIZE, RED, &status(), Ink::Bright);
+        let once = render_key(SIZE, RED, &status(), Ink::BRIGHT);
+        let twice = render_key(SIZE, RED, &status(), Ink::BRIGHT);
         assert_eq!(once, twice);
     }
 
@@ -620,7 +646,7 @@ mod tests {
 
     #[test]
     fn a_key_is_one_colour_under_its_words() {
-        let key = render_key(SIZE, RED, &status(), Ink::Bright);
+        let key = render_key(SIZE, RED, &status(), Ink::BRIGHT);
         for y in 0..72 {
             assert!(is(key.pixel(0, y), RED), "left edge, row {y}");
             assert!(is(key.pixel(71, y), RED), "right edge, row {y}");
@@ -638,7 +664,7 @@ mod tests {
         // The apex pixel: the middle column, which for an even width is the
         // right-hand one of the two, as the drawing rounds.
         let apex_x = x0 + width / 2;
-        let up = render_key(SIZE, RED, &Label::Up, Ink::Bright);
+        let up = render_key(SIZE, RED, &Label::Up, Ink::BRIGHT);
         assert_eq!(up.pixel(apex_x, y0), INK, "the apex is ink");
         assert!(is(up.pixel(x0, y0), RED), "the top-left corner is bare");
         assert!(
@@ -651,7 +677,7 @@ mod tests {
             "the base runs to the left corner"
         );
 
-        let down = render_key(SIZE, RED, &Label::Down, Ink::Bright);
+        let down = render_key(SIZE, RED, &Label::Down, Ink::BRIGHT);
         let bottom = y0 + height - 1;
         assert_eq!(down.pixel(apex_x, bottom), INK, "the apex is at the bottom");
         assert!(
@@ -664,7 +690,7 @@ mod tests {
 
     #[test]
     fn status_shows_two_lines_set_like_a_name() {
-        let full = render_key(SIZE, RED, &status(), Ink::Bright);
+        let full = render_key(SIZE, RED, &status(), Ink::BRIGHT);
         let no_clock = render_key(
             SIZE,
             RED,
@@ -672,9 +698,9 @@ mod tests {
                 state: "Waiting",
                 elapsed: String::new(),
             },
-            Ink::Bright,
+            Ink::BRIGHT,
         );
-        let none = render_key(SIZE, RED, &Label::None, Ink::Bright);
+        let none = render_key(SIZE, RED, &Label::None, Ink::BRIGHT);
         assert_ne!(no_clock, none, "the state line shows");
         assert_ne!(full, no_clock, "the elapsed line shows");
         // Two lines are a taller block: its first line sits higher than a
@@ -685,14 +711,14 @@ mod tests {
         assert!(first_ink(&full) < first_ink(&no_clock));
         // And it is set at the name's size: a lone "Waiting" is as tall as a
         // lone name of the same word.
-        let as_name = render_key(SIZE, RED, &Label::Name("Waiting".to_owned()), Ink::Bright);
+        let as_name = render_key(SIZE, RED, &Label::Name("Waiting".to_owned()), Ink::BRIGHT);
         assert_eq!(no_clock, as_name, "one word reads the same on either key");
     }
 
     #[test]
     fn a_long_name_is_cut_rather_than_overflowing() {
         let long = "a-project-folder-with-a-name-that-goes-on-and-on-and-on";
-        let key = render_key(SIZE, RED, &Label::Name(long.to_owned()), Ink::Bright);
+        let key = render_key(SIZE, RED, &Label::Name(long.to_owned()), Ink::BRIGHT);
         for y in 0..72 {
             assert!(is(key.pixel(0, y), RED));
             assert!(is(key.pixel(71, y), RED));
@@ -701,21 +727,41 @@ mod tests {
 
     #[test]
     fn ink_follows_the_background() {
-        assert_eq!(Ink::on(Rgb::new(80, 170, 255)), Ink::Dark, "light blue");
-        assert_eq!(Ink::on(Rgb::new(250, 190, 60)), Ink::Dark, "yellow");
+        assert_eq!(Ink::on(Rgb::new(80, 170, 255)), Ink::DARK, "light blue");
+        assert_eq!(Ink::on(Rgb::new(250, 190, 60)), Ink::DARK, "yellow");
         assert_eq!(
             Ink::on(palette::base(Rgb::new(80, 170, 255))),
-            Ink::Bright,
+            Ink::BRIGHT,
             "its glow"
         );
-        assert_eq!(Ink::on(Rgb::new(0, 0, 0)), Ink::Bright, "black");
-        assert_eq!(Ink::on(palette::DARK_RED), Ink::Bright, "dark red");
-        assert_eq!(Ink::on(Rgb::new(255, 255, 255)), Ink::Dark, "white");
+        assert_eq!(Ink::on(Rgb::new(0, 0, 0)), Ink::BRIGHT, "black");
+        assert_eq!(Ink::on(palette::DARK_RED), Ink::BRIGHT, "dark red");
+        assert_eq!(Ink::on(Rgb::new(255, 255, 255)), Ink::DARK, "white");
+    }
+
+    #[test]
+    fn ink_fades_through_the_band_rather_than_flipping() {
+        let Ink::Lit(mid) = Ink::on(Rgb::new(110, 110, 110)) else {
+            panic!("a lit key");
+        };
+        assert!(0 < mid && mid < 255, "grey 110 is inside the band: {mid}");
+        let Ink::Lit(later) = Ink::on(Rgb::new(150, 150, 150)) else {
+            panic!("a lit key");
+        };
+        assert!(
+            mid < later,
+            "darker ink on the lighter key: {mid} < {later}"
+        );
+        // Halfway, the shadow is halfway into the key and the ink mid-grey.
+        let paint = Paint::of(Ink::Lit(128), Rgb::new(100, 100, 100));
+        assert_eq!(paint.colour, [127, 127, 127]);
+        assert_eq!(paint.shadow, Some([50, 50, 50]));
+        assert_eq!(Paint::of(Ink::DARK, Rgb::new(100, 100, 100)).shadow, None);
     }
 
     #[test]
     fn dark_ink_is_black_without_a_shadow() {
-        let key = render_key(SIZE, Rgb::new(80, 170, 255), &Label::Up, Ink::Dark);
+        let key = render_key(SIZE, Rgb::new(80, 170, 255), &Label::Up, Ink::DARK);
         let pixels: Vec<[u8; 3]> = key.rgb.chunks(3).map(|px| [px[0], px[1], px[2]]).collect();
         assert!(
             !pixels.contains(&[255, 255, 255]),
@@ -762,8 +808,8 @@ mod tests {
 
     #[test]
     fn enter_is_set_like_the_name() {
-        let enter = render_key(SIZE, RED, &Label::Enter, Ink::Bright);
-        let name = render_key(SIZE, RED, &Label::Name("Enter".to_owned()), Ink::Bright);
+        let enter = render_key(SIZE, RED, &Label::Enter, Ink::BRIGHT);
+        let name = render_key(SIZE, RED, &Label::Name("Enter".to_owned()), Ink::BRIGHT);
         assert_eq!(enter, name);
     }
 
@@ -782,7 +828,7 @@ mod tests {
                 name: "ctx",
                 value: Some(42),
             },
-            Ink::Bright,
+            Ink::BRIGHT,
         );
         let as_status = render_key(
             SIZE,
@@ -791,7 +837,7 @@ mod tests {
                 state: "ctx",
                 elapsed: "42%".to_owned(),
             },
-            Ink::Bright,
+            Ink::BRIGHT,
         );
         assert_eq!(gauge, as_status, "two lines by the one rule");
         let unknown = render_key(
@@ -801,7 +847,7 @@ mod tests {
                 name: "ctx",
                 value: None,
             },
-            Ink::Bright,
+            Ink::BRIGHT,
         );
         assert_ne!(gauge, unknown);
     }
@@ -815,7 +861,7 @@ mod tests {
                 name: "5h",
                 value: None,
             },
-            Ink::Bright,
+            Ink::BRIGHT,
         );
         let dash = render_key(
             SIZE,
@@ -824,7 +870,7 @@ mod tests {
                 state: "5h",
                 elapsed: "—".to_owned(),
             },
-            Ink::Bright,
+            Ink::BRIGHT,
         );
         assert_eq!(unknown, dash);
     }

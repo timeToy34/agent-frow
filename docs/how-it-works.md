@@ -294,6 +294,13 @@ all of it does if all of it is; the fourth surface is the screen, below under
 [The monitor](#the-monitor). Each is also a clock — through `surface/scene.rs`, which
 decides when a frame is due — so lanes stay honest while the window is hidden.
 
+Each device's line in the window has a tick. Unticked, its thread hands the
+device back the way Quit does — the Keychron's snapshot restored, iCUE
+disconnected, the deck reset to its logo — and stops looking until ticked
+again, when it looks at once; the thread keeps ticking the scene, since it is
+still a clock. The set is `disabled` in `settings.json`, by surface name;
+absent means on.
+
 ### Corsair, through the iCUE SDK
 
 Two constraints:
@@ -307,7 +314,7 @@ Two constraints:
 
 Not every keyboard renders colour honestly — on some, blue overpowers and red
 undershoots until a colour set on screen is unrecognisable on the keys.
-**Color balance** (next to Brightness) is a per-channel gain, 0.25–2.00,
+**Colour balance** (🎨, beside ☀ brightness) is a per-channel gain, 0.25–2.00,
 multiplied into what the keys are sent and nothing else — the window is never
 corrected. Calibrate with a **Preview** pattern playing; above 1.00 clips on
 already-full channels, so prefer pulling the strong channels down. Both are
@@ -409,9 +416,14 @@ layout, image size, rotation and encoding; no driver, nothing linked.
   dash breaks like a space, on the deck only — over up to three lines, as
   large as the key allows. Ink is grey on a key that is dark on purpose (an
   empty lane is black with its name in grey, Idle is one dim name key and
-  the rest off), and otherwise black or white by the key's colour of the
-  moment, whichever contrasts more — so it turns with the runner rather
-  than vanish into it. A deck shows as many lanes as it has rows — three
+  the rest off), and otherwise between white with a shadow and black by
+  the key's luminance of the moment: white below a band around the point
+  where the two contrast equally (0.179, WCAG), black above it, and fading
+  from one to the other inside the band, the shadow sinking into the key as
+  the ink darkens — so a label on a pulsing key dims and darkens with it
+  instead of snapping the moment the key crosses a line, and still turns
+  with the runner rather than vanish into it. A deck shows as many lanes as
+  it has rows — three
   on a 15-key deck — and the window says which; the rows past the lanes are
   black. `surface/streamdeck/canvas.rs` is the drawing and has no device in
   it.
