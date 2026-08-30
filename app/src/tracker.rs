@@ -429,7 +429,7 @@ impl Tracker {
     /// been waiting for one longest rather than to whoever speaks next.
     pub fn fill_lanes(&mut self) {
         let count = self.settings.lane_count;
-        // A lane that no longer exists — the layout shrank — is given up here
+        // A lane that no longer exists — the lane count shrank — is given up here
         // rather than left pointing past the end of the row.
         for session in &mut self.sessions {
             if session.lane.is_some_and(|lane| lane >= count) {
@@ -571,6 +571,17 @@ impl Tracker {
         self.sessions
             .iter()
             .find(|session| session.lane == Some(lane))
+    }
+
+    /// Whether a press on this lane's answer keys may type: a session on it
+    /// whose effective state is Waiting, and no preview playing — a preview
+    /// is a look, not a question. The one question every surface with answer
+    /// keys asks, so the F-row and a Stream Deck can never disagree on it.
+    pub fn answerable(&self, lane: usize) -> bool {
+        self.preview.is_none()
+            && self
+                .on_lane(lane)
+                .is_some_and(|session| session.effective_state() == State::Waiting)
     }
 
     /// Sessions with no lane, in the order they arrived.

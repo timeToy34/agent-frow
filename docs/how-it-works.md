@@ -426,10 +426,12 @@ layout, image size, rotation and encoding; no driver, nothing linked.
 - **One thread for both directions.** The device handle cannot be shared,
   so the wait between frames is spent listening for a press, and a press is
   answered at once. Every key of a row summons its lane through the same
-  `keys::summon_lane` the F-row's marker keys use; in Waiting the three
-  middle keys go through `keys::answer_lane` instead — the same raise, then
-  one key. Both on a thread of their own, since a raise can spend a quarter
-  of a second on the terminal's tab strip. A preview is a look, not a
+  `keys::summon_lane` the F-row's keys use; in Waiting the three middle keys
+  go through `keys::answer_lane` instead — the same raise, then one key — as
+  the three after a lane's first do on the F-row. The two surfaces speak one
+  `keys::Press` and ask one `Tracker::answerable`. Each press on a thread of
+  its own, since a raise can spend a quarter of a second on the terminal's
+  tab strip. A preview is a look, not a
   question: its Waiting shows the answer keys and never types.
 - **A deck press is not input to this process.** It arrives over USB on our
   thread, not as a keystroke Windows delivered to us, so the foreground
@@ -446,7 +448,7 @@ layout, image size, rotation and encoding; no driver, nothing linked.
   screen is the one taken. `agent-frow doctor` lists what is on the bus and
   whether the Elgato app has it, without opening anything.
 
-### Summon keys
+### The F-row's keys
 
 F13–F24 are registered as global hotkeys with `MOD_NOREPEAT`. That both keeps
 the remapped keys out of other applications and makes Windows deliver the
@@ -455,17 +457,32 @@ hook must not replace this: swallowing the key inside `WH_KEYBOARD_LL` leaves
 the app without foreground permission, which makes summon fail specifically
 when the Agent F-Row window is focused even though the Focus button works.
 
+The F-row is always three lanes of four — `KEYBOARD_LANES × KEYS_PER_LANE` in
+`settings.rs`. The lane count is a setting of its own, three to six; a lane
+past the third has no keys and is shown in the window, in mini mode and on a
+deck with the rows. `keys::press_of` turns a key index into a `Press`: the
+lane is `index / 4`, and every key of a lane summons it — except while the
+lane is *answerable* (`Tracker::answerable`: a session on it whose effective
+state is Waiting, and no preview playing), when the three after the first are
+Up, Down and Enter through the same `keys::answer_lane` a deck row uses:
+raise, verify the terminal has the keyboard, then one `SendInput`. A hotkey is
+input Windows delivered to this process, so the raise has foreground
+permission — the deck's harder case, not a new one. `MOD_NOREPEAT` means a
+held F14 is one Up, not a stream of them. Waiting's double-pulse on those
+three keys was already the affordance: the keys that beat are the keys that
+answer.
+
 **The lane's colour is the base for everything, and colour change means
 trouble.** Every ordinary state is the lane's own colour at some brightness and
 motion; red is reserved for Error and nothing else may be red, which is why
-lane colours should stay away from it. The patterns (n = keys per lane):
+lane colours should stay away from it. The patterns (four keys per lane):
 
 | State | Pattern |
 |---|---|
 | empty lane | all off |
 | Connected | all keys, base colour, 20% |
-| Running | base 20% glow with one 100% light crossfading across n+1 slots |
-| Waiting | leftmost key 100%; the rest double-pulse base up to 100% |
+| Running | base 20% glow with one 100% light crossfading across five slots |
+| Waiting | leftmost key 100%; the three answer keys double-pulse base up to 100% |
 | Done | leftmost key 100%; the rest 20% |
 | Error | leftmost key base 100%; the rest dark red, steady |
 | Idle | leftmost key base 20%; the rest off |
@@ -524,8 +541,9 @@ the space it takes.
 Click a lane, and the window its agent runs in comes forward — a terminal with
 the right tab in front, or the Claude/Codex desktop app, or an IDE. **The
 product's first action** — no approvals, no key capture. Its second is the one
-keystroke a Stream Deck's answer keys can send, and that goes only to a
-terminal that verifiably has the keyboard.
+keystroke the answer keys — a lane's three after its first on the F-row, a
+row's middle three on a Stream Deck — can send while a lane is Waiting, and
+that goes only to a terminal that verifiably has the keyboard.
 
 - **The hook reports its own Windows ancestry**, each ancestor as a pid plus
   the exe name that pid had at event time; the nearest ancestor whose pid
@@ -565,8 +583,8 @@ Three things it must keep doing (the histories are in [lessons.md](lessons.md)):
   a process change the foreground window if the user just gave input *to it*.
   The summon key arrives as a `WM_HOTKEY` posted to this app, so the input *is*
   ours and the raise is allowed. No synthetic input, no foreground-lock tricks
-  — synthetic input never gains the foreground; the deck's one keystroke is
-  sent only after the foreground is verified.
+  — synthetic input never gains the foreground; the one keystroke an answer
+  key sends goes out only after the foreground is verified.
 - **Activation and Z-order are separate.** `SetForegroundWindow` can leave a
   window the "foreground window" per the API while it is still drawn *behind*
   another. A topmost/not-topmost `SetWindowPos` pair forces the window

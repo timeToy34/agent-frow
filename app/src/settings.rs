@@ -1,14 +1,17 @@
 //! Lane configuration, saved agents, and keeping both on disk.
 //!
-//! The F-row has twelve keys. A lane is a group of them and is where a session
-//! is shown. A saved agent is an `(agent, project folder)` the user asked the
-//! app to remember, with the lane it would rather come back to.
+//! The F-row has twelve keys: three lanes of four. A lane is where a session
+//! is shown; a lane past the keyboard's three has no keys and is shown in the
+//! window, in mini mode and on a deck with the rows. A saved agent is an
+//! `(agent, project folder)` the user asked the app to remember, with the lane
+//! it would rather come back to.
 //!
 //! A file that does not parse is **refused and left untouched**. Starting from
 //! defaults is recoverable; silently overwriting colours somebody hand-edited
 //! is not.
 
 use std::collections::BTreeMap;
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
@@ -16,12 +19,23 @@ use serde_json::{Map, Value};
 /// Keys on the F-row. Fixed by the keyboard, not a preference.
 pub const KEYS: usize = 12;
 
-/// The lane counts that divide twelve keys evenly.
-pub const LANE_COUNTS: [usize; 3] = [3, 4, 6];
+/// How the F-row is cut: a lane is four keys — the first summons its agent,
+/// the other three answer it while it is Waiting — the shape of a deck row
+/// without its state key. Not a layout to choose: the lane count is a setting
+/// of its own, and a lane past [`KEYBOARD_LANES`] simply has no keys.
+pub const KEYS_PER_LANE: usize = 4;
 
-/// Configuration is always kept for the largest layout, so switching to three
-/// lanes and back does not lose the names and colours of the other three.
+/// How many lanes have keys on the keyboard.
+pub const KEYBOARD_LANES: usize = KEYS / KEYS_PER_LANE;
+
+/// Configuration is always kept for six lanes, so going down to three and
+/// back does not lose the names and colours of the other three.
 pub const MAX_LANES: usize = 6;
+
+/// The lane counts a user may pick: the keyboard's three, up to the six
+/// configuration is kept for. A lane past the keyboard is for an agent with
+/// no keys — shown in the window, in mini mode and on a deck with the rows.
+pub const LANE_COUNTS: RangeInclusive<usize> = KEYBOARD_LANES..=MAX_LANES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rgb {
@@ -229,7 +243,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            lane_count: 4,
+            lane_count: KEYBOARD_LANES,
             lanes: (0..MAX_LANES).map(Lane::default_at).collect(),
             saved: Vec::new(),
             tuning: Tuning::default(),
@@ -253,11 +267,6 @@ impl Settings {
     pub fn tuning_mut(&mut self, surface: &str) -> &mut Tuning {
         let fallback = self.tuning;
         self.devices.entry(surface.to_owned()).or_insert(fallback)
-    }
-
-    /// How many keys each lane gets on the keyboard.
-    pub fn keys_per_lane(&self) -> usize {
-        KEYS / self.lane_count.max(1)
     }
 
     pub fn set_lane_count(&mut self, count: usize) {
@@ -696,12 +705,32 @@ mod tests {
     #[test]
     fn one_bad_field_does_not_cost_the_whole_file() {
         let settings =
-            parse(r#"{ "lane_count": 5, "lanes": [ { "name": "Kept", "color": "purple" } ] }"#)
+            parse(r#"{ "lane_count": 12, "lanes": [ { "name": "Kept", "color": "purple" } ] }"#)
                 .unwrap();
-        // 5 does not divide twelve, so it is not one of the offered layouts.
+        // Twelve lanes is past the six the file keeps room for, so it is not
+        // a count.
         assert_eq!(settings.lane_count, Settings::default().lane_count);
         assert_eq!(settings.lanes[0].name, "Kept");
         assert_eq!(settings.lanes[0].color, Settings::default().lanes[0].color);
+    }
+
+    #[test]
+    fn the_lane_count_is_any_of_three_to_six() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.lane_count, KEYBOARD_LANES, "the keyboard's three");
+        settings.set_lane_count(5);
+        assert_eq!(settings.lane_count, 5, "no longer has to divide twelve");
+        settings.set_lane_count(2);
+        assert_eq!(
+            settings.lane_count, 5,
+            "fewer than the keyboard has is refused"
+        );
+        settings.set_lane_count(7);
+        assert_eq!(settings.lane_count, 5, "more than is kept for is refused");
+        // A file from the days of the 4 × 3 and 6 × 2 layouts still means
+        // what it meant: that many lanes.
+        assert_eq!(parse(r#"{ "lane_count": 4 }"#).unwrap().lane_count, 4);
+        assert_eq!(parse(r#"{ "lane_count": 6 }"#).unwrap().lane_count, 6);
     }
 
     #[test]

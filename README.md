@@ -3,8 +3,9 @@
 [![CI](https://github.com/timeToy34/agent-frow/actions/workflows/ci.yml/badge.svg)](https://github.com/timeToy34/agent-frow/actions/workflows/ci.yml)
 
 Your coding agents, on your keyboard's F-row. Each agent gets a lane of lit
-keys that shows what it is doing — working, done, **waiting for you** — and one
-press on the lane's key brings that agent's window to the front.
+keys that shows what it is doing — working, done, **waiting for you** — one
+press on the lane's key brings that agent's window to the front, and while it
+is waiting, three more keys answer it.
 
 https://github.com/user-attachments/assets/2d799d6d-d815-481b-9ae2-f113a0af6aeb
 
@@ -12,8 +13,8 @@ https://github.com/user-attachments/assets/2d799d6d-d815-481b-9ae2-f113a0af6aeb
 
 | Device | Shows | Needs | Status |
 |---|---|---|---|
-| **Corsair** keyboards through iCUE — K65 Plus Wireless, K70 TKL | the F-row as lanes: colour and motion per state; F13–F24 as summon keys | iCUE with third-party control on; the F-row remapped to F13–F24 in the default profile | verified |
-| **Keychron Ultra** — V3 Ultra 8K (the other Ultras speak the same protocol) | the F-row as lanes; summon keys from the Launcher keymap | the cable or the 2.4 GHz receiver, not Bluetooth; Keychron's per-key-brightness fix for true darks | verified |
+| **Corsair** keyboards through iCUE — K65 Plus Wireless, K70 TKL | the F-row as lanes: colour and motion per state; F13–F24 as the lanes' keys — summon, and ▲▼Enter while Waiting | iCUE with third-party control on; the F-row remapped to F13–F24 in the default profile | verified |
+| **Keychron Ultra** — V3 Ultra 8K (the other Ultras speak the same protocol) | the F-row as lanes; the same keys, from the Launcher keymap | the cable or the 2.4 GHz receiver, not Bluetooth; Keychron's per-key-brightness fix for true darks | verified |
 | **Elgato Stream Deck** — 2019 V2, 15 keys (every model with a screen, through the driver) | one row per lane: name, context, 5h, 7d, state; every key a summon; ▲▼Enter while Waiting | USB; the Stream Deck app closed | verified |
 | **The monitor** — mini mode | the same rows on screen, five keys each; click a key to summon | nothing | verified |
 | **Keychron V0** | the F-row as lanes | — | **next** |
@@ -37,10 +38,11 @@ it.
   would be missing.
 - **Display, and two presses.** It never answers a hook, never approves or
   denies anything, and never acts on its own; its reply to every hook is
-  empty. A lane's key brings the agent's window forward. On a Stream Deck,
-  while a lane is Waiting, its three middle keys send one Up, Down or Enter —
-  only into a terminal that verifiably has the keyboard. The agents talk to
-  it over loopback on your machine, and nothing leaves it. Of Claude's
+  empty. Any of a lane's keys brings the agent's window forward. While a lane
+  is Waiting, three of them — the lane's second, third and fourth on the
+  F-row, a row's three middle keys on a Stream Deck — send one Up, Down or
+  Enter, only into a terminal that verifiably has the keyboard. The agents
+  talk to it over loopback on your machine, and nothing leaves it. Of Claude's
   status-line JSON, three percentages reach the app — context used, the
   five-hour and seven-day limits — and the JSON goes on to your own status
   line untouched.
@@ -49,15 +51,16 @@ it.
 
 ### On the keys
 
-Twelve F-row keys, in 3, 4 or 6 lanes. Each lane has its own colour, and every
-state is that colour at some brightness and motion — a *change* of colour means
-trouble, and red means Error and nothing else.
+Twelve F-row keys, three lanes of four; more lanes live in the window and on a
+deck with the rows. Each lane has its own colour, and every state is that
+colour at some brightness and motion — a *change* of colour means trouble, and
+red means Error and nothing else.
 
 | State | On the keys | Meaning |
 |---|---|---|
 | Connected | all keys, dim | alive, nothing run yet |
 | Running | one light sweeping along the lane | working |
-| Waiting | first key full, the rest double-pulsing | **needs you** — a permission prompt or a question |
+| Waiting | first key full, the three after it double-pulsing — those are ▲ ▼ Enter | **needs you** — a permission prompt or a question |
 | Done | first key full, the rest dim | the turn finished |
 | Error | first key full, the rest dark red | the turn failed |
 | Idle | first key dim, the rest off | nothing heard for a while |
@@ -97,12 +100,13 @@ anywhere else to get the full window back.
 
 ### Focus
 
-Press the lane's key (or click Focus) and the window the agent runs in comes
-forward — Windows Terminal with the right tab in front (including a tab torn
-out into its own window), the Claude or Codex desktop app, or an IDE. No
+Press any of the lane's keys (or click Focus) and the window the agent runs in
+comes forward — Windows Terminal with the right tab in front (including a tab
+torn out into its own window), the Claude or Codex desktop app, or an IDE. No
 approvals, no key capture. Nothing is ever typed into a window that merely
-came forward: a Stream Deck's answer keys send their one key only after
-Windows says the terminal has the keyboard, and otherwise say "press again".
+came forward: the answer keys — on the keyboard or a Stream Deck — send their
+one key only after Windows says the terminal has the keyboard, and otherwise
+say "press again".
 
 The tab it looks for is the lane's name, then the project folder — so naming a
 lane is a feature. If no tab matches, it says so and lists the tabs it found,
@@ -141,7 +145,11 @@ registered, and when it was last heard from, with Install and Remove per agent.
 
 Two keyboards and a Stream Deck are supported, and all may be plugged in at
 once. On a keyboard the app touches only the twelve F-row LEDs and leaves the
-rest of the board to you.
+rest of the board to you. The F-row is three lanes of four keys: any key of a
+lane brings its agent forward, and while the lane is Waiting the three after
+the first are **Up, Down and Enter** — the same rule as a Stream Deck row,
+with the same care about where the keystroke goes. A held key is one answer,
+not a stream of them.
 
 **Corsair, through iCUE.** iCUE running with third-party control enabled,
 and the F-row remapped to F13–F24 in the **default** profile — a profile
@@ -152,7 +160,7 @@ layer above your own lighting.
 protocol).** No driver and nothing to install: the app uses the raw-HID
 protocol the Keychron Launcher itself uses, over the **cable or the 2.4 GHz
 receiver** — the firmware does not carry it over Bluetooth. Remap F1–F12 to
-F13–F24 in the Launcher keymap; that lives in the keyboard, so the summon
+F13–F24 in the Launcher keymap; that lives in the keyboard, so the lane
 keys work over Bluetooth too. The keyboard's mixed mode gives the F-row to the
 app and keeps your own effect on every other key (with your lighting off the
 app paints the rest black itself, so the Caps Lock indicator can still switch
@@ -189,7 +197,8 @@ status line is registered.
 
 ## Settings
 
-- Lane count — 3 × 4, 4 × 3 or 6 × 2 keys — and each lane's name and colour.
+- Lane count — three to six; the keyboard always carries lanes 1–3, four keys
+  each, and the rest are off it — and each lane's name and colour.
 - Brightness, and **Color balance** — a per-channel gain for keyboards whose
   LEDs do not match the screen — **per connected device**: each has its own
   line, brightness for all of them and colour balance for the keyboards (the

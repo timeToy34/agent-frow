@@ -788,6 +788,55 @@ fn a_waiting_lane_outranks_its_busy_subagents() {
 }
 
 #[test]
+fn a_lane_answers_only_while_waiting_and_never_under_a_preview() {
+    use agent_frow::tracker::Preview;
+    let mut tracker = tracker(4);
+    send(
+        &mut tracker,
+        "claude-wsl",
+        "s1",
+        "UserPromptSubmit",
+        "/home/j/api",
+        10,
+    );
+    send(
+        &mut tracker,
+        "claude-wsl",
+        "s2",
+        "UserPromptSubmit",
+        "/home/j/web",
+        11,
+    );
+    assert!(!tracker.answerable(0), "Running is not a question");
+    send(
+        &mut tracker,
+        "claude-wsl",
+        "s1",
+        "PermissionRequest",
+        "/home/j/api",
+        30,
+    );
+    assert!(tracker.answerable(0), "a permission prompt is");
+    assert!(
+        !tracker.answerable(1),
+        "the lane beside it is still working"
+    );
+    assert!(!tracker.answerable(2), "an empty lane has nobody to answer");
+
+    // A preview is a look, not a question: while one plays, nothing types.
+    tracker.preview = Some(Preview {
+        state: State::Waiting,
+        expires_at: u64::MAX,
+    });
+    assert!(!tracker.answerable(0));
+    tracker.preview = None;
+    assert!(
+        tracker.answerable(0),
+        "and the question is still there after"
+    );
+}
+
+#[test]
 fn a_silent_subagent_falls_off_the_roster_eventually() {
     use agent_frow::tracker::SUBAGENT_IDLE_MS;
     let mut tracker = tracker(4);

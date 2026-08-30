@@ -12,7 +12,7 @@
 //! brightness and in some motion, which is what lets a glance answer "which
 //! lane" and "how bad" as two separate questions.
 
-use crate::settings::{KEYS, Rgb, Settings, Tuning};
+use crate::settings::{KEYBOARD_LANES, KEYS, KEYS_PER_LANE, Rgb, Settings, Tuning};
 use crate::state::State;
 
 /// A lane with no session. The one colour that is not a preference: darkness is
@@ -113,6 +113,10 @@ fn scanner_weight(elapsed_ms: u64, period_ms: u64, index: usize, keys: usize) ->
 /// lane's colour at full brightness: that is which lane is talking. Connected
 /// and Running have nothing to report, so they get no marker — the whole lane
 /// is simply its colour, resting or with the runner crossing it.
+///
+/// In Waiting the keys that beat after the marker are, on the F-row, exactly
+/// the three answer keys: the pattern is the affordance, and needs no second
+/// one.
 pub fn lane_colors(
     state: Option<State>,
     lane_color: Rgb,
@@ -180,6 +184,9 @@ pub fn moves(state: State) -> bool {
 /// from whoever owns it. Naming twelve keys is all it takes to leave every
 /// other key to the user's own lighting, whichever keyboard renders it.
 ///
+/// The keyboard carries lanes 1–3 whatever the lane count, four keys each; a
+/// lane past them is another surface's to show, so it never names a key here.
+///
 /// `available` is which of the twelve the device actually has, so a keyboard
 /// without a full F-row is never handed keys it does not have; `tuning` is
 /// that device's own brightness and colour balance.
@@ -190,21 +197,20 @@ pub fn frame(
     elapsed_ms: u64,
     available: &[usize],
 ) -> Vec<(usize, Rgb)> {
-    let keys = settings.keys_per_lane();
     let brightness = tuning.brightness.clamp(0.0, 1.0);
     let mut frame = Vec::with_capacity(KEYS);
-    for lane in 0..settings.lane_count {
+    for lane in 0..settings.lane_count.min(KEYBOARD_LANES) {
         let lane_color = settings
             .lanes
             .get(lane)
             .map(|configured| configured.color)
             .unwrap_or(OFF);
         let state = states.get(lane).copied().flatten();
-        for (offset, color) in lane_colors(state, lane_color, keys, elapsed_ms)
+        for (offset, color) in lane_colors(state, lane_color, KEYS_PER_LANE, elapsed_ms)
             .into_iter()
             .enumerate()
         {
-            let key = lane * keys + offset;
+            let key = lane * KEYS_PER_LANE + offset;
             if available.contains(&key) {
                 frame.push((key, corrected(scale(color, brightness), tuning.color_gain)));
             }
@@ -280,13 +286,34 @@ mod tests {
         // The constraint the whole surface exists under: write the twelve and
         // leave the rest of the keyboard to whoever set it up.
         let available: Vec<usize> = (0..200).collect();
-        for lanes in [3, 4, 6] {
+        for lanes in crate::settings::LANE_COUNTS {
             let states = vec![Some(State::Running); lanes];
             let frame = frame(&states, &settings(lanes), FULL, 0, &available);
             assert_eq!(frame.len(), KEYS, "{lanes} lanes");
             for (key, _) in frame {
                 assert!(key < KEYS, "key {key} is not one of ours");
             }
+        }
+    }
+
+    #[test]
+    fn lanes_past_the_keyboard_have_no_keys() {
+        // Six lanes, and only the three past the keyboard have anything on
+        // them: the twelve keys stay dark, and nothing is named past them.
+        let available: Vec<usize> = (0..200).collect();
+        let states = [
+            None,
+            None,
+            None,
+            Some(State::Waiting),
+            Some(State::Error),
+            Some(State::Running),
+        ];
+        let frame = frame(&states, &settings(6), FULL, 0, &available);
+        assert_eq!(frame.len(), KEYS);
+        for (key, color) in frame {
+            assert!(key < KEYS, "key {key} is not one of ours");
+            assert_eq!(color, OFF, "key {key} lit by a lane that has no keys");
         }
     }
 

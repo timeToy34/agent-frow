@@ -3,9 +3,10 @@
 //!
 //! **The product's two actions.** Everything else is display: the app never
 //! answers a hook, never approves anything, never captures a key. Clicking a
-//! lane raises a window; and a Stream Deck's answer keys, while a lane is
-//! Waiting, raise the window and then send one Up, Down or Enter — only into
-//! a window that verifiably has the keyboard, never to gain it.
+//! lane raises a window; and the answer keys — a lane's three after its
+//! first on the F-row, a row's middle three on a Stream Deck — while the
+//! lane is Waiting, raise the window and then send one Up, Down or Enter —
+//! only into a window that verifiably has the keyboard, never to gain it.
 //!
 //! Two documented Windows facilities and no window-title guessing:
 //!

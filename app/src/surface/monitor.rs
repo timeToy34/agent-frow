@@ -8,11 +8,11 @@
 //! one here; an empty lane has no row at all, since a row that says nothing
 //! only costs the space it takes.
 //!
-//! A key is a summon and nothing more. The deck's answer keys are not
-//! repeated: a click on the screen is a click, and the surface mirrors the
-//! agents rather than driving them. Like the window it lives in, it is never
-//! brightness-scaled or colour-corrected — those exist to make LEDs match a
-//! screen, and this is the screen.
+//! A key is a summon and nothing more. The keyboard's and the deck's answer
+//! keys are not repeated: a click on the screen is a click, and the surface
+//! mirrors the agents rather than driving them. Like the window it lives in,
+//! it is never brightness-scaled or colour-corrected — those exist to make
+//! LEDs match a screen, and this is the screen.
 //!
 //! The rows are built here as plain data — the deck's own key vocabulary,
 //! [`Face`], [`Label`] and [`Ink`] — so they can be checked without a window;

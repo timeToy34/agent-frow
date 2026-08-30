@@ -23,6 +23,7 @@ use super::canvas::{self, Ink, Label};
 use super::device::{self, Deck, Found};
 use crate::focus::Key;
 use crate::gauges::Gauges;
+use crate::keys::Press;
 use crate::settings::Rgb;
 use crate::state::State;
 use crate::surface::palette;
@@ -329,19 +330,10 @@ pub fn faces(frame: &Frame<'_>, captions: &[Caption], rows: usize, cols: usize) 
     faces
 }
 
-/// What a press does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Press {
-    /// Bring the lane's agent forward.
-    Summon(usize),
-    /// Bring it forward and answer it with one key.
-    Answer(usize, Key),
-}
-
 /// What pressing `key` on a deck `cols` wide means, with `shown` lanes on it
 /// and the pressed row's lane `waiting` or not. Every key of a row summons
 /// its lane; in Waiting the three after the name answer instead. A key past
-/// the lanes is nothing.
+/// the lanes is nothing. The same [`Press`] the F-row's keys speak.
 pub fn press_of(key: usize, cols: usize, shown: usize, waiting: bool) -> Option<Press> {
     let cols = cols.max(1);
     let row = key / cols;
@@ -561,12 +553,7 @@ fn step(tracker: &Arc<Mutex<Tracker>>, scene: &Scene, ready: &mut Live) -> Resul
                     .iter()
                     .filter_map(|&key| {
                         let row = key / cols;
-                        // A preview is a look, not a question: it never types.
-                        let waiting = tracker.preview.is_none()
-                            && tracker
-                                .on_lane(row)
-                                .is_some_and(|s| s.effective_state() == State::Waiting);
-                        press_of(key, cols, shown, waiting)
+                        press_of(key, cols, shown, tracker.answerable(row))
                     })
                     .collect()
             };

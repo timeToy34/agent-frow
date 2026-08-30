@@ -1,5 +1,7 @@
-//! The summon keys: press the leftmost key of a lane and its agent comes
-//! forward.
+//! The F-row's keys: three lanes of four. Any key of a lane brings its agent
+//! forward; while the lane is Waiting, the three after the first answer it
+//! instead — Up, Down, Enter — the rule a Stream Deck row follows, on the
+//! keyboard.
 //!
 //! The app listens for **F13–F24**, not F1–F12. The F-row's ordinary meanings
 //! belong to every other application on the machine, so the user remaps the
@@ -15,12 +17,15 @@
 //! `WM_HOTKEY` is the physical input delivered to us, giving the summon the
 //! same foreground permission that clicking the Focus button gets. The OS also
 //! suppresses the registered F13–F24 keystrokes globally, and `MOD_NOREPEAT`
-//! replaces the key-up bookkeeping the hook used to need.
+//! replaces the key-up bookkeeping the hook used to need — and makes a held
+//! answer key one answer, not a stream of them.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::event::Ancestor;
+use crate::focus::Key;
+use crate::settings::{KEYBOARD_LANES, KEYS, KEYS_PER_LANE};
 use crate::tracker::Tracker;
 
 /// Stops the hotkey pump immediately, for the quit path.
@@ -52,22 +57,51 @@ pub fn stages() -> (u64, u64, u64) {
 pub const VK_F13: u32 = 0x7C;
 
 /// How many codes: F13 through F24, one per F-row key.
-pub const SUMMON_KEYS: usize = 12;
+pub const SUMMON_KEYS: usize = KEYS;
 
 /// The label a key index carries in the window: 0 → "F13".
 pub fn key_label(index: usize) -> String {
     format!("F{}", 13 + index)
 }
 
-/// Which lane a key index summons under `keys_per_lane`, if it is a lane's
-/// leftmost key — the marker key, the one lit at 100%.
-pub fn lane_of(index: usize, keys_per_lane: usize, lane_count: usize) -> Option<usize> {
-    let kpl = keys_per_lane.max(1);
-    if !index.is_multiple_of(kpl) {
+/// The keys a lane has on the keyboard, "F13–F16" — or `None` for a lane
+/// past the three the keyboard carries.
+pub fn lane_keys_label(lane: usize) -> Option<String> {
+    (lane < KEYBOARD_LANES).then(|| {
+        let first = lane * KEYS_PER_LANE;
+        format!(
+            "{}–{}",
+            key_label(first),
+            key_label(first + KEYS_PER_LANE - 1)
+        )
+    })
+}
+
+/// What a press on any surface does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Press {
+    /// Bring the lane's agent forward.
+    Summon(usize),
+    /// Bring it forward and answer it with one key.
+    Answer(usize, Key),
+}
+
+/// What pressing F-row key `index` (0 → F13) means with `lane_count` lanes,
+/// the key's lane `answerable` or not. The lane is the key's group of four;
+/// a key past the lanes the keyboard has is nothing. Every key of a lane
+/// summons it; while the lane is answerable the three after the first are
+/// Up, Down and Enter.
+pub fn press_of(index: usize, lane_count: usize, answerable: bool) -> Option<Press> {
+    let lane = index / KEYS_PER_LANE;
+    if lane >= lane_count.min(KEYBOARD_LANES) {
         return None;
     }
-    let lane = index / kpl;
-    (lane < lane_count).then_some(lane)
+    Some(match (answerable, index % KEYS_PER_LANE) {
+        (true, 1) => Press::Answer(lane, Key::Up),
+        (true, 2) => Press::Answer(lane, Key::Down),
+        (true, 3) => Press::Answer(lane, Key::Enter),
+        _ => Press::Summon(lane),
+    })
 }
 
 /// Handle to the running capture. Dropping it unregisters the hotkeys — which
@@ -99,24 +133,25 @@ pub fn start(tracker: Arc<Mutex<Tracker>>) -> Option<Keys> {
     }
 }
 
-/// One press, handled off the hotkey pump: record it, and if it is a lane's
-/// marker key, summon that lane's agent.
+/// One press, handled off the hotkey pump: record it, then do what it
+/// means. An answer blocks on the raise and on verifying where the keyboard
+/// is, which is why this runs on the worker and not the pump.
 fn handle_press(tracker: &Arc<Mutex<Tracker>>, index: usize) {
     HANDLED.fetch_add(1, Ordering::Relaxed);
-    let lane = {
+    let press = {
         let Ok(mut tracker) = tracker.lock() else {
             return;
         };
-        let now = crate::now_ms();
-        tracker.last_key = Some((index, now));
-        let settings = &tracker.settings;
-        let Some(lane) = lane_of(index, settings.keys_per_lane(), settings.lane_count) else {
-            // Not a marker key. Swallowed and recorded, nothing to do.
-            return;
-        };
-        lane
+        tracker.last_key = Some((index, crate::now_ms()));
+        let lane = index / KEYS_PER_LANE;
+        press_of(index, tracker.settings.lane_count, tracker.answerable(lane))
     };
-    summon_lane(tracker, lane);
+    match press {
+        Some(Press::Summon(lane)) => summon_lane(tracker, lane),
+        Some(Press::Answer(lane, key)) => answer_lane(tracker, lane, key),
+        // A key past the lanes: swallowed and recorded, nothing to do.
+        None => {}
+    }
 }
 
 /// Finds where a lane's agent is, does `act` to it, and records how that
@@ -145,8 +180,8 @@ fn act_on_lane(
 }
 
 /// Brings a lane's agent forward. The product's first action, shared by every
-/// surface with a button: the F-row's marker keys and a Stream Deck's row
-/// keys arrive here alike.
+/// surface with a button: the F-row's lane keys and a Stream Deck's row keys
+/// arrive here alike.
 pub fn summon_lane(tracker: &Arc<Mutex<Tracker>>, lane: usize) {
     act_on_lane(tracker, lane, |ancestors, names| {
         crate::focus::raise(ancestors, names).detail
@@ -154,7 +189,8 @@ pub fn summon_lane(tracker: &Arc<Mutex<Tracker>>, lane: usize) {
 }
 
 /// Brings a lane's agent forward and answers it with one key — the product's
-/// second action, from a Stream Deck's answer keys while the lane is Waiting.
+/// second action, from the F-row's or a Stream Deck's answer keys while the
+/// lane is Waiting.
 /// The key is sent only if the window that came forward verifiably has the
 /// keyboard; otherwise the press has focused the lane, and the status bar
 /// says what to do next.
@@ -348,27 +384,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_a_lanes_leftmost_key_summons_it_in_every_layout() {
-        // (keys_per_lane, lane_count) for the three layouts.
-        for (kpl, lanes) in [(4, 3), (3, 4), (2, 6)] {
+    fn every_key_of_a_lane_summons_it_and_none_reaches_a_lane_off_the_keyboard() {
+        // Whatever the lane count, the twelve keys are lanes 1–3, four each.
+        for lane_count in crate::settings::LANE_COUNTS {
             for index in 0..SUMMON_KEYS {
-                let expected = if index % kpl == 0 && index / kpl < lanes {
-                    Some(index / kpl)
-                } else {
-                    None
-                };
                 assert_eq!(
-                    lane_of(index, kpl, lanes),
-                    expected,
-                    "{kpl}x{lanes} key {index}"
+                    press_of(index, lane_count, false),
+                    Some(Press::Summon(index / KEYS_PER_LANE)),
+                    "{lane_count} lanes, key {index}"
                 );
             }
         }
+        assert_eq!(press_of(SUMMON_KEYS, 6, false), None, "past the F-row");
+    }
+
+    #[test]
+    fn while_a_lane_answers_its_three_keys_after_the_first_are_up_down_enter() {
+        assert_eq!(
+            press_of(0, 3, true),
+            Some(Press::Summon(0)),
+            "the first key still summons"
+        );
+        assert_eq!(press_of(1, 3, true), Some(Press::Answer(0, Key::Up)));
+        assert_eq!(press_of(2, 3, true), Some(Press::Answer(0, Key::Down)));
+        assert_eq!(press_of(3, 3, true), Some(Press::Answer(0, Key::Enter)));
+        assert_eq!(press_of(5, 3, true), Some(Press::Answer(1, Key::Up)));
+        assert_eq!(press_of(11, 3, true), Some(Press::Answer(2, Key::Enter)));
+        assert_eq!(
+            press_of(7, 3, false),
+            Some(Press::Summon(1)),
+            "not answerable: a summon like any other key"
+        );
     }
 
     #[test]
     fn keys_are_named_as_the_user_remapped_them() {
         assert_eq!(key_label(0), "F13");
         assert_eq!(key_label(11), "F24");
+        assert_eq!(lane_keys_label(0).as_deref(), Some("F13–F16"));
+        assert_eq!(lane_keys_label(2).as_deref(), Some("F21–F24"));
+        assert_eq!(lane_keys_label(3), None, "no keys past the keyboard");
     }
 }

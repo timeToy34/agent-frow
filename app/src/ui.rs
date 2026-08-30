@@ -21,7 +21,7 @@ use tray_icon::{TrayIcon, TrayIconBuilder, TrayIconEvent};
 use crate::agents::{self, Found};
 use crate::install;
 use crate::lastseen;
-use crate::settings::{self, AgentFilter, LANE_COUNTS, Rgb, SavedAgent};
+use crate::settings::{self, AgentFilter, KEYBOARD_LANES, LANE_COUNTS, Rgb, SavedAgent};
 use crate::state::State;
 use crate::surface::monitor::{self, Target};
 use crate::tracker::{self, Tracker};
@@ -727,18 +727,24 @@ fn lanes_panel(
                 *mini = true;
             }
             ui.add_space(8.0);
+            // How many lanes, plainly. The keyboard's three always have keys;
+            // a lane past them is for an agent with none.
             let mut count = tracker.settings.lane_count;
-            for option in LANE_COUNTS.iter().rev() {
-                let label = format!("{option} × {}", settings::KEYS / option);
+            for option in LANE_COUNTS.rev() {
+                let hover = if option == KEYBOARD_LANES {
+                    "Three lanes, all on the keyboard".to_owned()
+                } else {
+                    format!(
+                        "{option} lanes — lanes 1–{KEYBOARD_LANES} on the keyboard, the rest in \
+                         the window, in mini mode and on a deck with the rows"
+                    )
+                };
                 if ui
-                    .selectable_label(count == *option, label)
-                    .on_hover_text(format!(
-                        "{option} lanes of {} keys each",
-                        settings::KEYS / option
-                    ))
+                    .selectable_label(count == option, option.to_string())
+                    .on_hover_text(hover)
                     .clicked()
                 {
-                    count = *option;
+                    count = option;
                 }
             }
             if count != tracker.settings.lane_count {
@@ -747,13 +753,19 @@ fn lanes_panel(
             }
         });
     });
-    ui.label(
-        egui::RichText::new(format!(
-            "Twelve F-row keys, {} per lane. A lane keeps its position for as long as its session lives.",
-            tracker.settings.keys_per_lane()
-        ))
-        .weak(),
-    );
+    let keys = "Four keys per lane on the keyboard: any of them summons the agent, and while \
+                it is Waiting the three after the first are ▲ ▼ Enter. A lane keeps its \
+                position for as long as its session lives.";
+    let caption = if tracker.settings.lane_count > KEYBOARD_LANES {
+        format!(
+            "Lanes {}–{} have no keys. {keys}",
+            KEYBOARD_LANES + 1,
+            tracker.settings.lane_count
+        )
+    } else {
+        keys.to_owned()
+    };
+    ui.label(egui::RichText::new(caption).weak());
     ui.add_space(6.0);
 
     let views: Vec<Option<LaneView>> = (0..tracker.settings.lane_count)
@@ -922,12 +934,25 @@ fn lane_card(
                         config.lanes[index].color = Rgb::new(rgb[0], rgb[1], rgb[2]);
                         changed = true;
                     }
+                    // Which keys this lane is on the keyboard — or that it is
+                    // on none, which is worth seeing without hovering.
+                    let keys = crate::keys::lane_keys_label(index);
                     ui.label(
                         egui::RichText::new(format!("{}", index + 1))
                             .monospace()
                             .strong()
                             .color(accent),
-                    );
+                    )
+                    .on_hover_text(match &keys {
+                        Some(span) => format!("{span} on the keyboard"),
+                        None => format!(
+                            "Not on the keyboard — only lanes 1–{KEYBOARD_LANES} have keys; \
+                             shown here, in mini mode and on a deck with the rows"
+                        ),
+                    });
+                    if keys.is_none() {
+                        ui.label(egui::RichText::new("no keys").small().weak());
+                    }
                     // The name is load-bearing: milestone 4 finds a terminal tab by
                     // it. Empty means "whatever project is on this lane".
                     let hint = view
@@ -1058,14 +1083,24 @@ fn lane_card(
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             // Rightmost, because it is the one thing on this window
                             // that does something to the world outside it.
-                            if ui
-                                .small_button("Focus")
-                                .on_hover_text(
-                                    "Bring this agent's terminal forward, with its tab in front. \
-                                     Also on the lane's marker key, F13–F24.",
-                                )
-                                .clicked()
-                            {
+                            let hover = match crate::keys::lane_keys_label(index) {
+                                Some(span) => {
+                                    let first = index * settings::KEYS_PER_LANE;
+                                    format!(
+                                        "Bring this agent's terminal forward, with its tab in \
+                                         front. Also on {span}; while the lane is Waiting, \
+                                         {} {} {} answer it with Up, Down and Enter.",
+                                        crate::keys::key_label(first + 1),
+                                        crate::keys::key_label(first + 2),
+                                        crate::keys::key_label(first + 3),
+                                    )
+                                }
+                                None => "Bring this agent's terminal forward, with its tab in \
+                                         front. This lane has no keys on the keyboard; this \
+                                         button is it."
+                                    .to_owned(),
+                            };
+                            if ui.small_button("Focus").on_hover_text(hover).clicked() {
                                 actions.focus = Some(index);
                             }
                             changed |= save_controls(ui, index, view, config, actions);
@@ -1675,7 +1710,8 @@ fn keyboard_panel(ui: &mut egui::Ui, tracker: &mut Tracker) -> bool {
         let line = if received == 0 {
             "Summon: F13–F24 are registered, but none have arrived yet — remap the F-row \
              to F13–F24 in your keyboard's software (iCUE, or the Keychron Launcher \
-             keymap), then the leftmost key of each lane summons its agent."
+             keymap), then any key of a lane summons its agent, and the three after the \
+             first answer it while it is Waiting."
                 .to_owned()
         } else {
             // A press was seen and went missing on the way. Naming the stage

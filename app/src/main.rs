@@ -663,8 +663,9 @@ fn run(dialog_on_busy: bool, notice: Option<String>) -> Result<(), String> {
     let _keychron = surface::keychron::start(Arc::clone(&tracker));
     let _streamdeck = surface::streamdeck::start(Arc::clone(&tracker));
 
-    // The summon keys: F13–F24, which the user's iCUE profile maps the F-row
-    // to. Kept alive for the life of the app; dropping it unregisters them.
+    // The F-row's keys: F13–F24, which the user's keyboard software maps the
+    // F-row to — a lane's four summon it, and answer it while it is Waiting.
+    // Kept alive for the life of the app; dropping it unregisters them.
     let _keys = keys::start(Arc::clone(&tracker));
 
     // The window opens the way it was left. In mini mode that means already
