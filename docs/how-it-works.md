@@ -416,14 +416,14 @@ layout, image size, rotation and encoding; no driver, nothing linked.
   dash breaks like a space, on the deck only — over up to three lines, as
   large as the key allows. Ink is grey on a key that is dark on purpose (an
   empty lane is black with its name in grey, Idle is one dim name key and
-  the rest off), and otherwise between white with a shadow and black by
-  the key's luminance of the moment: white below a band around the point
-  where the two contrast equally (0.179, WCAG), black above it, and fading
-  from one to the other inside the band, the shadow sinking into the key as
-  the ink darkens — so a label on a pulsing key dims and darkens with it
-  instead of snapping the moment the key crosses a line, and still turns
-  with the runner rather than vanish into it. A deck shows as many lanes as
-  it has rows — three
+  the rest off), and otherwise decided for the lane rather than the
+  instant: a lane's keys only ever run between its 20% glow and its full
+  colour, so the ink that reads on each end is found (black above the
+  luminance where black and white contrast equally, 0.179 by WCAG; white
+  below) — if both ends agree, that is the ink, steady; if the full colour
+  wants black where the glow wants white, the ink fades between the two
+  along the same ramp the key is on. No shadow, and never a flip. A deck
+  shows as many lanes as it has rows — three
   on a 15-key deck — and the window says which; the rows past the lanes are
   black. `surface/streamdeck/canvas.rs` is the drawing and has no device in
   it.

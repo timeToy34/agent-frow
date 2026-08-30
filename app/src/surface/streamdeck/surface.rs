@@ -262,12 +262,12 @@ pub fn faces(frame: &Frame<'_>, captions: &[Caption], rows: usize, cols: usize) 
         let colours = row_colors(state, colour, cols, frame.elapsed_ms);
         for col in 0..cols {
             let key_colour = colours.get(col).copied().unwrap_or(palette::OFF);
-            // A dark lane is labelled quietly; a lit one in whatever reads
-            // on the key's colour right now — as the runner crosses a name,
-            // the ink turns with it rather than vanish into it.
+            // A dark lane is labelled quietly; a lit one in the ink chosen
+            // for its lane — steady, or fading with the key as the runner
+            // crosses it, rather than vanishing into it.
             let ink = match state {
                 None | Some(State::Idle) => Ink::Quiet,
-                Some(_) => Ink::on(key_colour),
+                Some(_) => Ink::on(key_colour, colour),
             };
             let label = match role(col, cols) {
                 Role::Name => Label::Name(caption.map(|c| c.name.clone()).unwrap_or_default()),
@@ -763,7 +763,7 @@ mod tests {
         assert!(row.iter().all(|key| key.ink != Ink::Quiet));
         assert_eq!(
             row[0].ink,
-            Ink::on(colour),
+            Ink::on(colour, colour),
             "the name key's ink suits its colour"
         );
     }

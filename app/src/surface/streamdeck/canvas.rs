@@ -28,9 +28,8 @@ pub const FONT: &str = "segoeuib.ttf";
 /// The stand-in, by egui's name for it: the window's own face.
 pub const FALLBACK_FONT: &str = "Ubuntu-Light";
 
-/// Ink on a lit key: white, shadowed so it reads on any lane colour.
+/// Ink on a black key: white. On every other lit key, that much darker.
 const INK: [u8; 3] = [255, 255, 255];
-const SHADOW: [u8; 3] = [0, 0, 0];
 
 /// Ink on a dark key — an empty or idle lane. A label, not a light: grey is
 /// neither a lane's colour nor red, and dim enough not to take the eye.
@@ -105,58 +104,51 @@ pub enum Label {
 }
 
 /// How the label is drawn: quietly on a key that is meant to be dark, and
-/// otherwise somewhere between white with a shadow on a dark key and black
-/// on a light one — white text on a light blue is what an LCD makes of
-/// "white with a shadow", and nobody could read it. Between the two the ink
-/// fades rather than flips, so a label on a pulsing key dims and darkens
-/// with the key instead of snapping the moment it crosses a line.
+/// otherwise in the ink that reads on the key — decided for the lane, not
+/// the instant. A lane's keys only ever run between its glow and its full
+/// colour, so the ink is chosen at both ends: if the same ink reads on
+/// both, that is the ink, steady; if the full colour wants black where the
+/// glow wants white, the ink fades between the two along the same ramp the
+/// key is on. No shadow, and never a flip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ink {
-    /// Grey, no shadow — for a key that is dark on purpose: an empty or
-    /// idle lane.
+    /// Grey — for a key that is dark on purpose: an empty or idle lane.
     Quiet,
-    /// On a lit key: how far from white with a shadow (0) towards black
-    /// without one (255).
+    /// On a lit key: how far from white (0) towards black (255).
     Lit(u8),
 }
 
-/// The luminance band the ink crosses over in. Black and white contrast
-/// equally against a background of luminance 0.179 by the WCAG arithmetic —
-/// the one number in here that is not taste — so the band sits either side
-/// of it: white below, black above, and the fade between.
-const FADE_FROM: f32 = 0.08;
-const FADE_TO: f32 = 0.32;
-
 impl Ink {
-    /// White with a shadow, for a dark key.
+    /// White, for a dark key.
     pub const BRIGHT: Self = Self::Lit(0);
     /// Black, for a light key.
     pub const DARK: Self = Self::Lit(255);
 
-    /// The ink that reads on `colour`: white on the dark side of the band,
-    /// black on the light side, and on its way from one to the other inside
-    /// it.
-    pub fn on(colour: Rgb) -> Self {
-        let t = smoothstep(FADE_FROM, FADE_TO, luminance(colour));
-        Self::Lit((t * 255.0).round() as u8)
+    /// The ink for a key showing `colour` on a lane whose colour is `lane`.
+    pub fn on(colour: Rgb, lane: Rgb) -> Self {
+        let low = palette::base(lane);
+        let (at_low, at_full) = (reads_on(low), reads_on(lane));
+        if at_low == at_full {
+            return Self::Lit(at_low);
+        }
+        // Where the key is between the glow and the full colour, by
+        // brightness — the ramp the palette dims along.
+        let (from, to) = (f32::from(brightness(low)), f32::from(brightness(lane)));
+        let t = if to > from {
+            ((f32::from(brightness(colour)) - from) / (to - from)).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let darkness = f32::from(at_low) + (f32::from(at_full) - f32::from(at_low)) * t;
+        Self::Lit(darkness.round() as u8)
     }
 }
 
-/// 0.0 at `from`, 1.0 at `to`, eased between and flat outside.
-fn smoothstep(from: f32, to: f32, value: f32) -> f32 {
-    let t = ((value - from) / (to - from)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
-/// `from` at 0, `to` at 255, straight between.
-fn mix(from: [u8; 3], to: [u8; 3], amount: u8) -> [u8; 3] {
-    let t = f32::from(amount) / 255.0;
-    let channel = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8;
-    [
-        channel(from[0], to[0]),
-        channel(from[1], to[1]),
-        channel(from[2], to[2]),
-    ]
+/// Which of black (255) and white (0) reads on `colour`: black above the
+/// luminance where the two contrast equally against a background — 0.179
+/// by the WCAG arithmetic, the one number in here that is not taste.
+fn reads_on(colour: Rgb) -> u8 {
+    if luminance(colour) > 0.179 { 255 } else { 0 }
 }
 
 /// Relative luminance, 0.0 black to 1.0 white, from sRGB.
@@ -172,26 +164,25 @@ fn luminance(colour: Rgb) -> f32 {
     0.2126 * linear(colour.r) + 0.7152 * linear(colour.g) + 0.0722 * linear(colour.b)
 }
 
+/// How bright a colour looks, 0 black to 255 white: the usual weights on
+/// the channels as the key is sent them — the ramp the palette dims along,
+/// so the ink and the key move together.
+fn brightness(colour: Rgb) -> u8 {
+    (0.2126 * f32::from(colour.r) + 0.7152 * f32::from(colour.g) + 0.0722 * f32::from(colour.b))
+        .round() as u8
+}
+
 #[derive(Clone, Copy)]
 struct Paint {
     colour: [u8; 3],
-    shadow: Option<[u8; 3]>,
 }
 
 impl Paint {
-    /// The paint for `ink` on a key of `background`: a lit ink's colour is
-    /// its point between white and black, and its shadow sinks into the key
-    /// as the ink darkens, so neither arrives nor leaves all at once.
-    fn of(ink: Ink, background: Rgb) -> Self {
+    fn of(ink: Ink) -> Self {
         match ink {
-            Ink::Quiet => Paint {
-                colour: QUIET_INK,
-                shadow: None,
-            },
+            Ink::Quiet => Paint { colour: QUIET_INK },
             Ink::Lit(darkness) => Paint {
-                colour: mix(INK, SHADOW, darkness),
-                shadow: (darkness < 255)
-                    .then(|| mix(SHADOW, [background.r, background.g, background.b], darkness)),
+                colour: INK.map(|channel| channel - darkness),
             },
         }
     }
@@ -207,7 +198,7 @@ pub fn blank(size: (usize, usize)) -> Canvas {
 /// whose inputs have not changed.
 pub fn render_key(size: (usize, usize), colour: Rgb, label: &Label, ink: Ink) -> Canvas {
     let mut canvas = Canvas::filled(size.0, size.1, colour);
-    let paint = Paint::of(ink, colour);
+    let paint = Paint::of(ink);
     // Sized for a 72 px key and scaled with the height for the larger ones.
     let height = canvas.height as f32;
     let scale = height / 72.0;
@@ -334,9 +325,6 @@ fn draw_triangle(canvas: &mut Canvas, up: bool, paint: Paint) {
             }
         }
     };
-    if let Some(shadow) = paint.shadow {
-        fill(canvas, shadow, 1, 1);
-    }
     fill(canvas, paint.colour, 0, 0);
 }
 
@@ -519,18 +507,6 @@ fn draw_text(
     let x = (canvas.width as f32 - width) / 2.0;
     let text_height = scaled.ascent() - scaled.descent();
     let baseline = band.0 as f32 + ((band.1 - band.0) as f32 - text_height) / 2.0 + scaled.ascent();
-    if let Some(shadow) = paint.shadow {
-        draw_run(
-            canvas,
-            font,
-            scale,
-            &shown,
-            x + 1.0,
-            baseline + 1.0,
-            band,
-            shadow,
-        );
-    }
     draw_run(canvas, font, scale, &shown, x, baseline, band, paint.colour);
 }
 
@@ -726,37 +702,44 @@ mod tests {
     }
 
     #[test]
-    fn ink_follows_the_background() {
-        assert_eq!(Ink::on(Rgb::new(80, 170, 255)), Ink::DARK, "light blue");
-        assert_eq!(Ink::on(Rgb::new(250, 190, 60)), Ink::DARK, "yellow");
+    fn ink_is_chosen_for_the_lane_and_fades_only_when_its_ends_disagree() {
+        // A dark lane: white reads on its full colour as on its glow, so
+        // the ink is white throughout — no fade.
+        let navy = Rgb::new(0, 60, 160);
+        assert_eq!(Ink::on(navy, navy), Ink::BRIGHT);
+        assert_eq!(Ink::on(palette::base(navy), navy), Ink::BRIGHT);
         assert_eq!(
-            Ink::on(palette::base(Rgb::new(80, 170, 255))),
+            Ink::on(Rgb::new(0, 36, 96), navy),
             Ink::BRIGHT,
-            "its glow"
+            "halfway up, still white"
         );
-        assert_eq!(Ink::on(Rgb::new(0, 0, 0)), Ink::BRIGHT, "black");
-        assert_eq!(Ink::on(palette::DARK_RED), Ink::BRIGHT, "dark red");
-        assert_eq!(Ink::on(Rgb::new(255, 255, 255)), Ink::DARK, "white");
+        // A light lane: black on its full colour, white on its glow, and
+        // the greys between as the key moves from one to the other.
+        let blue = Rgb::new(80, 170, 255);
+        assert_eq!(Ink::on(blue, blue), Ink::DARK);
+        assert_eq!(Ink::on(palette::base(blue), blue), Ink::BRIGHT);
+        let Ink::Lit(mid) = Ink::on(Rgb::new(48, 102, 153), blue) else {
+            panic!("a lit key");
+        };
+        assert!(0 < mid && mid < 255, "halfway up: {mid}");
+        // Error's dark red on a light lane sits at the dark end of the ramp.
+        assert_eq!(Ink::on(palette::DARK_RED, blue), Ink::BRIGHT);
+        let white = Rgb::new(255, 255, 255);
+        assert_eq!(Ink::on(white, white), Ink::DARK);
     }
 
     #[test]
-    fn ink_fades_through_the_band_rather_than_flipping() {
-        let Ink::Lit(mid) = Ink::on(Rgb::new(110, 110, 110)) else {
-            panic!("a lit key");
-        };
-        assert!(0 < mid && mid < 255, "grey 110 is inside the band: {mid}");
-        let Ink::Lit(later) = Ink::on(Rgb::new(150, 150, 150)) else {
-            panic!("a lit key");
-        };
+    fn the_ink_is_one_straight_ramp_with_no_shadow() {
+        assert_eq!(Paint::of(Ink::Lit(128)).colour, [127, 127, 127]);
+        assert_eq!(Paint::of(Ink::BRIGHT).colour, INK);
+        assert_eq!(Paint::of(Ink::DARK).colour, [0, 0, 0]);
+        // A white triangle on a black key and nothing else: no shadow.
+        let key = render_key(SIZE, Rgb::new(0, 0, 0), &Label::Up, Ink::BRIGHT);
+        let pixels: Vec<[u8; 3]> = key.rgb.chunks(3).map(|px| [px[0], px[1], px[2]]).collect();
         assert!(
-            mid < later,
-            "darker ink on the lighter key: {mid} < {later}"
+            pixels.iter().all(|px| *px == [0, 0, 0] || *px == INK),
+            "black key, white ink, nothing between"
         );
-        // Halfway, the shadow is halfway into the key and the ink mid-grey.
-        let paint = Paint::of(Ink::Lit(128), Rgb::new(100, 100, 100));
-        assert_eq!(paint.colour, [127, 127, 127]);
-        assert_eq!(paint.shadow, Some([50, 50, 50]));
-        assert_eq!(Paint::of(Ink::DARK, Rgb::new(100, 100, 100)).shadow, None);
     }
 
     #[test]

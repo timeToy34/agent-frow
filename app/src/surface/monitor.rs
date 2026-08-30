@@ -225,7 +225,7 @@ fn faces(
             let ink = if state == State::Idle {
                 Ink::Quiet
             } else {
-                Ink::on(key_colour)
+                Ink::on(key_colour, colour)
             };
             let label = match role(col, COLS) {
                 Role::Name => Label::Name(name.to_owned()),
@@ -304,12 +304,8 @@ fn colour32(colour: Rgb) -> egui::Color32 {
 fn ink_colour(ink: Ink) -> egui::Color32 {
     match ink {
         Ink::Quiet => egui::Color32::from_gray(140),
-        // White through to near-black, as far along as the key's luminance
-        // has taken it — the deck's fade, on the screen.
-        Ink::Lit(darkness) => {
-            let travelled = (f32::from(darkness) * (255.0 - 16.0) / 255.0).round() as u8;
-            egui::Color32::from_gray(255 - travelled)
-        }
+        // The deck's ramp, on the screen: as dark as the key is bright.
+        Ink::Lit(darkness) => egui::Color32::from_gray(255 - darkness),
     }
 }
 
