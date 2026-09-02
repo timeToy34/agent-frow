@@ -26,7 +26,8 @@ else
 fi
 CONF="app/boards/shields/$SHIELD/$SHIELD.conf"
 [ -f "$CONF" ] || { echo "no shield $SHIELD (see app/boards/shields/)" >&2; exit 1; }
-MODEL="$(sed -n 's/^CONFIG_KEYCHRON_FWU_STRING_NAME="\(.*\)"/\1/p' "$CONF")"
+# tr strips the \r of a CRLF conf file (the V0 Ultra's shield has one).
+MODEL="$(sed -n 's/^CONFIG_KEYCHRON_FWU_STRING_NAME="\(.*\)"/\1/p' "$CONF" | tr -d '\r')"
 
 docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull "$IMAGE"
 echo ">> building $SHIELD (first run initialises the west workspace: several minutes)"

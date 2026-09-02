@@ -50,6 +50,37 @@ impl Found {
     }
 }
 
+/// Paths a surface is currently holding. Two surfaces share this bus — the
+/// Ultra F-row and the V0 numpad are the same usage pair to the filter below
+/// — and a probe from one on an interface the other is driving would eat its
+/// echoes. So: claim before opening, keep the claim as long as the
+/// connection, and skip what another surface holds.
+static CLAIMED: std::sync::Mutex<std::collections::BTreeSet<String>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// A held interface, freed when dropped. Keep it exactly as long as the
+/// transport opened for it.
+#[derive(Debug)]
+pub struct Claim {
+    path: String,
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        if let Ok(mut claimed) = CLAIMED.lock() {
+            claimed.remove(&self.path);
+        }
+    }
+}
+
+/// Claims `found` for the calling surface — `None` while another holds it.
+pub fn claim(found: &Found) -> Option<Claim> {
+    let mut claimed = CLAIMED.lock().ok()?;
+    claimed.insert(found.path.clone()).then(|| Claim {
+        path: found.path.clone(),
+    })
+}
+
 /// Whether `reply` answers `sent`: the command byte echoes, and for the
 /// per-key group the sub-command too. Anything else is the keyboard talking
 /// on its own — a layer change, say — and not what was asked for.
@@ -164,8 +195,23 @@ mod platform {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_claimed_path_is_held_until_the_claim_drops() {
+        let found = Found {
+            product_id: 0x0800,
+            product: "V0 Ultra".to_owned(),
+            path: "test-claim-path".to_owned(),
+        };
+        let first = claim(&found).expect("free to claim");
+        assert!(claim(&found).is_none(), "held by the first surface");
+        drop(first);
+        let again = claim(&found).expect("freed by the drop");
+        drop(again);
+    }
 
     #[test]
     fn a_push_is_not_an_echo() {

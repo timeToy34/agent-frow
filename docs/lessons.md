@@ -229,6 +229,34 @@ hook, or the lighting.
   `ui.scope_builder(UiBuilder::new().sense(..))`, which registers the sense
   below whatever the closure adds — the mini-mode double-click on a card works
   that way, and the buttons on it still work.
+- **Two boards, one protocol, one bus.** A V0 Ultra and a V3 Ultra answer
+  the same handshake on the same usage pair, and two surface threads probing
+  one interface eat each other's echoes. The fix is structural, not polite
+  timing: a process-wide claim registry in `keychron/hid.rs` — claim before
+  opening, hold the claim as long as the connection — plus an accept check
+  (LED count) so each surface keeps only its own board.
+- **The V0 Ultra's LED map is the Q0 Max's, byte for byte.** Keychron's ZMK
+  numpad and their QMK numpad share `rgb_matrix_config.h`: 26 LEDs, the
+  shape keys at 0–3, M1–M5 at 4/9/14/18/23, the knob a matrix position with
+  no LED. The geometry seam (`session::Geometry`) would drive either; only
+  the firmware fix differs (the ZMK PR #9 build vs a QMK one-liner).
+- **The Launcher cannot type a chord.** Its key picker lists plain keycodes,
+  and its key-combo mode records only a key you physically press — so
+  Ctrl+Shift+F13 on a numpad cannot be entered from the UI at all. The way in
+  is the Keymap tab's own Export/Import: a JSON of QMK-style 16-bit codes
+  (`0x0300 | KC_F13` is Ctrl+Shift+F13), knob directions as QMK name strings
+  (`LCTL(LSFT(KC_F13))` parses), guarded by an MD5 of the keymap array and the
+  board's id. Read the importer in the Launcher's own bundle before guessing at
+  a format; the file the repo ships came out of that reading, not out of trial.
+- **The caps' order was a guess; the pattern was not.** The V0 plan named the
+  top row ○△□✕ left to right and bound roles by legend — ✕ summons, the
+  others answer. On the board ✕ is the first cap, so the first key sent the
+  ⏶ chord and did nothing outside Waiting. Meanwhile the drawing had been
+  right all along: `lane_colors` puts the steady marker on the first key and
+  the beating answer keys after it, the F-row's picture. The fix bound the
+  top line the way it was drawn — by position, through the same `lane_press`
+  rule as the F-row — and the keymap file did not change. Bind to what the
+  surface shows, not to a legend nobody has held in their hand.
 
 ## State of the work
 
@@ -244,6 +272,12 @@ hook, or the lighting.
 - **M7 — the monitor**, mini mode: one row per agent with a session,
   off-keyboard sessions included, five keys each, a key click as the summon;
   no title bar, place and size remembered. Done.
+- **M8 — Keychron V0 Ultra numpad**: a knob-selected top line in the classic
+  lane patterns, an agent column on M1–M5, selection and lock on the
+  tracker, Ctrl+Shift chord input, the Waiting-foreground poll. Built and
+  tested against the scripted board 2026-08-30; verified on two boards
+  2026-09-02 — the firmware fix, the knob, the lock, the M keys and the
+  top line.
 
 `app/src/surface/corsair/` and `app/src/focus/` are the only code carried over
 from the previous version, because they were the only parts that demonstrably

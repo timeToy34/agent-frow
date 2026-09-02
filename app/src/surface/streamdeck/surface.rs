@@ -48,8 +48,7 @@ const RETRY: Duration = Duration::from_secs(10);
 const RESTORE_GRACE: Duration = Duration::from_millis(500);
 
 /// Why the deck is not taken while its own software is up.
-const APP_RUNNING: &str =
-    "the Stream Deck app is running — quit it to let Agent F-Row drive the deck";
+const APP_RUNNING: &str = "the Stream Deck app is running — quit it to hand the deck over";
 
 /// A row needs this many keys to carry the three answers between its name
 /// and its state.
@@ -582,13 +581,13 @@ fn step(tracker: &Arc<Mutex<Tracker>>, scene: &Scene, ready: &mut Live) -> Resul
         };
         let wanted = faces(&frame, &captions, ready.layout.rows, cols);
         paint_changed(ready.deck.as_mut(), &mut ready.shown, &wanted)
-            .map_err(|reason| format!("{reason}; reconnecting"))?;
+            .map_err(|_| "disconnected — reconnecting".to_owned())?;
     }
 
     if let Some(buttons) = ready
         .deck
         .poll(FRAME)
-        .map_err(|reason| format!("{reason}; reconnecting"))?
+        .map_err(|_| "disconnected — reconnecting".to_owned())?
     {
         let edges = pressed(&ready.buttons, &buttons);
         ready.buttons = buttons;
@@ -610,6 +609,9 @@ fn step(tracker: &Arc<Mutex<Tracker>>, scene: &Scene, ready: &mut Live) -> Resul
                 match press {
                     Press::Summon(lane) => act(tracker, lane, None),
                     Press::Answer(lane, key) => act(tracker, lane, Some(key)),
+                    // Selection and lock are the numpad's; a deck key never
+                    // produces them.
+                    _ => {}
                 }
             }
         }
@@ -641,7 +643,7 @@ fn connect() -> Result<(Box<dyn Deck>, Found), String> {
     }
     let found = device::find()?;
     let Some(first) = found.first() else {
-        return Err("no Stream Deck on USB".to_owned());
+        return Err("not detected".to_owned());
     };
     let deck = device::open(first)?;
     Ok((deck, first.clone()))

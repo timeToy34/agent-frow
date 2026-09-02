@@ -40,6 +40,22 @@ const SCANNER_PERIOD_MS: u64 = 1400;
 /// the beats read as urgent, which nothing else on the board is allowed to.
 const PULSE_PERIOD_MS: u64 = 1200;
 
+/// One low-to-full breathe of a Running agent on a single key — the numpad's
+/// M column, where a lane is one key and the scanner has nowhere to travel.
+const BREATHE_PERIOD_MS: u64 = 2000;
+
+/// One single-pulse cycle of Done on a single key: a beat, then a long quiet.
+/// Slower than Waiting's urgent pair — finished is news, not a question.
+const DONE_PERIOD_MS: u64 = 2400;
+
+/// One colour-to-white-and-back fade of the locked agent's key.
+const LOCK_PERIOD_MS: u64 = 2400;
+
+/// Where the selected agent's key rests: its envelope is lifted from
+/// `BASE..1.0` to this floor, so the selected key reads brighter than its
+/// neighbours at a glance while its motion survives. Owner-eye constant.
+const SELECTED_FLOOR: f32 = 0.55;
+
 /// Per-channel calibration, last thing before the wire: some keyboards render
 /// a colour completely differently from the screen (blue too strong, red too
 /// weak), and a gain is the honest model for that — black stays black, dim
@@ -160,6 +176,80 @@ pub fn lane_colors(
             .map(|index| if index == 0 { base } else { OFF })
             .collect(),
     }
+}
+
+/// One beat and a rest, `0.0..=1.0` — [`double_pulse`]'s calm sibling.
+fn single_pulse(elapsed_ms: u64, period_ms: u64) -> f32 {
+    let period = period_ms.max(1);
+    let phase = (elapsed_ms % period) as f32 / period as f32;
+    if phase < 0.25 {
+        triangle((elapsed_ms % period) * 4, period)
+    } else {
+        0.0
+    }
+}
+
+/// One agent as one key — the numpad's M column. The owner's table:
+/// Connected and Idle rest at the glow; Running breathes low to full; Waiting
+/// double-pulses, unless the agent's terminal is the foreground window, in
+/// which case the key holds full and the top line does the pulsing; Done
+/// beats once a cycle; Error is the fixed red, steady. The selected agent's
+/// key carries the same motion lifted onto a brighter floor, which is how the
+/// column says which agent the top line is showing.
+pub fn m_key(
+    state: Option<State>,
+    lane_color: Rgb,
+    elapsed_ms: u64,
+    selected: bool,
+    terminal_foreground: bool,
+) -> Rgb {
+    let Some(state) = state else {
+        return OFF;
+    };
+    let level = |raw: f32| {
+        let lifted = if selected {
+            SELECTED_FLOOR + (1.0 - SELECTED_FLOOR) * ((raw - BASE) / (1.0 - BASE)).clamp(0.0, 1.0)
+        } else {
+            raw
+        };
+        scale(lane_color, lifted)
+    };
+    let over_glow = |beat: f32| BASE + (1.0 - BASE) * beat;
+    match state {
+        State::Error => DARK_RED,
+        State::Connected | State::Idle => level(BASE),
+        State::Running => level(over_glow(triangle(elapsed_ms, BREATHE_PERIOD_MS))),
+        State::Waiting if terminal_foreground => level(1.0),
+        State::Waiting => level(over_glow(double_pulse(elapsed_ms, PULSE_PERIOD_MS))),
+        State::Done => level(over_glow(single_pulse(elapsed_ms, DONE_PERIOD_MS))),
+    }
+}
+
+/// The locked agent's key: the lane's colour at full, fading to white and
+/// back. White is the one shade no lane may own and no state pattern uses, so
+/// it can mean exactly one thing — pinned.
+pub fn lock_blend(lane_color: Rgb, elapsed_ms: u64) -> Rgb {
+    let toward = triangle(elapsed_ms, LOCK_PERIOD_MS);
+    let channel = |value: u8| {
+        (f32::from(value) + (255.0 - f32::from(value)) * toward)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    Rgb::new(
+        channel(lane_color.r),
+        channel(lane_color.g),
+        channel(lane_color.b),
+    )
+}
+
+/// A device's own brightness and colour balance, last thing before its wire —
+/// what [`frame`] does for the F-row, for a surface that composes its keys
+/// itself.
+pub fn tune(color: Rgb, tuning: Tuning) -> Rgb {
+    corrected(
+        scale(color, tuning.brightness.clamp(0.0, 1.0)),
+        tuning.color_gain,
+    )
 }
 
 /// Whether any of these states needs a fresh frame every tick. Everything
@@ -430,5 +520,110 @@ mod tests {
         {
             assert!(low.r <= full.r && low.g <= full.g && low.b <= full.b);
         }
+    }
+
+    #[test]
+    fn a_single_pulse_is_one_beat_and_a_long_rest() {
+        let period = DONE_PERIOD_MS;
+        assert_eq!(single_pulse(0, period), 0.0);
+        assert_eq!(single_pulse(period / 8, period), 1.0, "the beat's peak");
+        for elapsed in (period / 4..period).step_by(50) {
+            assert_eq!(single_pulse(elapsed, period), 0.0, "resting at {elapsed}ms");
+        }
+        for elapsed in (0..period).step_by(25) {
+            let level = single_pulse(elapsed, period);
+            assert!((0.0..=1.0).contains(&level));
+        }
+    }
+
+    #[test]
+    fn an_m_key_follows_the_owners_table() {
+        // Empty is dark; Connected and Idle rest at the glow.
+        assert_eq!(m_key(None, LANE, 123, false, false), OFF);
+        for quiet in [State::Connected, State::Idle] {
+            assert_eq!(m_key(Some(quiet), LANE, 123, false, false), base(LANE));
+        }
+        // Error is the fixed red whatever the lane colour or selection.
+        for selected in [false, true] {
+            assert_eq!(
+                m_key(
+                    Some(State::Error),
+                    Rgb::new(90, 210, 130),
+                    55,
+                    selected,
+                    false
+                ),
+                DARK_RED
+            );
+        }
+        // Waiting with the terminal focused holds full — the top line beats.
+        assert_eq!(m_key(Some(State::Waiting), LANE, 999, false, true), LANE);
+        // Waiting unfocused beats between the glow and full.
+        let mut seen_high = false;
+        let mut seen_low = false;
+        for elapsed in (0..PULSE_PERIOD_MS).step_by(25) {
+            let color = m_key(Some(State::Waiting), LANE, elapsed, false, false);
+            seen_high |= color == LANE;
+            seen_low |= color == base(LANE);
+        }
+        assert!(seen_high && seen_low, "the pulse spans glow to full");
+        // Running breathes: it moves, and never sinks below the glow.
+        let floor = base(LANE);
+        let samples: Vec<Rgb> = (0..BREATHE_PERIOD_MS)
+            .step_by(100)
+            .map(|elapsed| m_key(Some(State::Running), LANE, elapsed, false, false))
+            .collect();
+        assert!(samples.windows(2).any(|pair| pair[0] != pair[1]));
+        for color in &samples {
+            assert!(color.r >= floor.r && color.g >= floor.g && color.b >= floor.b);
+        }
+    }
+
+    #[test]
+    fn the_selected_key_rests_brighter_and_keeps_its_motion() {
+        let resting = m_key(Some(State::Connected), LANE, 0, false, false);
+        let selected = m_key(Some(State::Connected), LANE, 0, true, false);
+        assert!(
+            selected.r > resting.r || selected.g > resting.g || selected.b > resting.b,
+            "{selected:?} should out-glow {resting:?}"
+        );
+        // Full stays full: a selected Waiting-focused key is exactly the colour.
+        assert_eq!(m_key(Some(State::Waiting), LANE, 7, true, true), LANE);
+        // And a selected Running still visibly breathes.
+        let samples: Vec<Rgb> = (0..BREATHE_PERIOD_MS)
+            .step_by(100)
+            .map(|elapsed| m_key(Some(State::Running), LANE, elapsed, true, false))
+            .collect();
+        assert!(samples.windows(2).any(|pair| pair[0] != pair[1]));
+    }
+
+    #[test]
+    fn the_lock_fade_runs_the_lane_colour_to_pure_white_and_back() {
+        // A lane with headroom on every channel, so "never darker" is a real
+        // check on all three (LANE's blue is already full).
+        let lane = Rgb::new(80, 170, 200);
+        assert_eq!(lock_blend(lane, 0), lane, "starts as the lane");
+        let peak = lock_blend(lane, LOCK_PERIOD_MS / 2);
+        assert_eq!(peak, Rgb::new(255, 255, 255), "full white at the peak");
+        for elapsed in (0..LOCK_PERIOD_MS).step_by(50) {
+            let color = lock_blend(lane, elapsed);
+            assert!(
+                color.r >= lane.r && color.g >= lane.g && color.b >= lane.b,
+                "never darker than the lane: {color:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tune_composes_brightness_and_gain_like_the_f_row_does() {
+        let tuning = Tuning {
+            brightness: 0.5,
+            color_gain: [1.0, 0.5, 2.0],
+        };
+        assert_eq!(
+            tune(Rgb::new(200, 200, 100), tuning),
+            Rgb::new(100, 50, 100)
+        );
+        assert_eq!(tune(OFF, tuning), OFF, "black stays black");
     }
 }

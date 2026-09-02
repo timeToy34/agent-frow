@@ -59,9 +59,20 @@ pub const VK_F13: u32 = 0x7C;
 /// How many codes: F13 through F24, one per F-row key.
 pub const SUMMON_KEYS: usize = KEYS;
 
-/// The label a key index carries in the window: 0 → "F13".
+/// The numpad's controls: the same twelve codes again, under Ctrl+Shift —
+/// knob CCW/CW/press, M1–M5, then the top line's four keys left to right.
+/// The user imports the keymap file into the Keychron Launcher; bare F13–F24
+/// belong to the F-row.
+pub const NUMPAD_KEYS: usize = 12;
+
+/// The label a key index carries in the window: 0 → "F13"; the numpad's
+/// chords follow, 12 → "Ctrl+Shift+F13".
 pub fn key_label(index: usize) -> String {
-    format!("F{}", 13 + index)
+    if index < SUMMON_KEYS {
+        format!("F{}", 13 + index)
+    } else {
+        format!("Ctrl+Shift+F{}", 13 + index - SUMMON_KEYS)
+    }
 }
 
 /// The keys a lane has on the keyboard, "F13–F16" — or `None` for a lane
@@ -84,24 +95,60 @@ pub enum Press {
     Summon(usize),
     /// Bring it forward and answer it with one key.
     Answer(usize, Key),
+    /// Move the numpad's selection this many steps — the knob turning.
+    Select(isize),
+    /// Pin the numpad's selection, or unpin it — the knob pressed.
+    ToggleLock,
+}
+
+/// What pressing key `offset` (0..4) of a four-key lane means: every key
+/// summons the lane; while the lane is answerable the three after the first
+/// are Up, Down and Enter. This is the rule the lane pattern draws — the
+/// steady marker first, the beating answer keys after it — so the F-row and
+/// the numpad's top line both bind through it and cannot drift apart.
+fn lane_press(lane: usize, offset: usize, answerable: bool) -> Press {
+    match (answerable, offset) {
+        (true, 1) => Press::Answer(lane, Key::Up),
+        (true, 2) => Press::Answer(lane, Key::Down),
+        (true, 3) => Press::Answer(lane, Key::Enter),
+        _ => Press::Summon(lane),
+    }
 }
 
 /// What pressing F-row key `index` (0 → F13) means with `lane_count` lanes,
 /// the key's lane `answerable` or not. The lane is the key's group of four;
-/// a key past the lanes the keyboard has is nothing. Every key of a lane
-/// summons it; while the lane is answerable the three after the first are
-/// Up, Down and Enter.
+/// a key past the lanes the keyboard has is nothing.
 pub fn press_of(index: usize, lane_count: usize, answerable: bool) -> Option<Press> {
     let lane = index / KEYS_PER_LANE;
     if lane >= lane_count.min(KEYBOARD_LANES) {
         return None;
     }
-    Some(match (answerable, index % KEYS_PER_LANE) {
-        (true, 1) => Press::Answer(lane, Key::Up),
-        (true, 2) => Press::Answer(lane, Key::Down),
-        (true, 3) => Press::Answer(lane, Key::Enter),
-        _ => Press::Summon(lane),
-    })
+    Some(lane_press(lane, index % KEYS_PER_LANE, answerable))
+}
+
+/// What pressing numpad chord `index` (0 → Ctrl+Shift+F13) means: the knob's
+/// three, then M1–M5 summoning their lanes, then the top line's four keys
+/// acting on `selected` — the agent it is showing — as one F-row lane: any of
+/// them summons it, and while it is answerable the three after the first are
+/// ⏶⏷Enter. With nothing shown the top line is nothing: no stray keystrokes.
+pub fn numpad_press_of(
+    index: usize,
+    lane_count: usize,
+    selected: Option<usize>,
+    answerable: bool,
+) -> Option<Press> {
+    let shown = lane_count.min(crate::settings::NUMPAD_LANES);
+    match index {
+        0 => Some(Press::Select(-1)),
+        1 => Some(Press::Select(1)),
+        2 => Some(Press::ToggleLock),
+        3..=7 => {
+            let lane = index - 3;
+            (lane < shown).then_some(Press::Summon(lane))
+        }
+        8..=11 => selected.map(|lane| lane_press(lane, index - 8, answerable)),
+        _ => None,
+    }
 }
 
 /// Handle to the running capture. Dropping it unregisters the hotkeys — which
@@ -138,6 +185,9 @@ pub fn start(tracker: Arc<Mutex<Tracker>>) -> Option<Keys> {
 /// is, which is why this runs on the worker and not the pump.
 fn handle_press(tracker: &Arc<Mutex<Tracker>>, index: usize) {
     HANDLED.fetch_add(1, Ordering::Relaxed);
+    if index >= SUMMON_KEYS {
+        return handle_chord(tracker, index - SUMMON_KEYS);
+    }
     let press = {
         let Ok(mut tracker) = tracker.lock() else {
             return;
@@ -150,7 +200,50 @@ fn handle_press(tracker: &Arc<Mutex<Tracker>>, index: usize) {
         Some(Press::Summon(lane)) => summon_lane(tracker, lane),
         Some(Press::Answer(lane, key)) => answer_lane(tracker, lane, key),
         // A key past the lanes: swallowed and recorded, nothing to do.
-        None => {}
+        _ => {}
+    }
+}
+
+/// One numpad chord, handled like [`handle_press`]: selection and lock are a
+/// mutation under the lock and done; a summon or answer runs unlocked on this
+/// same worker. An M key and a top-line key select what they summon — the user's
+/// hand moves the cursor, always, locked or not.
+fn handle_chord(tracker: &Arc<Mutex<Tracker>>, chord: usize) {
+    let press = {
+        let Ok(mut tracker) = tracker.lock() else {
+            return;
+        };
+        tracker.last_key = Some((SUMMON_KEYS + chord, crate::now_ms()));
+        let answerable = tracker
+            .selected
+            .is_some_and(|lane| tracker.answerable(lane));
+        match numpad_press_of(
+            chord,
+            tracker.settings.lane_count,
+            tracker.selected,
+            answerable,
+        ) {
+            Some(Press::Select(delta)) => {
+                tracker.select_delta(delta);
+                None
+            }
+            Some(Press::ToggleLock) => {
+                tracker.toggle_lock();
+                None
+            }
+            Some(Press::Summon(lane)) => {
+                if tracker.on_lane(lane).is_some() {
+                    tracker.selected = Some(lane);
+                }
+                Some(Press::Summon(lane))
+            }
+            other => other,
+        }
+    };
+    match press {
+        Some(Press::Summon(lane)) => summon_lane(tracker, lane),
+        Some(Press::Answer(lane, key)) => answer_lane(tracker, lane, key),
+        _ => {}
     }
 }
 
@@ -216,14 +309,17 @@ mod windows_impl {
     use windows::Win32::Foundation::{LPARAM, WPARAM};
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        MOD_NOREPEAT, RegisterHotKey, UnregisterHotKey,
+        MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, RegisterHotKey, UnregisterHotKey,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         GetMessageW, MSG, PostThreadMessageW, WM_HOTKEY, WM_QUIT,
     };
 
-    use super::{SUMMON_KEYS, VK_F13};
+    use super::{NUMPAD_KEYS, SUMMON_KEYS, VK_F13};
     use crate::tracker::Tracker;
+
+    /// Every id this module may hold: the F-row's twelve, then the numpad's.
+    const ALL_KEYS: usize = SUMMON_KEYS + NUMPAD_KEYS;
 
     /// The thread that owns the hotkeys, for [`unhook_now`]. Zero before it is
     /// ready and after it has unregistered them.
@@ -347,11 +443,22 @@ mod windows_impl {
                 return;
             }
         }
+        // The numpad's chords, best-effort: a collision on one of these must
+        // not take down the F-row's twelve, so a refusal skips that one key
+        // rather than failing the install.
+        for chord in 0..NUMPAD_KEYS {
+            let id = FIRST_HOTKEY_ID + (SUMMON_KEYS + chord) as i32;
+            let vk = VK_F13 + chord as u32;
+            // SAFETY: thread-owned registration with a unique id and one
+            // Ctrl+Shift-modified virtual key from F13 through F24.
+            let _ = unsafe { RegisterHotKey(None, id, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, vk) };
+        }
+
         // SAFETY: this thread's own id.
         let thread_id = unsafe { GetCurrentThreadId() };
         PUMP_THREAD.store(thread_id, Ordering::SeqCst);
         if ready.send(Ok(thread_id)).is_err() {
-            unregister_hotkeys(SUMMON_KEYS);
+            unregister_hotkeys(ALL_KEYS);
             PUMP_THREAD.store(0, Ordering::SeqCst);
             return;
         }
@@ -363,7 +470,7 @@ mod windows_impl {
         while unsafe { GetMessageW(&mut message, None, 0, 0) }.as_bool() {
             if message.message == WM_HOTKEY {
                 let id = message.wParam.0 as i32;
-                if (FIRST_HOTKEY_ID..FIRST_HOTKEY_ID + SUMMON_KEYS as i32).contains(&id) {
+                if (FIRST_HOTKEY_ID..FIRST_HOTKEY_ID + ALL_KEYS as i32).contains(&id) {
                     let index = (id - FIRST_HOTKEY_ID) as usize;
                     super::RECEIVED.fetch_add(1, Ordering::Relaxed);
                     if sender.try_send(index).is_ok() {
@@ -373,7 +480,7 @@ mod windows_impl {
             }
         }
 
-        unregister_hotkeys(SUMMON_KEYS);
+        unregister_hotkeys(ALL_KEYS);
         let _ = PUMP_THREAD.compare_exchange(thread_id, 0, Ordering::SeqCst, Ordering::SeqCst);
     }
 }
@@ -421,8 +528,97 @@ mod tests {
     fn keys_are_named_as_the_user_remapped_them() {
         assert_eq!(key_label(0), "F13");
         assert_eq!(key_label(11), "F24");
+        assert_eq!(key_label(12), "Ctrl+Shift+F13", "the numpad's first chord");
+        assert_eq!(key_label(23), "Ctrl+Shift+F24");
         assert_eq!(lane_keys_label(0).as_deref(), Some("F13–F16"));
         assert_eq!(lane_keys_label(2).as_deref(), Some("F21–F24"));
         assert_eq!(lane_keys_label(3), None, "no keys past the keyboard");
+    }
+
+    #[test]
+    fn the_numpad_chords_mean_the_owners_table() {
+        assert_eq!(
+            numpad_press_of(0, 5, Some(2), false),
+            Some(Press::Select(-1))
+        );
+        assert_eq!(numpad_press_of(1, 5, None, false), Some(Press::Select(1)));
+        assert_eq!(numpad_press_of(2, 5, None, false), Some(Press::ToggleLock));
+        assert_eq!(
+            numpad_press_of(3, 5, None, false),
+            Some(Press::Summon(0)),
+            "M1"
+        );
+        assert_eq!(
+            numpad_press_of(7, 5, None, false),
+            Some(Press::Summon(4)),
+            "M5"
+        );
+        assert_eq!(
+            numpad_press_of(7, 4, None, false),
+            None,
+            "M5 past the lanes"
+        );
+        assert_eq!(
+            numpad_press_of(7, 6, None, false),
+            Some(Press::Summon(4)),
+            "six lanes still cap at five M keys"
+        );
+        assert_eq!(
+            numpad_press_of(8, 5, Some(2), false),
+            Some(Press::Summon(2)),
+            "the top line's first key summons the shown agent"
+        );
+        assert_eq!(
+            numpad_press_of(8, 5, Some(2), true),
+            Some(Press::Summon(2)),
+            "answerable or not"
+        );
+        assert_eq!(
+            numpad_press_of(9, 5, Some(2), true),
+            Some(Press::Answer(2, Key::Up))
+        );
+        assert_eq!(
+            numpad_press_of(10, 5, Some(2), true),
+            Some(Press::Answer(2, Key::Down))
+        );
+        assert_eq!(
+            numpad_press_of(11, 5, Some(2), true),
+            Some(Press::Answer(2, Key::Enter))
+        );
+        assert_eq!(
+            numpad_press_of(10, 5, Some(2), false),
+            Some(Press::Summon(2)),
+            "not answerable: the answer keys summon, like the F-row's"
+        );
+        assert_eq!(
+            numpad_press_of(11, 5, None, false),
+            None,
+            "nothing displayed"
+        );
+        assert_eq!(
+            numpad_press_of(8, 5, None, true),
+            None,
+            "nothing displayed: the first key too"
+        );
+        assert_eq!(
+            numpad_press_of(12, 5, Some(0), true),
+            None,
+            "past the chords"
+        );
+    }
+
+    #[test]
+    fn the_top_line_is_an_f_row_lane_for_the_shown_agent() {
+        // Chords 8..12 on the shown lane mean exactly what F-row keys 4..8
+        // mean on lane 1, answerable or not — one rule, two keyboards.
+        for answerable in [false, true] {
+            for offset in 0..KEYS_PER_LANE {
+                assert_eq!(
+                    numpad_press_of(8 + offset, 5, Some(1), answerable),
+                    press_of(KEYS_PER_LANE + offset, 3, answerable),
+                    "offset {offset}, answerable {answerable}"
+                );
+            }
+        }
     }
 }

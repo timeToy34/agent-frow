@@ -1,9 +1,11 @@
 //! One keyboard, from handshake to handing it back.
 //!
-//! The app never owns more than the twelve F-row LEDs. It puts the keyboard
-//! in its mixed mode — two regions, each running its own effect — gives the
-//! F-row to region 1 rendered per key from what the app sends, and leaves
-//! region 0, everything else, running whatever the user had. Everything it
+//! The app never owns more than the few LEDs its surface names — the twelve
+//! F-row keys on an Ultra, the nine shape-and-M keys on a V0 Ultra, each said
+//! once as a [`Geometry`]. It puts the keyboard in its mixed mode — two
+//! regions, each running its own effect — gives those LEDs to region 1
+//! rendered per key from what the app sends, and leaves region 0, everything
+//! else, running whatever the user had. Everything it
 //! changes is read first into a [`Snapshot`] and written back on the way out,
 //! so the board the user gets back is the board they had.
 //!
@@ -21,9 +23,6 @@ use super::protocol::{
 };
 use crate::settings::{KEYS, Rgb};
 
-/// The matrix row the F-row is on, on every Keychron.
-const F_ROW: u8 = 0;
-
 /// How long a slot holds when a region rotates effects. Irrelevant with one
 /// effect per region, which is all the app ever sets; the firmware's own
 /// default, so a restored board reads naturally.
@@ -32,6 +31,68 @@ const SLOT_HOLD_MS: u32 = 5000;
 /// Where the F-row's LEDs are when the keyboard will not say: the V3 Ultra's
 /// layout, and every Ultra seen so far.
 const DEFAULT_F_ROW: [u8; KEYS] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+
+/// Where the V0 Ultra's nine LEDs are when the keyboard will not say: the four
+/// shape keys, then M1–M5.
+const DEFAULT_V0: [u8; 9] = [0, 1, 2, 3, 4, 9, 14, 18, 23];
+
+/// How one keyboard model lays out the keys the app owns: which matrix rows
+/// the handshake asks for, how to read the app's LEDs out of the answers, and
+/// what to assume when the keyboard will not say. The Ultra's F-row and the
+/// V0 Ultra's shape-and-M keys are the same session logic under a different one
+/// of these.
+pub struct Geometry {
+    /// The model family, for error messages.
+    pub name: &'static str,
+    /// The matrix rows whose maps the handshake asks for, in order.
+    pub rows: &'static [u8],
+    /// The app's LEDs in key order, picked from those maps — one map per row.
+    /// A pick of the wrong length falls back to `fallback`.
+    pub pick: fn(&[Vec<Option<u8>>]) -> Vec<u8>,
+    /// The known layout, used when a map is refused or reads wrong.
+    pub fallback: &'static [u8],
+    /// The LED count this keyboard must report, when the geometry is specific
+    /// to one board — how a V0 connect refuses an Ultra. `None` accepts any.
+    pub expect_leds: Option<u8>,
+}
+
+/// The tail of a connect refusal that means "another Keychron, not a broken
+/// one" — a surface reads it to tell somebody else's board from a failure.
+pub const DIFFERENT_BOARD: &str = "a different Keychron";
+
+/// A Keychron Ultra: the twelve F-row LEDs off matrix row 0.
+pub const ULTRA: Geometry = Geometry {
+    name: "Keychron Ultra",
+    rows: &[0],
+    pick: ultra_pick,
+    fallback: &DEFAULT_F_ROW,
+    expect_leds: None,
+};
+
+/// A V0 Ultra numpad: the four shape keys off row 0 — the knob holds its first
+/// column, with no LED — then M1–M5, the first LED of each row below.
+pub const V0_ULTRA: Geometry = Geometry {
+    name: "V0 Ultra",
+    rows: &[0, 1, 2, 3, 4, 5],
+    pick: v0_pick,
+    fallback: &DEFAULT_V0,
+    expect_leds: Some(26),
+};
+
+fn ultra_pick(maps: &[Vec<Option<u8>>]) -> Vec<u8> {
+    maps.first().map(|map| f_row(map)).unwrap_or_default()
+}
+
+fn v0_pick(maps: &[Vec<Option<u8>>]) -> Vec<u8> {
+    let Some((shapes, m_rows)) = maps.split_first() else {
+        return Vec::new();
+    };
+    let mut leds: Vec<u8> = shapes.iter().flatten().take(4).copied().collect();
+    for row in m_rows {
+        leds.extend(row.iter().flatten().next());
+    }
+    leds
+}
 
 /// What the keyboard was showing before the app touched it — everything the
 /// app changes, so everything it can put back.
@@ -187,10 +248,16 @@ pub struct Board<T: Transport> {
 }
 
 impl<T: Transport> Board<T> {
-    /// The handshake: the protocol the app speaks, how many LEDs there are,
-    /// and where the F-row's are — asked, not assumed, so another Ultra with
-    /// a different matrix reads its own row.
+    /// [`Self::connect_with`] for the Ultra — the wrapper every existing
+    /// caller means.
     pub fn connect(transport: T) -> Result<Self, String> {
+        Self::connect_with(transport, &ULTRA)
+    }
+
+    /// The handshake: the protocol the app speaks, how many LEDs there are,
+    /// and where this geometry's are — asked, not assumed, so another board
+    /// of the family with a different matrix reads its own rows.
+    pub fn connect_with(transport: T, geometry: &Geometry) -> Result<Self, String> {
         let mut board = Self {
             transport,
             firmware: String::new(),
@@ -206,13 +273,30 @@ impl<T: Transport> Board<T> {
             _ => return Err("no protocol version".to_owned()),
         }
         board.led_count = board.byte(Command::LedCount)?;
+        if let Some(expected) = geometry.expect_leds
+            && board.led_count != expected
+        {
+            return Err(format!(
+                "{} LEDs, and a {} has {expected} — {DIFFERENT_BOARD}",
+                board.led_count, geometry.name
+            ));
+        }
         board.firmware = match board.ask(Command::FirmwareVersion)? {
             Reply::Text(text) => text,
             _ => String::new(),
         };
-        board.leds = match board.ask(Command::RowMap(F_ROW)) {
-            Ok(Reply::RowMap(map)) if f_row(&map).len() == KEYS => f_row(&map),
-            _ => DEFAULT_F_ROW.to_vec(),
+        let mut maps = Vec::new();
+        for row in geometry.rows {
+            match board.ask(Command::RowMap(*row)) {
+                Ok(Reply::RowMap(map)) => maps.push(map),
+                _ => break,
+            }
+        }
+        let picked = (geometry.pick)(&maps);
+        board.leds = if picked.len() == geometry.fallback.len() {
+            picked
+        } else {
+            geometry.fallback.to_vec()
         };
         board.painted = vec![None; board.leds.len()];
         Ok(board)
@@ -531,6 +615,7 @@ pub mod fake {
         /// Every report received, for asserting how many a frame cost.
         pub packets: usize,
         pub sets: usize,
+        row_map: fn(u8) -> Vec<u8>,
     }
 
     impl Default for ScriptedKeyboard {
@@ -539,9 +624,40 @@ pub mod fake {
         }
     }
 
+    fn ultra_row_map(row: u8) -> Vec<u8> {
+        if row == 0 {
+            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0xFF, 13, 14, 15]
+        } else {
+            vec![0xFF; 17]
+        }
+    }
+
+    /// The V0 Ultra's matrix: the knob holds row 0 column 0 with no LED; the
+    /// M column is column 0 of every row below; two gaps where tall keys sit.
+    fn v0_row_map(row: u8) -> Vec<u8> {
+        match row {
+            0 => vec![0xFF, 0, 1, 2, 3],
+            1 => vec![4, 5, 6, 7, 8],
+            2 => vec![9, 10, 11, 12, 13],
+            3 => vec![14, 15, 16, 17, 0xFF],
+            4 => vec![18, 19, 20, 21, 22],
+            5 => vec![23, 24, 0xFF, 25, 0xFF],
+            _ => vec![0xFF; 5],
+        }
+    }
+
     impl ScriptedKeyboard {
         /// Fresh from the factory, lighting off — as the owner's arrived.
         pub fn new() -> Self {
+            Self::with(LEDS, ultra_row_map)
+        }
+
+        /// A V0 Ultra in software: 26 LEDs behind the numpad matrix.
+        pub fn v0() -> Self {
+            Self::with(26, v0_row_map)
+        }
+
+        fn with(leds: usize, row_map: fn(u8) -> Vec<u8>) -> Self {
             let mut lists = [[EffectSlot::NONE; 5]; 2];
             lists[0][0] = EffectSlot {
                 effect: 5,
@@ -571,21 +687,14 @@ pub mod fake {
                             s: 255,
                             v: 255
                         };
-                        LEDS
+                        leds
                     ],
-                    regions: vec![0; LEDS],
+                    regions: vec![0; leds],
                     lists,
                 },
                 packets: 0,
                 sets: 0,
-            }
-        }
-
-        fn row_map(row: u8) -> Vec<u8> {
-            if row == 0 {
-                vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0xFF, 13, 14, 15]
-            } else {
-                vec![0xFF; 17]
+                row_map,
             }
         }
     }
@@ -595,6 +704,7 @@ pub mod fake {
             self.packets += 1;
             let mut reply = *report;
             let s = &mut self.state;
+            let leds = s.per_key.len();
             match report[0] {
                 0x07 => {
                     self.sets += 1;
@@ -627,9 +737,9 @@ pub mod fake {
                     let mut ok = true;
                     match report[1] {
                         0x01 => reply[3..5].copy_from_slice(&1u16.to_le_bytes()),
-                        0x05 => reply[3] = LEDS as u8,
+                        0x05 => reply[3] = leds as u8,
                         0x06 => {
-                            let map = Self::row_map(report[2]);
+                            let map = (self.row_map)(report[2]);
                             reply[3..3 + map.len()].copy_from_slice(&map);
                         }
                         0x07 => reply[3] = s.per_key_type,
@@ -639,7 +749,7 @@ pub mod fake {
                         }
                         0x09 => {
                             let (start, count) = (report[2] as usize, report[3] as usize);
-                            ok = count <= 9 && start + count <= LEDS;
+                            ok = count <= 9 && start + count <= leds;
                             if ok {
                                 for i in 0..count {
                                     let hsv = s.per_key[start + i];
@@ -651,7 +761,7 @@ pub mod fake {
                         0x0A => {
                             self.sets += 1;
                             let (start, count) = (report[2] as usize, report[3] as usize);
-                            ok = count <= 9 && start + count <= LEDS;
+                            ok = count <= 9 && start + count <= leds;
                             if ok {
                                 for i in 0..count {
                                     s.per_key[start + i] = Hsv {
@@ -664,7 +774,7 @@ pub mod fake {
                         }
                         0x0C => {
                             let (start, count) = (report[2] as usize, report[3] as usize);
-                            ok = count <= 29 && start + count <= LEDS;
+                            ok = count <= 29 && start + count <= leds;
                             if ok {
                                 reply[3..3 + count]
                                     .copy_from_slice(&s.regions[start..start + count]);
@@ -674,7 +784,7 @@ pub mod fake {
                             self.sets += 1;
                             let (start, count) = (report[2] as usize, report[3] as usize);
                             ok = count <= 28
-                                && start + count <= LEDS
+                                && start + count <= leds
                                 && report[4..4 + count].iter().all(|r| *r < 2);
                             if ok {
                                 s.regions[start..start + count]
@@ -905,5 +1015,67 @@ mod tests {
             vec![(1..=9).collect::<Vec<u8>>(), vec![10, 11, 12]]
         );
         assert!(runs(&[], 9).is_empty());
+    }
+
+    #[test]
+    fn the_v0_handshake_finds_the_nine() {
+        let board = Board::connect_with(ScriptedKeyboard::v0(), &V0_ULTRA).unwrap();
+        assert_eq!(board.led_count, 26);
+        assert_eq!(board.leds, vec![0, 1, 2, 3, 4, 9, 14, 18, 23]);
+        assert_eq!(board.available(), (0..9).collect::<Vec<usize>>());
+    }
+
+    #[test]
+    fn an_ultra_is_not_a_v0_and_a_v0_is_still_an_ultra_row() {
+        // The V0 geometry refuses the 87-LED board outright — that is how the
+        // two surfaces keep off each other's keyboards.
+        let refused = Board::connect_with(ScriptedKeyboard::new(), &V0_ULTRA).err();
+        assert!(
+            refused
+                .as_deref()
+                .is_some_and(|error| error.contains("different Keychron")),
+            "{refused:?}"
+        );
+        // The Ultra geometry accepts any LED count (Ultra models vary), and on
+        // a V0 it happily reads twelve nonsense entries out of the padded row
+        // reply — which is exactly why the surfaces need the claim registry:
+        // an Ultra thread must never get to handshake a V0 at all.
+        let confused = Board::connect_with(ScriptedKeyboard::v0(), &ULTRA).unwrap();
+        assert_eq!(confused.leds.len(), KEYS, "it reads *something* row-shaped");
+        assert_ne!(
+            confused.leds,
+            vec![0, 1, 2, 3, 4, 9, 14, 18, 23],
+            "and it is not the V0's nine"
+        );
+    }
+
+    #[test]
+    fn a_v0_owns_its_nine_scattered_leds_and_comes_back_exact() {
+        let mut board = Board::connect_with(ScriptedKeyboard::v0(), &V0_ULTRA).unwrap();
+        board.transport.state.effect = 7;
+        board.transport.state.hue = 40;
+        let before = board.transport.state.clone();
+        let snapshot = board.snapshot().unwrap();
+        board.take_over(&snapshot).unwrap();
+        let ours = [0u8, 1, 2, 3, 4, 9, 14, 18, 23];
+        for led in 0..26u8 {
+            let expected = u8::from(ours.contains(&led));
+            assert_eq!(
+                board.transport.state.regions[led as usize], expected,
+                "led {led}"
+            );
+        }
+        assert_eq!(board.transport.state.lists[0][0].effect, 7);
+        board
+            .paint(&[(0, Rgb::new(255, 0, 0)), (8, Rgb::new(0, 0, 255))])
+            .unwrap();
+        assert_eq!(
+            board.transport.state.per_key[23],
+            Hsv::from(Rgb::new(0, 0, 255)),
+            "key 8 is M5, LED 23"
+        );
+        board.restore(&snapshot).unwrap();
+        assert_eq!(board.transport.state, before);
+        assert!(board.is_ours().is_ok_and(|ours| !ours));
     }
 }

@@ -130,11 +130,6 @@ pub fn tabs(hwnd: HWND) -> Vec<Tab> {
     }
 }
 
-/// Every tab name in `hwnd`, in the order the window presents them.
-pub fn tab_names(hwnd: HWND) -> Vec<String> {
-    tabs(hwnd).into_iter().map(|tab| tab.name).collect()
-}
-
 /// Selects the tab named `name` in `hwnd`. Returns whether it was selected.
 ///
 /// The window still has to be raised separately; selecting a tab in a window
@@ -182,19 +177,6 @@ pub fn select_tab(hwnd: HWND, name: &str) -> bool {
         }
         false
     }
-}
-
-/// The name of the tab currently selected in `hwnd`, if it can be read.
-///
-/// Exists so a summon can skip only the tab selection when the right tab is
-/// already showing. The window must still be raised: re-selecting a selected
-/// tab moves keyboard focus into the tab strip, and suddenly the arrow keys
-/// navigate tabs instead of reaching the terminal.
-pub fn selected_tab(hwnd: HWND) -> Option<String> {
-    tabs(hwnd)
-        .into_iter()
-        .find(|tab| tab.selected)
-        .map(|tab| tab.name)
 }
 
 /// Whether keyboard focus in a terminal window is on its tab strip — on a

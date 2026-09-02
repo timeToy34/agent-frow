@@ -17,7 +17,7 @@ https://github.com/user-attachments/assets/2d799d6d-d815-481b-9ae2-f113a0af6aeb
 | **Keychron Ultra** — V3 Ultra 8K (the other Ultras speak the same protocol) | the F-row as lanes; the same keys, from the Launcher keymap | the cable or the 2.4 GHz receiver, not Bluetooth; Keychron's per-key-brightness fix for true darks | verified |
 | **Elgato Stream Deck** — 2019 V2, 15 keys (every model with a screen, through the driver) | one row per lane: name, context, 5h, 7d, state; every key a summon; ▲▼Enter while Waiting | USB; the Stream Deck app closed | verified |
 | **The monitor** — mini mode | the same rows on screen, five keys each; click a key to summon | nothing | verified |
-| **Keychron V0** | the F-row as lanes | — | **next** |
+| **Keychron V0 Ultra** — the numpad | one agent on the four shape keys (the classic lane patterns; knob to select, knob-press to lock, colour↔white fade when locked), the M column one key per agent; M keys select + summon; the top line is an F-row lane for the shown agent — any of its keys summons it, and while it is Waiting the three after the first answer ⏶⏷Enter | the cable or the 2.4 GHz receiver; the per-key-brightness fix; the knob and keys remapped to Ctrl+Shift+F13–F24 by importing [the keymap file](firmware/keychron-ultra/keymaps/) | verified |
 
 Without any of them the window shows everything; the keys and the light are
 the part you would be missing.
@@ -32,8 +32,9 @@ it.
 
 - **Windows only.** Works with **Claude Code** and **Codex**, each running
   natively on Windows and inside WSL.
-- **The light is a Corsair keyboard through iCUE, a Keychron Ultra on its
-  cable or 2.4 GHz receiver, or an Elgato Stream Deck.** Without one the
+- **The light is a Corsair keyboard through iCUE, a Keychron Ultra or V0
+  Ultra numpad on its cable or 2.4 GHz receiver, or an Elgato Stream
+  Deck.** Without one the
   window still shows everything; the keys and the light are the part you
   would be missing.
 - **Display, and two presses.** It never answers a hook, never approves or
@@ -173,6 +174,19 @@ so every lit key shows at full and dark keys show white until Keychron ships
 [firmware/keychron-ultra](firmware/keychron-ultra/README.md) builds their
 firmware with the fix applied and explains how the Launcher flashes it — read
 it before deciding. `agent-frow doctor` lists what it finds on the bus.
+
+**Keychron V0 Ultra (the numpad; verified on two boards).** The same
+protocol, the same cable-or-receiver rule and the same brightness caveat as
+the Ultra above — `./build.sh keychron_v0_ultra_ansi` in the same folder
+builds the numpad's firmware with the fix, and the Launcher flashes it the
+same way. The knob and the nine keys the app uses send **Ctrl+Shift+F13–F24**,
+and the Launcher's key picker cannot enter a chord — it only records a key
+you physically press — so the keymap goes in as a file: in the Launcher's
+Keymap tab, **Export** your current keymap first (that is your undo), then
+**Import** [keychron_v0_ultra_ansi.json](firmware/keychron-ultra/keymaps/keychron_v0_ultra_ansi.json)
+over the cable. It is the stock layout with the knob and those nine keys
+changed; the numpad keys stay numpad keys. M5 stops being Fn — everything
+Fn did is in the Launcher's Lighting tab.
 
 **Elgato Stream Deck (a 2019 V2 with 15 keys verified; the driver knows
 every model with a screen).** Plain USB, no driver, nothing to install. One row per lane, like a

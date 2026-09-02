@@ -12,9 +12,9 @@ applied. Once Keychron ships the fix in a Launcher update, none of this is
 needed.
 
 **This is your keyboard and your risk.** The steps below were done on a
-V3 Ultra 8K ANSI and it works; the other Ultras run the same firmware from
-the same repository, but nobody has flashed them with this. Read all of it
-first.
+V3 Ultra 8K ANSI and on two V0 Ultra ANSI numpads and it works; the other
+Ultras run the same firmware from the same repository, but nobody has flashed
+them with this. Read all of it first.
 
 ## What is built
 
@@ -23,7 +23,8 @@ first.
   Ultras live on; `main` is a plain mirror of upstream ZMK), applies the
   patch, and builds in ZMK's own toolchain container. Needs Docker; works
   from WSL. `./build.sh` builds `keychron_v3_ultra_ansi`; pass another shield
-  name from `app/boards/shields/` for another Ultra.
+  name from `app/boards/shields/` for another Ultra —
+  `./build.sh keychron_v0_ultra_ansi` for the V0 Ultra numpad.
 - `check_image.py` — verifies the result the way the keyboard's updater does.
 
 The output, `out/<shield>.bin` (~300 KB), is an app image in the same format
@@ -69,3 +70,17 @@ script, is in [naaraxi/zmk](https://github.com/naaraxi/zmk) (`openrgb/`).
   the keyboard, and why `check_image.py` verifies the model string.
 - Everything the fix changes is how per-key colours render. Keymaps, Launcher
   settings and Bluetooth pairings are untouched.
+
+## Keymap for the V0 Ultra numpad
+
+`keymaps/keychron_v0_ultra_ansi.json` is a Launcher keymap export — the stock
+layout with the knob and the nine keys the app uses set to Ctrl+Shift+F13–F24
+(knob left/right F13/F14, knob press F15, M1–M5 F16–F20, the top row's four
+keys F21–F24 left to right: summon, then ⏶ ⏷ Enter while Waiting). The
+Launcher's key picker cannot enter chords, so this is the only way in:
+Keymap tab → **Export** your current keymap (the undo) → **Import** this file,
+over the cable. The Launcher accepts it only on a V0 Ultra ANSI (it checks the
+board id and an MD5 of the keymap array). M5 stops being Fn; the Launcher's
+Lighting tab does everything Fn did. Reading the file: `val` is a QMK 16-bit
+keycode (`0x0300 | 104` = Ctrl+Shift+F13), the `knob` list is one
+`{left, right}` of QMK names per layer.

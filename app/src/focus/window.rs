@@ -137,6 +137,36 @@ fn visible_windows() -> Vec<Candidate> {
     collected
 }
 
+/// Whether the foreground window belongs to one of `ancestors` — the pid of
+/// its root window, verified the way `raise` verifies every ancestor: the
+/// pid must still resolve to the exe name the hook recorded, or it belongs
+/// to some bystander now. `explorer.exe` is skipped for the same reason
+/// `raise` skips it: it is every desktop process's ancestor, and any
+/// Explorer window would otherwise read as the agent's.
+pub fn is_foreground(ancestors: &[Ancestor]) -> bool {
+    // SAFETY: reads the current foreground window; null when there is none.
+    let foreground = unsafe { GetForegroundWindow() };
+    if foreground.0.is_null() {
+        return false;
+    }
+    // SAFETY: a live HWND from the line above.
+    let root = unsafe { GetAncestor(foreground, GA_ROOT) };
+    let mut pid = 0u32;
+    // SAFETY: `pid` receives the owning process id of a live HWND.
+    unsafe { GetWindowThreadProcessId(root, Some(&mut pid)) };
+    if pid == 0 {
+        return false;
+    }
+    ancestors.iter().any(|ancestor| {
+        ancestor.pid == pid
+            && ancestor.exe.as_deref().is_some_and(|recorded| {
+                !recorded.eq_ignore_ascii_case("explorer.exe")
+                    && exe_basename_of_pid(pid)
+                        .is_some_and(|current| current.eq_ignore_ascii_case(recorded))
+            })
+    })
+}
+
 pub fn raise(ancestors: &[Ancestor], tab_names: &[String]) -> Report {
     if ancestors.is_empty() {
         // Older events carry no ancestry; the next one from that session will.
@@ -272,21 +302,38 @@ pub fn raise(ancestors: &[Ancestor], tab_names: &[String]) -> Report {
     }
     // Never skip the window raise. `GetForegroundWindow` can name a terminal
     // that is still visibly behind another window, which made the old
-    // "already in front" shortcut a silent no-op. Only the tab re-selection is
-    // safe to skip: selecting an already-selected tab moves keyboard focus to
-    // the tab strip and steals the terminal's arrow keys.
-    if let Some(selected) = uia_tabs::selected_tab(hwnd)
-        && tab_names.contains(&selected)
-    {
-        return Report::raised(
-            found.hwnd,
-            format!("raised, already showing the {selected} tab"),
-        );
-    }
-    // Order matters: selecting a tab in a window nobody can see changes what is
-    // in front of nothing.
-    if let Some(name) = tab_names.iter().find(|name| settle_tab(hwnd, name)) {
-        return Report::raised(found.hwnd, format!("raised, showing the {name} tab"));
+    // "already in front" shortcut a silent no-op. Once it is raised, read one
+    // coherent picture of its tabs and resolve the best name that is actually
+    // there. The order is strict: a selected project fallback must never beat
+    // the lane's own tab merely because it was already showing. That was the
+    // same-folder bug — Claude and Codex both accepted `ai-agent-keeb` and
+    // neither ever tried its unique lane name.
+    let tabs = settled_tabs(hwnd, tab_names.first().map(String::as_str));
+    let selected = tabs
+        .iter()
+        .find(|tab| tab.selected)
+        .map(|tab| tab.name.clone());
+    let present: Vec<String> = tabs.into_iter().map(|tab| tab.name).collect();
+    match resolve_tab(tab_names, &present, selected.as_deref()) {
+        TabResolution::Already(name) => {
+            return Report::raised(
+                found.hwnd,
+                format!("raised, already showing the {name} tab"),
+            );
+        }
+        TabResolution::Select(name) => {
+            // Order matters: selecting a tab in a window nobody can see changes
+            // what is in front of nothing. Once the best present name is known,
+            // never fall through to a lower-priority name if selection fails.
+            if settle_tab(hwnd, name) {
+                return Report::raised(found.hwnd, format!("raised, showing the {name} tab"));
+            }
+            return Report::raised(
+                found.hwnd,
+                format!("raised the terminal and found the {name} tab, but could not select it"),
+            );
+        }
+        TabResolution::Missing => {}
     }
     // Half of what was asked for, and worth saying: the user is looking at the
     // right terminal showing the wrong agent. Naming the lane after its tab is
@@ -295,7 +342,6 @@ pub fn raise(ancestors: &[Ancestor], tab_names: &[String]) -> Report {
     // several windows the snapshot already holds every tab of every one of
     // them; with one, read it now.
     if snapshot.is_empty() {
-        let present = uia_tabs::tab_names(hwnd);
         if present.is_empty() {
             return Report::raised(
                 found.hwnd,
@@ -359,6 +405,37 @@ struct TabbedWindow {
     /// window that has not been drawn since it went to the back can answer
     /// with nothing, and so can a minimized one.
     tabs: Vec<String>,
+}
+
+/// What the post-raise tab snapshot says to do.
+///
+/// The references are into `tab_names`, whose order is the product contract:
+/// the lane's chosen name first, the project folder only as a fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TabResolution<'a> {
+    Already(&'a str),
+    Select(&'a str),
+    Missing,
+}
+
+/// Resolves the highest-priority requested name that is actually present.
+///
+/// `selected` is considered only after that resolution. Looking at it first
+/// was subtly wrong: when two agents shared a folder, the wrong selected tab's
+/// project title matched the fallback and short-circuited the unique lane tab.
+fn resolve_tab<'a>(
+    tab_names: &'a [String],
+    present: &[String],
+    selected: Option<&str>,
+) -> TabResolution<'a> {
+    let Some(name) = tab_names.iter().find(|name| present.contains(name)) else {
+        return TabResolution::Missing;
+    };
+    if selected == Some(name.as_str()) {
+        TabResolution::Already(name)
+    } else {
+        TabResolution::Select(name)
+    }
 }
 
 /// Which of several terminal windows to raise for `tab_names`: its index.
@@ -618,6 +695,31 @@ fn force_foreground(hwnd: HWND) {
 const TAB_ATTEMPTS: u32 = 10;
 const TAB_RETRY_STEP: std::time::Duration = std::time::Duration::from_millis(25);
 
+/// Reads a terminal's tabs after it has been raised, waiting through the same
+/// bounded activation budget as selection. A background or newly restored
+/// window can expose an empty or partial, virtualized tab tree for its first
+/// few frames, so keep the fullest picture and wait for the first-choice name
+/// specifically. Empty after the budget still means "unreadable", never "has
+/// no tabs"; a readable picture without the first choice permits the fallback.
+fn settled_tabs(hwnd: HWND, first_choice: Option<&str>) -> Vec<uia_tabs::Tab> {
+    let mut fullest = Vec::new();
+    for attempt in 0..TAB_ATTEMPTS {
+        if attempt > 0 {
+            std::thread::sleep(TAB_RETRY_STEP);
+        }
+        let tabs = uia_tabs::tabs(hwnd);
+        if !tabs.is_empty()
+            && first_choice.is_none_or(|wanted| tabs.iter().any(|tab| tab.name == wanted))
+        {
+            return tabs;
+        }
+        if tabs.len() > fullest.len() {
+            fullest = tabs;
+        }
+    }
+    fullest
+}
+
 /// Selects a tab and keeps at it until the window agrees.
 ///
 /// Raising a window is asynchronous: `SetForegroundWindow` returns once the
@@ -752,7 +854,7 @@ fn send_key(key: Key) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{TabbedWindow, choose, no_such_tab};
+    use super::{TabResolution, TabbedWindow, choose, no_such_tab, resolve_tab};
 
     fn window(index: usize, tabs: &[&str], selected: Option<&str>) -> TabbedWindow {
         TabbedWindow {
@@ -764,6 +866,72 @@ mod tests {
 
     fn names(names: &[&str]) -> Vec<String> {
         names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_selected_project_fallback_never_beats_the_lane_tab() {
+        let present = names(&["ai-agent-keeb", "Claude", "Codex"]);
+        assert_eq!(
+            resolve_tab(
+                &names(&["Claude", "ai-agent-keeb"]),
+                &present,
+                Some("ai-agent-keeb")
+            ),
+            TabResolution::Select("Claude")
+        );
+        assert_eq!(
+            resolve_tab(
+                &names(&["Codex", "ai-agent-keeb"]),
+                &present,
+                Some("ai-agent-keeb")
+            ),
+            TabResolution::Select("Codex")
+        );
+    }
+
+    #[test]
+    fn the_best_available_tab_alone_can_be_already_showing() {
+        let present = names(&["ai-agent-keeb", "Claude"]);
+        assert_eq!(
+            resolve_tab(
+                &names(&["Claude", "ai-agent-keeb"]),
+                &present,
+                Some("Claude")
+            ),
+            TabResolution::Already("Claude")
+        );
+
+        let fallback_only = names(&["ai-agent-keeb"]);
+        assert_eq!(
+            resolve_tab(
+                &names(&["Claude", "ai-agent-keeb"]),
+                &fallback_only,
+                Some("ai-agent-keeb")
+            ),
+            TabResolution::Already("ai-agent-keeb")
+        );
+    }
+
+    #[test]
+    fn a_present_lane_tab_is_the_only_selection_target() {
+        let present = names(&["ai-agent-keeb", "Claude"]);
+        assert_eq!(
+            resolve_tab(
+                &names(&["Claude", "ai-agent-keeb"]),
+                &present,
+                Some("other")
+            ),
+            TabResolution::Select("Claude"),
+            "the caller tries only this result and never falls through"
+        );
+        assert_eq!(
+            resolve_tab(
+                &names(&["Claude", "ai-agent-keeb"]),
+                &names(&["other"]),
+                None,
+            ),
+            TabResolution::Missing
+        );
     }
 
     #[test]

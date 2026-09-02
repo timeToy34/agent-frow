@@ -7,6 +7,7 @@
 
 pub mod corsair;
 pub mod keychron;
+pub mod keychron_v0;
 pub mod monitor;
 pub mod palette;
 pub mod scene;

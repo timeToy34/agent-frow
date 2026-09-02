@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::hid::{self, Transport};
-use super::session::{Board, Snapshot};
+use super::session::{self, Board, Snapshot};
 use crate::paths;
 use crate::surface::palette;
 use crate::surface::scene::Scene;
@@ -122,15 +122,17 @@ fn recall() -> Option<Snapshot> {
     Snapshot::parse(&text).ok()
 }
 
-/// A keyboard the app has taken: the board, what it looked like before, and
-/// how the window should name it.
-type Taken = (Board<Box<dyn Transport>>, Snapshot, String);
+/// A keyboard the app has taken: the board, what it looked like before, how
+/// the window should name it, and the claim that keeps the numpad surface
+/// off this interface.
+type Taken = (Board<Box<dyn Transport>>, Snapshot, String, hid::Claim);
 
 /// A keyboard being painted, with what it looked like before.
 struct Live {
     board: Board<Box<dyn Transport>>,
     snapshot: Snapshot,
     available: Vec<usize>,
+    _claim: hid::Claim,
 }
 
 fn render(tracker: &Mutex<Tracker>) {
@@ -184,7 +186,7 @@ fn render(tracker: &Mutex<Tracker>) {
                 continue;
             }
             match connect(remembered.as_ref()) {
-                Ok((board, snapshot, model)) => {
+                Ok((board, snapshot, model, claim)) => {
                     remember(&snapshot);
                     remembered = Some(snapshot.clone());
                     report(
@@ -195,6 +197,7 @@ fn render(tracker: &Mutex<Tracker>) {
                         available: board.available(),
                         board,
                         snapshot,
+                        _claim: claim,
                     });
                     scene.invalidate();
                 }
@@ -223,10 +226,10 @@ fn render(tracker: &Mutex<Tracker>) {
             frame.elapsed_ms,
             &ready.available,
         );
-        if let Err(reason) = ready.board.paint(&colours) {
+        if ready.board.paint(&colours).is_err() {
             // Unplugged, switched to the receiver, asleep: the keyboard keeps
             // whatever state it has and the next connect sorts out which.
-            report(tracker, unavailable(format!("{reason}; reconnecting")));
+            report(tracker, unavailable("disconnected — reconnecting"));
             live = None;
             next_attempt = Instant::now() + RETRY;
             continue;
@@ -249,10 +252,16 @@ fn render(tracker: &Mutex<Tracker>) {
 fn connect(remembered: Option<&Snapshot>) -> Result<Taken, String> {
     let found = hid::find()?;
     if found.is_empty() {
-        return Err("no Keychron Ultra on the cable or the receiver".to_owned());
+        return Err("no Ultra keyboard detected".to_owned());
     }
     let mut last_error = String::new();
     for candidate in &found {
+        // The numpad surface shares this bus, and two threads on one
+        // interface eat each other's echoes: claim first, and skip what it
+        // holds — somebody else's board is not a failure, just not ours.
+        let Some(claim) = hid::claim(candidate) else {
+            continue;
+        };
         let transport = match hid::open(candidate) {
             Ok(transport) => transport,
             Err(error) => {
@@ -267,13 +276,24 @@ fn connect(remembered: Option<&Snapshot>) -> Result<Taken, String> {
                 continue;
             }
         };
+        // A V0 Ultra answers this handshake too — it is the numpad surface's
+        // board, not this one's.
+        if Some(board.led_count) == session::V0_ULTRA.expect_leds {
+            continue;
+        }
         let snapshot = match (board.is_ours()?, remembered) {
             (true, Some(known)) => known.clone(),
             _ => board.snapshot()?,
         };
         board.take_over(&snapshot)?;
         let model = format!("{} over {}", candidate.product, candidate.link());
-        return Ok((board, snapshot, model));
+        return Ok((board, snapshot, model, claim));
     }
-    Err(last_error)
+    // A candidate that errored is a board that may be ours and is not
+    // answering; none at all — or only somebody else's — is simply absence.
+    Err(if last_error.is_empty() {
+        "no Ultra keyboard detected".to_owned()
+    } else {
+        "not responding — retrying".to_owned()
+    })
 }

@@ -105,16 +105,13 @@ struct Device {
 fn render(tracker: Arc<Mutex<Tracker>>, running: Arc<AtomicBool>) {
     let sdk = match ffi::load() {
         Ok(sdk) => sdk,
-        Err(reason) => {
+        Err(_) => {
             // Not an error to shout about: plenty of machines have no Corsair
             // keyboard. But a silent dark row is indistinguishable from a
             // broken application, so it says which it is.
             report(
                 &tracker,
-                unavailable(format!(
-                    "{reason}. Install the app so {} sits beside it.",
-                    ffi::DLL_NAME
-                )),
+                unavailable("missing iCUESDK.dll — reinstall the app"),
             );
             return;
         }
@@ -178,10 +175,7 @@ fn render(tracker: Arc<Mutex<Tracker>>, running: Arc<AtomicBool>) {
         // Both of these used to be ignored, which is the whole reason this
         // loop has a `device: Option` at all.
         if SESSION_STATE.load(Ordering::SeqCst) != CSS_CONNECTED {
-            report(
-                &tracker,
-                unavailable("iCUE dropped the connection; reconnecting"),
-            );
+            report(&tracker, unavailable("connection lost — reconnecting"));
             let _ = sdk.disconnect();
             device = None;
             next_attempt = Instant::now() + RETRY;
@@ -212,10 +206,7 @@ fn render(tracker: Arc<Mutex<Tracker>>, running: Arc<AtomicBool>) {
         })
         .collect();
         if sdk.set_led_colors(&ready.id, &colors) != CE_SUCCESS {
-            report(
-                &tracker,
-                unavailable("the keyboard stopped accepting colours"),
-            );
+            report(&tracker, unavailable("connection lost — reconnecting"));
             let _ = sdk.disconnect();
             device = None;
             next_attempt = Instant::now() + RETRY;
@@ -231,7 +222,7 @@ fn render(tracker: Arc<Mutex<Tracker>>, running: Arc<AtomicBool>) {
 
 fn connect(sdk: &Sdk, running: &AtomicBool) -> Result<Device, String> {
     if sdk.connect(on_state_changed) != CE_SUCCESS {
-        return Err("could not reach iCUE — is it running?".to_owned());
+        return Err(icue_line());
     }
     let deadline = Instant::now() + CONNECT_TIMEOUT;
     while SESSION_STATE.load(Ordering::SeqCst) != CSS_CONNECTED {
@@ -239,18 +230,69 @@ fn connect(sdk: &Sdk, running: &AtomicBool) -> Result<Device, String> {
             return Err("stopping".to_owned());
         }
         if Instant::now() > deadline {
-            return Err(format!(
-                "iCUE did not accept the connection within {}s — is third-party control enabled?",
-                CONNECT_TIMEOUT.as_secs()
-            ));
+            return Err(icue_line());
         }
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    let device = find_keyboard(sdk).ok_or("iCUE reports no keyboard")?;
+    let device = find_keyboard(sdk).ok_or("iCUE found — no Corsair keyboard")?;
     // Sit above the user's own lighting without taking it away from them.
     let _ = sdk.set_layer_priority(SDK_LAYER_PRIORITY);
     Ok(device)
+}
+
+/// What the Corsair line says when iCUE will not talk to us. Not running:
+/// nothing to configure, it is simply not there. Running: it refused or
+/// ignored the connection, and the one switch that does that is third-party
+/// control.
+fn icue_line() -> String {
+    if icue_running() {
+        "iCUE found — turn on third-party control (iCUE Settings)".to_owned()
+    } else {
+        "iCUE not detected".to_owned()
+    }
+}
+
+/// Whether iCUE itself is running, by process name — the difference between
+/// "not detected" and "found but refusing".
+#[cfg(windows)]
+fn icue_running() -> bool {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
+    };
+
+    // SAFETY: FFI; the handle is closed below on every path.
+    let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
+        return false;
+    };
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    let mut running = false;
+    // SAFETY: `entry` is a live, correctly sized structure.
+    let mut ok = unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok();
+    while ok && !running {
+        let len = entry
+            .szExeFile
+            .iter()
+            .position(|&unit| unit == 0)
+            .unwrap_or(entry.szExeFile.len());
+        let name = String::from_utf16_lossy(&entry.szExeFile[..len]);
+        running = name.eq_ignore_ascii_case("iCUE.exe");
+        // SAFETY: as above.
+        ok = unsafe { Process32NextW(snapshot, &mut entry) }.is_ok();
+    }
+    // SAFETY: the handle came from CreateToolhelp32Snapshot and is done with.
+    let _ = unsafe { CloseHandle(snapshot) };
+    running
+}
+
+#[cfg(not(windows))]
+fn icue_running() -> bool {
+    false
 }
 
 fn find_keyboard(sdk: &Sdk) -> Option<Device> {

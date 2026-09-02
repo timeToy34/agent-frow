@@ -95,14 +95,24 @@ fn doctor() -> Result<(), String> {
         Err(ingress::BindError::Busy) => {
             println!("  Keychron: not probed while Agent F-Row is running — stop it first");
         }
-        _ => match surface::keychron::probe() {
-            Ok(lines) => {
-                for line in lines {
-                    println!("  Keychron: {line}");
+        _ => {
+            match surface::keychron::probe() {
+                Ok(lines) => {
+                    for line in lines {
+                        println!("  Keychron: {line}");
+                    }
                 }
+                Err(reason) => println!("  Keychron: {reason}"),
             }
-            Err(reason) => println!("  Keychron: {reason}"),
-        },
+            match surface::keychron_v0::probe() {
+                Ok(lines) => {
+                    for line in lines {
+                        println!("  V0 Ultra: {line}");
+                    }
+                }
+                Err(reason) => println!("  V0 Ultra: {reason}"),
+            }
+        }
     }
     // The deck is only listed, never opened, so this is fine either way.
     match surface::streamdeck::probe() {
@@ -661,6 +671,7 @@ fn run(dialog_on_busy: bool, notice: Option<String>) -> Result<(), String> {
     // also what evicts stale sessions while the window is hidden in the tray.
     let _keyboard = surface::corsair::start(Arc::clone(&tracker));
     let _keychron = surface::keychron::start(Arc::clone(&tracker));
+    let _numpad = surface::keychron_v0::start(Arc::clone(&tracker));
     let _streamdeck = surface::streamdeck::start(Arc::clone(&tracker));
 
     // The F-row's keys: F13–F24, which the user's keyboard software maps the

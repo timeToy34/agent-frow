@@ -188,6 +188,7 @@ impl App {
                         // nothing, and going through the UI loop would hang
                         // exactly when the window is hidden.
                         crate::surface::keychron::restore_now();
+                        crate::surface::keychron_v0::restore_now();
                         crate::surface::streamdeck::restore_now();
                         crate::keys::unhook_now();
                         std::process::exit(0);

@@ -28,6 +28,10 @@ pub const KEYS_PER_LANE: usize = 4;
 /// How many lanes have keys on the keyboard.
 pub const KEYBOARD_LANES: usize = KEYS / KEYS_PER_LANE;
 
+/// How many lanes the numpad's M column carries: M1–M5. A lane past them is
+/// shown in the window and on a deck, never on the numpad.
+pub const NUMPAD_LANES: usize = 5;
+
 /// Configuration is always kept for six lanes, so going down to three and
 /// back does not lose the names and colours of the other three.
 pub const MAX_LANES: usize = 6;

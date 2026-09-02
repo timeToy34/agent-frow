@@ -205,6 +205,12 @@ pub struct Tracker {
     /// Why the summon keys are not being captured, when they are not. Its own
     /// field so no later summon report can bury it.
     pub keys_error: Option<String>,
+    /// The lane the numpad's top line is showing, when there is one. Chases
+    /// lane state changes while unlocked; the knob always moves it.
+    pub selected: Option<usize>,
+    /// Whether the selection is pinned: events stop moving it, the knob and
+    /// the M keys still do.
+    pub locked: bool,
 }
 
 /// See [`Tracker::preview`]. Expiry is absolute, so a forgotten preview can
@@ -301,6 +307,7 @@ impl Tracker {
     fn update(&mut self, index: usize, event: &Event) {
         let step = state::step(self.sessions[index].state, event);
         let mut learned_cwd = false;
+        let mut moved: Option<usize> = None;
         {
             let session = &mut self.sessions[index];
             session.last_event = event.at;
@@ -350,6 +357,7 @@ impl Tracker {
                     if next != State::Error {
                         session.failure = None;
                     }
+                    moved = session.lane;
                 }
                 Step::Release => {}
             }
@@ -359,6 +367,9 @@ impl Tracker {
             self.fill_lanes();
         } else if learned_cwd {
             self.fill_lanes();
+        }
+        if let Some(lane) = moved {
+            self.follow(lane);
         }
     }
 
@@ -399,6 +410,10 @@ impl Tracker {
                 .then(|| failure_word(event.error_type.as_deref())),
         });
         self.fill_lanes();
+        // A session arriving is news like any state change.
+        if let Some(lane) = self.sessions.last().and_then(|session| session.lane) {
+            self.follow(lane);
+        }
     }
 
     /// Demotes sessions that have gone quiet for longer than their state
@@ -452,6 +467,7 @@ impl Tracker {
             let taken: Vec<usize> = self.sessions.iter().filter_map(|s| s.lane).collect();
             self.sessions[index].lane = claim(&self.settings, &taken, &self.sessions[index]);
         }
+        self.heal_selection();
     }
 
     /// What pressing a lane's marker key should raise: the session's reported
@@ -521,6 +537,10 @@ impl Tracker {
         for session in &mut self.sessions {
             session.lane = session.lane.map(swapped);
         }
+        // The selection travels with its lane — and heals if the swap put it
+        // past the M column.
+        self.selected = self.selected.map(swapped);
+        self.heal_selection();
     }
 
     /// Drops whatever session is on a lane, at the user's request.
@@ -589,6 +609,68 @@ impl Tracker {
             && self
                 .on_lane(lane)
                 .is_some_and(|session| session.effective_state() == State::Waiting)
+    }
+
+    /// The lanes the numpad can select — occupied, within the M column's
+    /// five — ascending. What the knob steps across.
+    pub fn selectable_lanes(&self) -> Vec<usize> {
+        let cap = self.settings.lane_count.min(crate::settings::NUMPAD_LANES);
+        let mut lanes: Vec<usize> = self
+            .sessions
+            .iter()
+            .filter_map(|session| session.lane)
+            .filter(|lane| *lane < cap)
+            .collect();
+        lanes.sort_unstable();
+        lanes.dedup();
+        lanes
+    }
+
+    /// The knob turning: moves the selection `delta` steps across the
+    /// selectable lanes, wrapping at the ends. Works locked or not — the lock
+    /// stops *events* from moving the selection, never the user.
+    pub fn select_delta(&mut self, delta: isize) {
+        let lanes = self.selectable_lanes();
+        if lanes.is_empty() {
+            self.selected = None;
+            return;
+        }
+        let next = match self
+            .selected
+            .and_then(|current| lanes.iter().position(|lane| *lane == current))
+        {
+            Some(index) => (index as isize + delta).rem_euclid(lanes.len() as isize) as usize,
+            None if delta < 0 => lanes.len() - 1,
+            None => 0,
+        };
+        self.selected = Some(lanes[next]);
+    }
+
+    /// The knob pressed: pins the selection, or unpins it.
+    pub fn toggle_lock(&mut self) {
+        self.locked = !self.locked;
+    }
+
+    /// Unlocked, the selection chases the news: any lane state change pulls
+    /// the top line there. Locked, only the user moves it.
+    fn follow(&mut self, lane: usize) {
+        if !self.locked && lane < self.settings.lane_count.min(crate::settings::NUMPAD_LANES) {
+            self.selected = Some(lane);
+        }
+    }
+
+    /// A selection pointing at nothing — its session gone, or its lane moved
+    /// past the M column — falls to the nearest selectable lane, or to
+    /// nothing when none is left.
+    fn heal_selection(&mut self) {
+        let Some(current) = self.selected else {
+            return;
+        };
+        let lanes = self.selectable_lanes();
+        if lanes.contains(&current) {
+            return;
+        }
+        self.selected = lanes.into_iter().min_by_key(|lane| lane.abs_diff(current));
     }
 
     /// Sessions with no lane, in the order they arrived.
@@ -772,5 +854,85 @@ mod tests {
         assert_eq!(clock(State::Waiting, 0, 80_000), "1m");
         assert_eq!(clock(State::Running, 0, 80_000), "1m 20s");
         assert_eq!(clock(State::Done, 0, 80_000), "1m 20s");
+    }
+
+    fn seated(lane: usize) -> Session {
+        Session {
+            source: "claude-win".to_owned(),
+            session_id: format!("s{lane}"),
+            agent: None,
+            cwd: None,
+            state: State::Connected,
+            since: 0,
+            first_seen: lane as u64,
+            last_event: 0,
+            events: 1,
+            note: String::new(),
+            subagents: Default::default(),
+            lane: Some(lane),
+            wt_session: None,
+            ancestors: Vec::new(),
+            gauges: Default::default(),
+            failure: None,
+        }
+    }
+
+    #[test]
+    fn the_knob_steps_across_occupied_lanes_and_wraps() {
+        let mut tracker = Tracker::default();
+        tracker.settings.set_lane_count(6);
+        for lane in [0, 2, 4, 5] {
+            tracker.sessions.push(seated(lane));
+        }
+        assert_eq!(
+            tracker.selectable_lanes(),
+            vec![0, 2, 4],
+            "lane 5 has no M key"
+        );
+        tracker.select_delta(1);
+        assert_eq!(
+            tracker.selected,
+            Some(0),
+            "from nothing, forward lands first"
+        );
+        tracker.select_delta(1);
+        assert_eq!(tracker.selected, Some(2));
+        tracker.select_delta(2);
+        assert_eq!(tracker.selected, Some(0), "wraps past the end");
+        tracker.select_delta(-1);
+        assert_eq!(tracker.selected, Some(4), "and back around");
+    }
+
+    #[test]
+    fn events_move_the_selection_only_while_unlocked() {
+        let mut tracker = Tracker::default();
+        tracker.settings.set_lane_count(6);
+        for lane in [0, 1] {
+            tracker.sessions.push(seated(lane));
+        }
+        tracker.follow(1);
+        assert_eq!(tracker.selected, Some(1));
+        tracker.toggle_lock();
+        tracker.follow(0);
+        assert_eq!(tracker.selected, Some(1), "locked: news does not move it");
+        tracker.select_delta(-1);
+        assert_eq!(tracker.selected, Some(0), "locked: the knob still does");
+        tracker.toggle_lock();
+        tracker.follow(5);
+        assert_eq!(tracker.selected, Some(0), "no M key on lane 5 to follow to");
+    }
+
+    #[test]
+    fn a_selection_whose_lane_empties_heals_to_the_nearest() {
+        let mut tracker = Tracker::default();
+        tracker.settings.set_lane_count(6);
+        for lane in [0, 3] {
+            tracker.sessions.push(seated(lane));
+        }
+        tracker.selected = Some(3);
+        tracker.dismiss(3);
+        assert_eq!(tracker.selected, Some(0), "healed to what is left");
+        tracker.dismiss(0);
+        assert_eq!(tracker.selected, None, "nothing left to show");
     }
 }

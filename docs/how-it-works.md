@@ -286,12 +286,12 @@ turns both into one shape: three percentages, each possibly unknown.
 
 ## The keyboard
 
-Four surfaces, one palette. `app/src/surface/palette.rs` says what the twelve
-keys look like, by F-row position and never by LED; each surface maps a
-position to what its device calls that LED, and writes. The three device
-threads run for the life of the app: whatever is plugged in lights up, and
-all of it does if all of it is; the fourth surface is the screen, below under
-[The monitor](#the-monitor). Each is also a clock — through `surface/scene.rs`, which
+Five surfaces, one palette. `app/src/surface/palette.rs` says what the keys
+look like — the twelve by F-row position, the numpad's nine by their own —
+never by LED; each surface maps a position to what its device calls that LED,
+and writes. The four device threads run for the life of the app: whatever is
+plugged in lights up, and all of it does if all of it is; the fifth surface is
+the screen, below under [The monitor](#the-monitor). Each is also a clock — through `surface/scene.rs`, which
 decides when a frame is due — so lanes stay honest while the window is hidden.
 
 Each device's line in the window has a tick. Unticked, its thread hands the
@@ -378,6 +378,52 @@ keyboard's keymap, work over all three.
   handshake is used; switching between them reboots the keyboard, which is a
   reconnect like any other. `agent-frow doctor` lists what it finds and what
   each answers.
+
+### Keychron V0 Ultra, the numpad
+
+The same Launcher protocol as the Ultra above — same handshake, same mixed
+mode, same never-the-flash rule, same snapshot-and-restore, one code path:
+`surface/keychron_v0` reuses the Ultra's protocol, transport and session
+under its own `Geometry`. What differs is the shape and the vocabulary:
+
+- **Nine LEDs of twenty-six.** The four shape keys are a **top
+  line** showing one agent in the classic four-key lane patterns; M1–M5 are
+  an **agent column**, one key per lane — the resting glow, a low-to-full
+  breathe for Running, the double pulse for Waiting (steady full instead
+  while that agent's terminal is the foreground window — the top line does
+  the pulsing), a single beat for Done, the fixed red for Error. The other
+  seventeen keys stay on the user's own effect, exactly as the Ultra leaves
+  the rest of its board alone.
+- **Selection.** The top line shows the *selected* agent, and selection is
+  the tracker's (`selected`/`locked` on `tracker.rs`), not the surface's.
+  Unlocked, it chases the news: any lane state change pulls it there.
+  Pressing the knob locks it — shown as the selected M key fading lane
+  colour to white and back, white being the one shade no lane and no state
+  may use — and turning the knob always moves it, locked or not.
+- **Input is chords.** The knob and keys are remapped to Ctrl+Shift+F13–F24
+  (bare F13–F24 belong to the F-row) by importing a keymap file into the
+  Launcher — its key picker records only a physically pressed key, so a chord
+  cannot be chosen from the list; `firmware/keychron-ultra/keymaps/` holds
+  the file. The encoder takes a modified keycode like any key: knob CCW/CW/press
+  select and lock; M1–M5 select + summon their lane; the top line's four
+  keys are an F-row lane for the shown agent — any of them summons it, and
+  while it is Waiting the three after the first are ⏶⏷Enter. Both keyboards
+  bind through the one `lane_press` rule in `keys.rs`, the rule the lane
+  pattern draws, so the picture and the keys cannot disagree. All of it
+  lands in the same hotkey pump and the same summon/answer workers the
+  F-row and the deck use.
+- **Two Keychrons, one bus.** A V0 and a V3 Ultra answer the same handshake
+  on the same usage pair, so the surfaces *claim* an interface before
+  opening it (`keychron/hid.rs`) and each accepts only its own board —
+  twenty-six LEDs is the numpad, anything else the F-row's. Snapshots live
+  in separate files (`v0ultra-state.json`), and recall refuses a snapshot
+  with the wrong LED count, so a crashed app can never cross-restore the
+  boards.
+- The foreground check behind Waiting's steady-full is window-level — the
+  foreground window's process, verified against the session's recorded
+  ancestry the way summon verifies it, cached for two seconds and asked
+  only while a shown lane is Waiting. Two agents in tabs of one terminal
+  window both read as foreground; that is the honest limit of window-level.
 
 ### Stream Deck, over HID
 
@@ -590,8 +636,10 @@ on the same project share a tab title, and the first in Z-order wins — naming
 the lane is the remedy, as it is for the tab itself.
 
 The tab it looks for is **the lane's name**, then the project folder — which is
-why naming a lane is a feature. When neither matches it says so and lists the
-tabs that are there, rather than quietly leaving you looking at the right
+why naming a lane is a feature. That order is strict: a project tab that is
+already showing never beats a lane-named tab that exists, which matters when
+Claude and Codex share one project. When neither matches it says so and lists
+the tabs that are there, rather than quietly leaving you looking at the right
 terminal showing the wrong agent.
 
 Three things it must keep doing (the histories are in [lessons.md](lessons.md)):
