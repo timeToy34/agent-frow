@@ -232,9 +232,7 @@ fn handle_chord(tracker: &Arc<Mutex<Tracker>>, chord: usize) {
                 None
             }
             Some(Press::Summon(lane)) => {
-                if tracker.on_lane(lane).is_some() {
-                    tracker.selected = Some(lane);
-                }
+                tracker.select(lane);
                 Some(Press::Summon(lane))
             }
             other => other,

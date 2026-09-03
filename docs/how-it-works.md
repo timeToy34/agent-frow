@@ -389,17 +389,19 @@ under its own `Geometry`. What differs is the shape and the vocabulary:
 - **Nine LEDs of twenty-six.** The four shape keys are a **top
   line** showing one agent in the classic four-key lane patterns; M1–M5 are
   an **agent column**, one key per lane — the resting glow, a low-to-full
-  breathe for Running, the double pulse for Waiting (steady full instead
-  while that agent's terminal is the foreground window — the top line does
-  the pulsing), a single beat for Done, the fixed red for Error. The other
-  seventeen keys stay on the user's own effect, exactly as the Ultra leaves
-  the rest of its board alone.
+  breathe for Running, the double pulse for Waiting, steady full for Done,
+  the fixed red for Error. The other seventeen keys stay on the user's own
+  effect, exactly as the Ultra leaves the rest of its board alone.
 - **Selection.** The top line shows the *selected* agent, and selection is
   the tracker's (`selected`/`locked` on `tracker.rs`), not the surface's.
   Unlocked, it chases the news: any lane state change pulls it there.
   Pressing the knob locks it — shown as the selected M key fading lane
   colour to white and back, white being the one shade no lane and no state
-  may use — and turning the knob always moves it, locked or not.
+  may use — and turning the knob always moves it, locked or not. A preview
+  lights every M key, so while one plays the knob steps across all of them
+  and each M key selects its lane — the cursor and the lock can be seen on a
+  full column before any agent is there; when the preview ends the cursor
+  falls back to a real agent, or to nothing.
 - **Input is chords.** The knob and keys are remapped to Ctrl+Shift+F13–F24
   (bare F13–F24 belong to the F-row) by importing a keymap file into the
   Launcher — its key picker records only a physically pressed key, so a chord
@@ -419,11 +421,6 @@ under its own `Geometry`. What differs is the shape and the vocabulary:
   in separate files (`v0ultra-state.json`), and recall refuses a snapshot
   with the wrong LED count, so a crashed app can never cross-restore the
   boards.
-- The foreground check behind Waiting's steady-full is window-level — the
-  foreground window's process, verified against the session's recorded
-  ancestry the way summon verifies it, cached for two seconds and asked
-  only while a shown lane is Waiting. Two agents in tabs of one terminal
-  window both read as foreground; that is the honest limit of window-level.
 
 ### Stream Deck, over HID
 
@@ -520,9 +517,11 @@ the app without foreground permission, which makes summon fail specifically
 when the Agent F-Row window is focused even though the Focus button works.
 
 The F-row is always three lanes of four — `KEYBOARD_LANES × KEYS_PER_LANE` in
-`settings.rs`. The lane count is a setting of its own, three to six; a lane
-past the third has no keys and is shown in the window, in mini mode and on a
-deck with the rows. `keys::press_of` turns a key index into a `Press`: the
+`settings.rs`. The lane count is a setting of its own, three to six; each
+device carries as many lanes as it has keys for — the F-row three, the
+numpad's M column five, a deck one per row — and the window and mini mode
+carry every lane, which is what the copy above the lane list says instead of
+tagging lanes "no keys". `keys::press_of` turns a key index into a `Press`: the
 lane is `index / 4`, and every key of a lane summons it — except while the
 lane is *answerable* (`Tracker::answerable`: a session on it whose effective
 state is Waiting, and no preview playing), when the three after the first are

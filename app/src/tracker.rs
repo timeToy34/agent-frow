@@ -128,12 +128,16 @@ pub struct KeyboardStatus {
 
 impl KeyboardStatus {
     /// Driving `driven` of the twelve F-row keys on `model`. A whole row
-    /// says the model and nothing more — that it is driven is what the line
-    /// being lit means.
+    /// says the model and which keys it took, the way every surface's line
+    /// does — "the F-row, 3 lanes of 4 keys".
     pub fn connected(surface: &'static str, model: &str, driven: usize) -> Self {
         let keys = crate::settings::KEYS;
         let detail = if driven == keys {
-            model.to_owned()
+            format!(
+                "{model}: the F-row, {} lanes of {} keys",
+                crate::settings::KEYBOARD_LANES,
+                crate::settings::KEYS_PER_LANE
+            )
         } else {
             format!(
                 "{model}: only {driven} of the {keys} F-row keys exist here, so the lanes are incomplete"
@@ -612,9 +616,15 @@ impl Tracker {
     }
 
     /// The lanes the numpad can select — occupied, within the M column's
-    /// five — ascending. What the knob steps across.
+    /// five — ascending. What the knob steps across. While a preview plays
+    /// every M key under the cap is lit, so every one of them is a place the
+    /// cursor can go: the knob and the M keys work on a preview as they would
+    /// on a full column.
     pub fn selectable_lanes(&self) -> Vec<usize> {
         let cap = self.settings.lane_count.min(crate::settings::NUMPAD_LANES);
+        if self.preview.is_some() {
+            return (0..cap).collect();
+        }
         let mut lanes: Vec<usize> = self
             .sessions
             .iter()
@@ -649,6 +659,25 @@ impl Tracker {
     /// The knob pressed: pins the selection, or unpins it.
     pub fn toggle_lock(&mut self) {
         self.locked = !self.locked;
+    }
+
+    /// An M key pressed: puts the cursor on that lane if it is one the column
+    /// shows, locked or not — the user's hand always moves it. Says whether
+    /// it did.
+    pub fn select(&mut self, lane: usize) -> bool {
+        if !self.selectable_lanes().contains(&lane) {
+            return false;
+        }
+        self.selected = Some(lane);
+        true
+    }
+
+    /// The preview over: the keyboard goes back to the truth, and a cursor
+    /// left on a lane only the preview lit falls to a real agent, or to
+    /// nothing.
+    pub fn end_preview(&mut self) {
+        self.preview = None;
+        self.heal_selection();
     }
 
     /// Unlocked, the selection chases the news: any lane state change pulls
@@ -821,7 +850,10 @@ mod tests {
         assert_eq!(status.driven, 15);
         assert_eq!(status.detail, "Mk2: 15 keys");
         let f_row = KeyboardStatus::connected("Keychron", "V3 Ultra", 12);
-        assert_eq!(f_row.detail, "V3 Ultra", "a whole row is just the model");
+        assert_eq!(
+            f_row.detail, "V3 Ultra: the F-row, 3 lanes of 4 keys",
+            "a whole row names the model and its keys"
+        );
         let partial = KeyboardStatus::connected("Keychron", "V0", 10);
         assert!(partial.detail.contains("only 10 of the 12"));
     }
@@ -934,5 +966,45 @@ mod tests {
         assert_eq!(tracker.selected, Some(0), "healed to what is left");
         tracker.dismiss(0);
         assert_eq!(tracker.selected, None, "nothing left to show");
+    }
+
+    #[test]
+    fn a_preview_lights_every_m_key_so_the_knob_and_the_m_keys_reach_them_all() {
+        let mut tracker = Tracker::default();
+        tracker.settings.set_lane_count(6);
+        tracker.sessions.push(seated(2));
+        assert!(!tracker.select(4), "no agent on lane 4: the cursor stays");
+        assert_eq!(tracker.selected, None);
+        tracker.preview = Some(Preview {
+            state: State::Waiting,
+            expires_at: u64::MAX,
+        });
+        assert_eq!(
+            tracker.selectable_lanes(),
+            vec![0, 1, 2, 3, 4],
+            "five M keys, no lane 5"
+        );
+        tracker.select_delta(-1);
+        assert_eq!(
+            tracker.selected,
+            Some(4),
+            "from nothing, backward lands last"
+        );
+        assert!(
+            tracker.select(1),
+            "an M key selects a lane only the preview lights"
+        );
+        assert_eq!(tracker.selected, Some(1));
+        tracker.end_preview();
+        assert_eq!(tracker.preview, None);
+        assert_eq!(tracker.selected, Some(2), "back to the one real agent");
+        tracker.preview = Some(Preview {
+            state: State::Done,
+            expires_at: u64::MAX,
+        });
+        tracker.dismiss(2);
+        assert!(tracker.select(0));
+        tracker.end_preview();
+        assert_eq!(tracker.selected, None, "no agent left to fall back to");
     }
 }

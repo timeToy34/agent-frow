@@ -732,14 +732,7 @@ fn lanes_panel(
             // a lane past them is for an agent with none.
             let mut count = tracker.settings.lane_count;
             for option in LANE_COUNTS.rev() {
-                let hover = if option == KEYBOARD_LANES {
-                    "Three lanes, all on the keyboard".to_owned()
-                } else {
-                    format!(
-                        "{option} lanes — lanes 1–{KEYBOARD_LANES} on the keyboard, the rest in \
-                         the window, in mini mode and on a deck with the rows"
-                    )
-                };
+                let hover = format!("{option} lanes. {}", lanes_carried(option));
                 if ui
                     .selectable_label(count == option, option.to_string())
                     .on_hover_text(hover)
@@ -754,18 +747,13 @@ fn lanes_panel(
             }
         });
     });
-    let keys = "Four keys per lane on the keyboard: any of them summons the agent, and while \
-                it is Waiting the three after the first are ⏶ ⏷ Enter. A lane keeps its \
-                position for as long as its session lives.";
-    let caption = if tracker.settings.lane_count > KEYBOARD_LANES {
-        format!(
-            "Lanes {}–{} have no keys. {keys}",
-            KEYBOARD_LANES + 1,
-            tracker.settings.lane_count
-        )
-    } else {
-        keys.to_owned()
-    };
+    let caption = format!(
+        "{} Four keys per lane on the F-row: any of them summons the agent, and while it is \
+         Waiting the three after the first are ⏶ ⏷ Enter; on the numpad an M key summons \
+         its agent and the top line answers the one it shows. A lane keeps its position for \
+         as long as its session lives.",
+        lanes_carried(tracker.settings.lane_count)
+    );
     ui.label(egui::RichText::new(caption).weak());
     ui.add_space(6.0);
 
@@ -935,25 +923,15 @@ fn lane_card(
                         config.lanes[index].color = Rgb::new(rgb[0], rgb[1], rgb[2]);
                         changed = true;
                     }
-                    // Which keys this lane is on the keyboard — or that it is
-                    // on none, which is worth seeing without hovering.
-                    let keys = crate::keys::lane_keys_label(index);
+                    // Where this lane has keys, device by device — on hover,
+                    // because which devices are here is the user's own news.
                     ui.label(
                         egui::RichText::new(format!("{}", index + 1))
                             .monospace()
                             .strong()
                             .color(accent),
                     )
-                    .on_hover_text(match &keys {
-                        Some(span) => format!("{span} on the keyboard"),
-                        None => format!(
-                            "Not on the keyboard — only lanes 1–{KEYBOARD_LANES} have keys; \
-                             shown here, in mini mode and on a deck with the rows"
-                        ),
-                    });
-                    if keys.is_none() {
-                        ui.label(egui::RichText::new("no keys").small().weak());
-                    }
+                    .on_hover_text(lane_keys_hover(index));
                     // The name is load-bearing: milestone 4 finds a terminal tab by
                     // it. Empty means "whatever project is on this lane".
                     let hint = view
@@ -1080,23 +1058,10 @@ fn lane_card(
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             // Rightmost, because it is the one thing on this window
                             // that does something to the world outside it.
-                            let hover = match crate::keys::lane_keys_label(index) {
-                                Some(span) => {
-                                    let first = index * settings::KEYS_PER_LANE;
-                                    format!(
-                                        "Bring this agent's terminal forward, with its tab in \
-                                         front. Also on {span}; while the lane is Waiting, \
-                                         {} {} {} answer it with Up, Down and Enter.",
-                                        crate::keys::key_label(first + 1),
-                                        crate::keys::key_label(first + 2),
-                                        crate::keys::key_label(first + 3),
-                                    )
-                                }
-                                None => "Bring this agent's terminal forward, with its tab in \
-                                         front. This lane has no keys on the keyboard; this \
-                                         button is it."
-                                    .to_owned(),
-                            };
+                            let hover = format!(
+                                "Bring this agent's terminal forward, with its tab in front. {}",
+                                focus_keys_hover(index)
+                            );
                             if ui.small_button("Focus").on_hover_text(hover).clicked() {
                                 actions.focus = Some(index);
                             }
@@ -1786,18 +1751,18 @@ fn keyboard_panel(ui: &mut egui::Ui, tracker: &mut Tracker) -> bool {
                 .selectable_label(active == Some(state), state.label())
                 .clicked()
             {
-                tracker.preview = if active == Some(state) {
-                    None
+                if active == Some(state) {
+                    tracker.end_preview();
                 } else {
-                    Some(tracker::Preview {
+                    tracker.preview = Some(tracker::Preview {
                         state,
                         expires_at: crate::now_ms() + PREVIEW_MS,
-                    })
-                };
+                    });
+                }
             }
         }
         if ui.selectable_label(active.is_none(), "Live").clicked() {
-            tracker.preview = None;
+            tracker.end_preview();
         }
         if active.is_some() {
             ui.label(
@@ -1858,6 +1823,73 @@ fn device_tuning(ui: &mut egui::Ui, tuning: &mut settings::Tuning, balance: bool
     ui.label(egui::RichText::new("🎨").weak())
         .on_hover_text("Colour balance — R, G and B, what this keyboard is sent");
     changed
+}
+
+/// Where lanes have keys, device by device: the F-row carries the first
+/// three, the numpad's M column the first five, a deck one lane per row, and
+/// the window and mini mode every lane. The copy above the lane list and the
+/// lane-count picker both say it from here, for `count` lanes.
+fn lanes_carried(count: usize) -> String {
+    if count <= KEYBOARD_LANES {
+        return "Three lanes, on every device.".to_owned();
+    }
+    format!(
+        "The F-row carries lanes 1–{}, the numpad lanes 1–{}, a deck one lane per row; the \
+         window and mini mode show all {count}.",
+        KEYBOARD_LANES.min(count),
+        settings::NUMPAD_LANES.min(count)
+    )
+}
+
+/// One lane's keys, device by device, for the hover on its number.
+fn lane_keys_hover(index: usize) -> String {
+    let mut on: Vec<String> = Vec::new();
+    if let Some(span) = crate::keys::lane_keys_label(index) {
+        on.push(format!("{span} on the F-row"));
+    }
+    if index < settings::NUMPAD_LANES {
+        on.push(format!("M{} on the numpad", index + 1));
+    }
+    on.push(format!("row {} of a deck with the rows", index + 1));
+    let mut text = on.join(", ");
+    if let Some(first) = text.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    let missing = match (index < KEYBOARD_LANES, index < settings::NUMPAD_LANES) {
+        (true, _) => "",
+        (false, true) => " — no F-row keys",
+        (false, false) => " — no F-row keys, no M key",
+    };
+    format!("{text}{missing}. Always in the window and in mini mode.")
+}
+
+/// What else summons a lane, for the Focus button's hover: the F-row's four
+/// with their answer keys, the numpad's M key with the top line, or nothing
+/// but this button and a deck row.
+fn focus_keys_hover(index: usize) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(span) = crate::keys::lane_keys_label(index) {
+        let first = index * settings::KEYS_PER_LANE;
+        parts.push(format!(
+            "Also on {span}; while the lane is Waiting, {} {} {} answer it with Up, Down and \
+             Enter.",
+            crate::keys::key_label(first + 1),
+            crate::keys::key_label(first + 2),
+            crate::keys::key_label(first + 3),
+        ));
+    }
+    if index < settings::NUMPAD_LANES {
+        parts.push(format!(
+            "M{} on the numpad summons it too, and the numpad's top line answers it while it \
+             shows this lane.",
+            index + 1
+        ));
+    }
+    if parts.is_empty() {
+        return "No key on any keyboard summons this lane; this button and a deck row are it."
+            .to_owned();
+    }
+    parts.join(" ")
 }
 
 /// How long a preview plays before the keyboard goes back to the truth on its
@@ -2139,4 +2171,48 @@ fn icon() -> tray_icon::Icon {
         #[allow(clippy::expect_used)]
         tray_icon::Icon::from_rgba(blank, SIZE, SIZE).expect("a blank square is a valid icon")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_lane_copy_says_where_each_device_stops() {
+        assert_eq!(lanes_carried(3), "Three lanes, on every device.");
+        assert_eq!(
+            lanes_carried(4),
+            "The F-row carries lanes 1–3, the numpad lanes 1–4, a deck one lane per row; the \
+             window and mini mode show all 4."
+        );
+        assert!(
+            lanes_carried(6).contains("the numpad lanes 1–5"),
+            "capped at M5"
+        );
+        assert_eq!(
+            lane_keys_hover(0),
+            "F13–F16 on the F-row, M1 on the numpad, row 1 of a deck with the rows. Always in \
+             the window and in mini mode."
+        );
+        assert_eq!(
+            lane_keys_hover(3),
+            "M4 on the numpad, row 4 of a deck with the rows — no F-row keys. Always in the \
+             window and in mini mode."
+        );
+        assert_eq!(
+            lane_keys_hover(5),
+            "Row 6 of a deck with the rows — no F-row keys, no M key. Always in the window \
+             and in mini mode."
+        );
+        assert!(
+            focus_keys_hover(0)
+                .starts_with("Also on F13–F16; while the lane is Waiting, F14 F15 F16")
+        );
+        assert!(focus_keys_hover(0).contains("M1 on the numpad summons it too"));
+        assert!(focus_keys_hover(4).starts_with("M5 on the numpad"));
+        assert_eq!(
+            focus_keys_hover(5),
+            "No key on any keyboard summons this lane; this button and a deck row are it."
+        );
+    }
 }

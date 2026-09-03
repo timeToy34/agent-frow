@@ -44,10 +44,6 @@ const PULSE_PERIOD_MS: u64 = 1200;
 /// M column, where a lane is one key and the scanner has nowhere to travel.
 const BREATHE_PERIOD_MS: u64 = 2000;
 
-/// One single-pulse cycle of Done on a single key: a beat, then a long quiet.
-/// Slower than Waiting's urgent pair — finished is news, not a question.
-const DONE_PERIOD_MS: u64 = 2400;
-
 /// One colour-to-white-and-back fade of the locked agent's key.
 const LOCK_PERIOD_MS: u64 = 2400;
 
@@ -178,31 +174,14 @@ pub fn lane_colors(
     }
 }
 
-/// One beat and a rest, `0.0..=1.0` — [`double_pulse`]'s calm sibling.
-fn single_pulse(elapsed_ms: u64, period_ms: u64) -> f32 {
-    let period = period_ms.max(1);
-    let phase = (elapsed_ms % period) as f32 / period as f32;
-    if phase < 0.25 {
-        triangle((elapsed_ms % period) * 4, period)
-    } else {
-        0.0
-    }
-}
-
 /// One agent as one key — the numpad's M column. The owner's table:
 /// Connected and Idle rest at the glow; Running breathes low to full; Waiting
-/// double-pulses, unless the agent's terminal is the foreground window, in
-/// which case the key holds full and the top line does the pulsing; Done
-/// beats once a cycle; Error is the fixed red, steady. The selected agent's
-/// key carries the same motion lifted onto a brighter floor, which is how the
-/// column says which agent the top line is showing.
-pub fn m_key(
-    state: Option<State>,
-    lane_color: Rgb,
-    elapsed_ms: u64,
-    selected: bool,
-    terminal_foreground: bool,
-) -> Rgb {
+/// double-pulses, whichever window is in front — a question is a question;
+/// Done holds full, steady — finished is news, not a rhythm; Error is the
+/// fixed red, steady. The selected agent's key carries the same motion lifted
+/// onto a brighter floor, which is how the column says which agent the top
+/// line is showing.
+pub fn m_key(state: Option<State>, lane_color: Rgb, elapsed_ms: u64, selected: bool) -> Rgb {
     let Some(state) = state else {
         return OFF;
     };
@@ -219,9 +198,8 @@ pub fn m_key(
         State::Error => DARK_RED,
         State::Connected | State::Idle => level(BASE),
         State::Running => level(over_glow(triangle(elapsed_ms, BREATHE_PERIOD_MS))),
-        State::Waiting if terminal_foreground => level(1.0),
         State::Waiting => level(over_glow(double_pulse(elapsed_ms, PULSE_PERIOD_MS))),
-        State::Done => level(over_glow(single_pulse(elapsed_ms, DONE_PERIOD_MS))),
+        State::Done => level(1.0),
     }
 }
 
@@ -523,46 +501,28 @@ mod tests {
     }
 
     #[test]
-    fn a_single_pulse_is_one_beat_and_a_long_rest() {
-        let period = DONE_PERIOD_MS;
-        assert_eq!(single_pulse(0, period), 0.0);
-        assert_eq!(single_pulse(period / 8, period), 1.0, "the beat's peak");
-        for elapsed in (period / 4..period).step_by(50) {
-            assert_eq!(single_pulse(elapsed, period), 0.0, "resting at {elapsed}ms");
-        }
-        for elapsed in (0..period).step_by(25) {
-            let level = single_pulse(elapsed, period);
-            assert!((0.0..=1.0).contains(&level));
-        }
-    }
-
-    #[test]
     fn an_m_key_follows_the_owners_table() {
         // Empty is dark; Connected and Idle rest at the glow.
-        assert_eq!(m_key(None, LANE, 123, false, false), OFF);
+        assert_eq!(m_key(None, LANE, 123, false), OFF);
         for quiet in [State::Connected, State::Idle] {
-            assert_eq!(m_key(Some(quiet), LANE, 123, false, false), base(LANE));
+            assert_eq!(m_key(Some(quiet), LANE, 123, false), base(LANE));
         }
         // Error is the fixed red whatever the lane colour or selection.
         for selected in [false, true] {
             assert_eq!(
-                m_key(
-                    Some(State::Error),
-                    Rgb::new(90, 210, 130),
-                    55,
-                    selected,
-                    false
-                ),
+                m_key(Some(State::Error), Rgb::new(90, 210, 130), 55, selected),
                 DARK_RED
             );
         }
-        // Waiting with the terminal focused holds full — the top line beats.
-        assert_eq!(m_key(Some(State::Waiting), LANE, 999, false, true), LANE);
-        // Waiting unfocused beats between the glow and full.
+        // Done holds full, steady: the same colour whenever it is sampled.
+        for elapsed in [0, 999, 2400] {
+            assert_eq!(m_key(Some(State::Done), LANE, elapsed, false), LANE);
+        }
+        // Waiting beats between the glow and full.
         let mut seen_high = false;
         let mut seen_low = false;
         for elapsed in (0..PULSE_PERIOD_MS).step_by(25) {
-            let color = m_key(Some(State::Waiting), LANE, elapsed, false, false);
+            let color = m_key(Some(State::Waiting), LANE, elapsed, false);
             seen_high |= color == LANE;
             seen_low |= color == base(LANE);
         }
@@ -571,7 +531,7 @@ mod tests {
         let floor = base(LANE);
         let samples: Vec<Rgb> = (0..BREATHE_PERIOD_MS)
             .step_by(100)
-            .map(|elapsed| m_key(Some(State::Running), LANE, elapsed, false, false))
+            .map(|elapsed| m_key(Some(State::Running), LANE, elapsed, false))
             .collect();
         assert!(samples.windows(2).any(|pair| pair[0] != pair[1]));
         for color in &samples {
@@ -581,18 +541,18 @@ mod tests {
 
     #[test]
     fn the_selected_key_rests_brighter_and_keeps_its_motion() {
-        let resting = m_key(Some(State::Connected), LANE, 0, false, false);
-        let selected = m_key(Some(State::Connected), LANE, 0, true, false);
+        let resting = m_key(Some(State::Connected), LANE, 0, false);
+        let selected = m_key(Some(State::Connected), LANE, 0, true);
         assert!(
             selected.r > resting.r || selected.g > resting.g || selected.b > resting.b,
             "{selected:?} should out-glow {resting:?}"
         );
-        // Full stays full: a selected Waiting-focused key is exactly the colour.
-        assert_eq!(m_key(Some(State::Waiting), LANE, 7, true, true), LANE);
+        // Full stays full: a selected Done key is exactly the colour.
+        assert_eq!(m_key(Some(State::Done), LANE, 7, true), LANE);
         // And a selected Running still visibly breathes.
         let samples: Vec<Rgb> = (0..BREATHE_PERIOD_MS)
             .step_by(100)
-            .map(|elapsed| m_key(Some(State::Running), LANE, elapsed, true, false))
+            .map(|elapsed| m_key(Some(State::Running), LANE, elapsed, true))
             .collect();
         assert!(samples.windows(2).any(|pair| pair[0] != pair[1]));
     }

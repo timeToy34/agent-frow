@@ -274,10 +274,12 @@ hook, or the lighting.
   no title bar, place and size remembered. Done.
 - **M8 — Keychron V0 Ultra numpad**: a knob-selected top line in the classic
   lane patterns, an agent column on M1–M5, selection and lock on the
-  tracker, Ctrl+Shift chord input, the Waiting-foreground poll. Built and
-  tested against the scripted board 2026-08-30; verified on two boards
-  2026-09-02 — the firmware fix, the knob, the lock, the M keys and the
-  top line.
+  tracker, Ctrl+Shift chord input. Built and tested against the scripted
+  board 2026-08-30; verified on two boards 2026-09-02 — the firmware fix,
+  the knob, the lock, the M keys and the top line. The first hours of use
+  retuned the column: Done holds steady full, and Waiting double-pulses
+  whichever window is in front (the foreground poll that had quieted it
+  went with that).
 
 `app/src/surface/corsair/` and `app/src/focus/` are the only code carried over
 from the previous version, because they were the only parts that demonstrably

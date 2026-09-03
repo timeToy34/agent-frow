@@ -101,7 +101,7 @@ impl Scene {
                 .preview
                 .is_some_and(|preview| preview.expires_at <= now)
             {
-                tracker.preview = None;
+                tracker.end_preview();
             }
             let lanes = tracker.settings.lane_count;
             let states: Vec<Option<State>> = match tracker.preview {

@@ -132,21 +132,6 @@ pub fn raise(_ancestors: &[crate::event::Ancestor], _tab_names: &[String]) -> Re
     Report::failed("focus is a Windows facility")
 }
 
-/// Whether the window that ran `ancestors` has the foreground right now —
-/// the numpad's question for a Waiting lane: its M key double-pulses for
-/// attention only while the user is *not* already there. Never raises or
-/// changes anything. Window-level only: two agents in tabs of one terminal
-/// window both read as foreground.
-#[cfg(windows)]
-pub fn is_foreground(ancestors: &[crate::event::Ancestor]) -> bool {
-    window::is_foreground(ancestors)
-}
-
-#[cfg(not(windows))]
-pub fn is_foreground(_ancestors: &[crate::event::Ancestor]) -> bool {
-    false
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {

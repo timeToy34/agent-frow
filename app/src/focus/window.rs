@@ -137,36 +137,6 @@ fn visible_windows() -> Vec<Candidate> {
     collected
 }
 
-/// Whether the foreground window belongs to one of `ancestors` — the pid of
-/// its root window, verified the way `raise` verifies every ancestor: the
-/// pid must still resolve to the exe name the hook recorded, or it belongs
-/// to some bystander now. `explorer.exe` is skipped for the same reason
-/// `raise` skips it: it is every desktop process's ancestor, and any
-/// Explorer window would otherwise read as the agent's.
-pub fn is_foreground(ancestors: &[Ancestor]) -> bool {
-    // SAFETY: reads the current foreground window; null when there is none.
-    let foreground = unsafe { GetForegroundWindow() };
-    if foreground.0.is_null() {
-        return false;
-    }
-    // SAFETY: a live HWND from the line above.
-    let root = unsafe { GetAncestor(foreground, GA_ROOT) };
-    let mut pid = 0u32;
-    // SAFETY: `pid` receives the owning process id of a live HWND.
-    unsafe { GetWindowThreadProcessId(root, Some(&mut pid)) };
-    if pid == 0 {
-        return false;
-    }
-    ancestors.iter().any(|ancestor| {
-        ancestor.pid == pid
-            && ancestor.exe.as_deref().is_some_and(|recorded| {
-                !recorded.eq_ignore_ascii_case("explorer.exe")
-                    && exe_basename_of_pid(pid)
-                        .is_some_and(|current| current.eq_ignore_ascii_case(recorded))
-            })
-    })
-}
-
 pub fn raise(ancestors: &[Ancestor], tab_names: &[String]) -> Report {
     if ancestors.is_empty() {
         // Older events carry no ancestry; the next one from that session will.

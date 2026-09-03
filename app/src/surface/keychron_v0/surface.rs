@@ -5,12 +5,11 @@
 //!
 //! Unlike the F-row this surface paints on its own terms, the way the deck
 //! does: [`Scene::tick`] is used as the clock only, and every frame is
-//! composed from [`Scene::current`] plus one look at the tracker — selection,
-//! lock and the foreground of a Waiting agent's terminal all change without
-//! any lane changing state, and [`Board::paint`] already writes only the keys
-//! that differ, so a still board costs nothing anyway.
+//! composed from [`Scene::current`] plus one look at the tracker — selection
+//! and lock change without any lane changing state, and [`Board::paint`]
+//! already writes only the keys that differ, so a still board costs nothing
+//! anyway.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -37,11 +36,6 @@ const RETRY: Duration = Duration::from_secs(10);
 
 /// How long the quit path waits for the board to be handed back.
 const RESTORE_GRACE: Duration = Duration::from_millis(1500);
-
-/// How long a "is its terminal the foreground window?" verdict is trusted.
-/// Only Waiting lanes ask, and a flip two seconds late is invisible next to
-/// the human walking back to the desk.
-const FOREGROUND_TTL: Duration = Duration::from_secs(2);
 
 /// The keys by position: the four shape keys are the top line…
 const TOP_KEYS: usize = 4;
@@ -162,8 +156,6 @@ fn render(tracker: &Mutex<Tracker>) {
     let mut remembered: Option<Snapshot> = recall();
     let mut next_attempt = Instant::now();
     let mut enabled = true;
-    // The foreground verdicts, per session, each trusted for a moment.
-    let mut foreground: HashMap<(String, String), (bool, Instant)> = HashMap::new();
 
     while RUNNING.load(Ordering::SeqCst) {
         // The clock, board or no board. What it says about change is not
@@ -232,29 +224,12 @@ fn render(tracker: &Mutex<Tracker>) {
                 let Ok(guard) = tracker.lock() else {
                     break;
                 };
-                let now = Instant::now();
-                let cache = &mut foreground;
-                let waiting_foreground = |lane: usize| -> bool {
-                    let Some(session) = guard.on_lane(lane) else {
-                        return false;
-                    };
-                    let key = (session.source.clone(), session.session_id.clone());
-                    if let Some((verdict, at)) = cache.get(&key)
-                        && now.duration_since(*at) < FOREGROUND_TTL
-                    {
-                        return *verdict;
-                    }
-                    let verdict = crate::focus::is_foreground(&session.ancestors);
-                    cache.insert(key, (verdict, now));
-                    verdict
-                };
                 compose(
                     guard.selected,
                     guard.locked,
                     frame.states,
                     frame.settings,
                     frame.elapsed_ms,
-                    waiting_foreground,
                 )
             };
             let colours: Vec<(usize, Rgb)> = composed
@@ -294,7 +269,6 @@ fn compose(
     states: &[Option<State>],
     settings: &Settings,
     elapsed_ms: u64,
-    mut waiting_foreground: impl FnMut(usize) -> bool,
 ) -> Vec<(usize, Rgb)> {
     let mut keys = Vec::with_capacity(KEYS);
     let shown = settings.lane_count.min(NUMPAD_LANES);
@@ -326,8 +300,7 @@ fn compose(
         let color = if is_selected && locked && state.is_some() {
             palette::lock_blend(lane_color(lane), elapsed_ms)
         } else {
-            let focused = state == Some(State::Waiting) && waiting_foreground(lane);
-            palette::m_key(state, lane_color(lane), elapsed_ms, is_selected, focused)
+            palette::m_key(state, lane_color(lane), elapsed_ms, is_selected)
         };
         keys.push((key, color));
     }
@@ -411,7 +384,7 @@ mod tests {
             None,
             None,
         ];
-        let frame = compose(Some(0), false, &states, &settings(6), 123, |_| false);
+        let frame = compose(Some(0), false, &states, &settings(6), 123);
         let mut named: Vec<usize> = frame.iter().map(|(key, _)| *key).collect();
         named.sort_unstable();
         assert_eq!(named, (0..KEYS).collect::<Vec<usize>>());
@@ -429,11 +402,11 @@ mod tests {
         ];
         let settings = settings(6);
         let lane_color = settings.lanes[0].color;
-        let frame = compose(Some(0), false, &states, &settings, 0, |_| false);
+        let frame = compose(Some(0), false, &states, &settings, 0);
         let expected = palette::lane_colors(Some(State::Waiting), lane_color, TOP_KEYS, 0);
         assert_eq!(&colors_of(&frame)[..TOP_KEYS], &expected[..]);
         // Nothing displayed: the top line goes dark, the column stays lit.
-        let dark = compose(None, false, &states, &settings, 0, |_| false);
+        let dark = compose(None, false, &states, &settings, 0);
         assert!(
             colors_of(&dark)[..TOP_KEYS]
                 .iter()
@@ -457,7 +430,7 @@ mod tests {
             None,
         ];
         let settings = settings(3);
-        let frame = compose(None, false, &states, &settings, 7, |_| false);
+        let frame = compose(None, false, &states, &settings, 7);
         let keys = colors_of(&frame);
         assert_eq!(keys[TOP_KEYS], palette::base(settings.lanes[0].color));
         assert_eq!(keys[TOP_KEYS + 1], palette::OFF, "an empty lane is dark");
@@ -483,17 +456,8 @@ mod tests {
         let settings = settings(6);
         // Sample at the fade's peak so the locked key is unmistakably white.
         let elapsed = 1200;
-        let unlocked = colors_of(&compose(
-            Some(0),
-            false,
-            &states,
-            &settings,
-            elapsed,
-            |_| false,
-        ));
-        let locked = colors_of(&compose(Some(0), true, &states, &settings, elapsed, |_| {
-            false
-        }));
+        let unlocked = colors_of(&compose(Some(0), false, &states, &settings, elapsed));
+        let locked = colors_of(&compose(Some(0), true, &states, &settings, elapsed));
         assert_eq!(
             locked[TOP_KEYS],
             palette::lock_blend(settings.lanes[0].color, elapsed)
@@ -511,33 +475,24 @@ mod tests {
         );
         // A locked selection whose lane is empty has nothing to fade.
         let empty = [None, None, None, None, None, None];
-        let idle = colors_of(&compose(Some(0), true, &empty, &settings, elapsed, |_| {
-            false
-        }));
+        let idle = colors_of(&compose(Some(0), true, &empty, &settings, elapsed));
         assert_eq!(idle[TOP_KEYS], palette::OFF);
     }
 
     #[test]
-    fn a_waiting_agents_m_key_asks_about_its_terminal_and_only_then() {
+    fn a_done_agents_m_key_holds_full_while_a_waiting_ones_beats() {
         let states = [
+            Some(State::Done),
             Some(State::Waiting),
-            Some(State::Running),
             None,
             None,
             None,
             None,
         ];
         let settings = settings(6);
-        let mut asked: Vec<usize> = Vec::new();
-        let frame = compose(None, false, &states, &settings, 300, |lane| {
-            asked.push(lane);
-            true
-        });
-        assert_eq!(asked, vec![0], "only the Waiting lane asks");
-        // Foreground: steady full — the top line does the pulsing.
-        assert_eq!(colors_of(&frame)[TOP_KEYS], settings.lanes[0].color);
-        // Not foreground: the double pulse, which at this instant is not full.
-        let away = compose(None, false, &states, &settings, 300, |_| false);
-        assert_ne!(colors_of(&away)[TOP_KEYS], settings.lanes[0].color);
+        // Sampled off the beat: Done is still exactly its colour, Waiting is not.
+        let frame = colors_of(&compose(None, false, &states, &settings, 300));
+        assert_eq!(frame[TOP_KEYS], settings.lanes[0].color);
+        assert_ne!(frame[TOP_KEYS + 1], settings.lanes[1].color);
     }
 }

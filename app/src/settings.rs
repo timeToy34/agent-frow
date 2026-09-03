@@ -1,8 +1,9 @@
 //! Lane configuration, saved agents, and keeping both on disk.
 //!
 //! The F-row has twelve keys: three lanes of four. A lane is where a session
-//! is shown; a lane past the keyboard's three has no keys and is shown in the
-//! window, in mini mode and on a deck with the rows. A saved agent is an
+//! is shown; each device carries as many lanes as it has keys for — the F-row
+//! three, the numpad's M column five, a deck one per row — and the window and
+//! mini mode carry every lane. A saved agent is an
 //! `(agent, project folder)` the user asked the app to remember, with the lane
 //! it would rather come back to.
 //!
@@ -22,7 +23,7 @@ pub const KEYS: usize = 12;
 /// How the F-row is cut: a lane is four keys — the first summons its agent,
 /// the other three answer it while it is Waiting — the shape of a deck row
 /// without its state key. Not a layout to choose: the lane count is a setting
-/// of its own, and a lane past [`KEYBOARD_LANES`] simply has no keys.
+/// of its own, and a lane past [`KEYBOARD_LANES`] simply has no F-row keys.
 pub const KEYS_PER_LANE: usize = 4;
 
 /// How many lanes have keys on the keyboard.
@@ -37,8 +38,9 @@ pub const NUMPAD_LANES: usize = 5;
 pub const MAX_LANES: usize = 6;
 
 /// The lane counts a user may pick: the keyboard's three, up to the six
-/// configuration is kept for. A lane past the keyboard is for an agent with
-/// no keys — shown in the window, in mini mode and on a deck with the rows.
+/// configuration is kept for. A lane past the F-row is still on the numpad
+/// up to its five and on a deck with the rows, and always in the window and
+/// in mini mode.
 pub const LANE_COUNTS: RangeInclusive<usize> = KEYBOARD_LANES..=MAX_LANES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
