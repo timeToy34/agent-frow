@@ -2,10 +2,11 @@
 
 [![CI](https://github.com/timeToy34/agent-frow/actions/workflows/ci.yml/badge.svg)](https://github.com/timeToy34/agent-frow/actions/workflows/ci.yml)
 
-Your coding agents, on your keyboard's F-row. Each agent gets a lane of lit
-keys that shows what it is doing — working, done, **waiting for you** — one
-press on the lane's key brings that agent's window to the front, and while it
-is waiting, three more keys answer it.
+Your coding agents, on your keyboard's F-row — or on a numpad, or a Stream
+Deck. Each agent gets a lane of lit keys that shows what it is doing —
+working, done, **waiting for you** — one press on the lane's key brings that
+agent's window to the front, and while it is waiting, three more keys answer
+it.
 
 https://github.com/user-attachments/assets/2d799d6d-d815-481b-9ae2-f113a0af6aeb
 
@@ -17,7 +18,7 @@ https://github.com/user-attachments/assets/2d799d6d-d815-481b-9ae2-f113a0af6aeb
 | **Keychron Ultra** — V3 Ultra 8K (the other Ultras speak the same protocol) | the F-row as lanes; the same keys, from the Launcher keymap | the cable or the 2.4 GHz receiver, not Bluetooth; Keychron's per-key-brightness fix for true darks | verified |
 | **Elgato Stream Deck** — 2019 V2, 15 keys (every model with a screen, through the driver) | one row per lane: name, context, 5h, 7d, state; every key a summon; ▲▼Enter while Waiting | USB; the Stream Deck app closed | verified |
 | **The monitor** — mini mode | the same rows on screen, five keys each; click a key to summon | nothing | verified |
-| **Keychron V0 Ultra** — the numpad | one agent on the four shape keys (the classic lane patterns; knob to select, knob-press to lock, colour↔white fade when locked), the M column one key per agent; M keys select + summon; the top line is an F-row lane for the shown agent — any of its keys summons it, and while it is Waiting the three after the first answer ⏶⏷Enter | the cable or the 2.4 GHz receiver; the per-key-brightness fix; the knob and keys remapped to Ctrl+Shift+F13–F24 by importing [the keymap file](firmware/keychron-ultra/keymaps/) | verified |
+| **Keychron V0 Ultra** — the numpad | the M column one key per agent, up to five — glow, breathe, double pulse, full, red — and the four shape keys as a top line showing one agent in the F-row's patterns; the knob picks which (press to lock), an M key selects and summons, the top line summons and answers ⏶⏷Enter while Waiting | the cable or the 2.4 GHz receiver; the per-key-brightness fix; the knob and keys remapped to Ctrl+Shift+F13–F24 by importing [the keymap file](firmware/keychron-ultra/keymaps/) | verified, two boards |
 
 Without any of them the window shows everything; the keys and the light are
 the part you would be missing.
@@ -41,8 +42,9 @@ it.
   denies anything, and never acts on its own; its reply to every hook is
   empty. Any of a lane's keys brings the agent's window forward. While a lane
   is Waiting, three of them — the lane's second, third and fourth on the
-  F-row, a row's three middle keys on a Stream Deck — send one Up, Down or
-  Enter, only into a terminal that verifiably has the keyboard. The agents
+  F-row, a row's three middle keys on a Stream Deck, the numpad's top line for
+  the agent it shows — send one Up, Down or Enter, only into a terminal that
+  verifiably has the keyboard. The agents
   talk to it over loopback on your machine, and nothing leaves it. Of Claude's
   status-line JSON, three percentages reach the app — context used, the
   five-hour and seven-day limits — and the JSON goes on to your own status
@@ -52,10 +54,11 @@ it.
 
 ### On the keys
 
-Twelve F-row keys, three lanes of four; more lanes live in the window and on a
-deck with the rows. Each lane has its own colour, and every state is that
-colour at some brightness and motion — a *change* of colour means trouble, and
-red means Error and nothing else.
+Twelve F-row keys, three lanes of four; each device carries as many lanes as
+it has keys for — the F-row three, the numpad's M column five, a deck one per
+row — and the window shows them all. Each lane has its own colour, and every
+state is that colour at some brightness and motion — a *change* of colour
+means trouble, and red means Error and nothing else.
 
 | State | On the keys | Meaning |
 |---|---|---|
@@ -66,6 +69,12 @@ red means Error and nothing else.
 | Error | first key full, the rest dark red | the turn failed |
 | Idle | first key dim, the rest off | nothing heard for a while |
 | empty | off | no agent on this lane |
+
+On the numpad an agent is one key, so the M column says the same thing with
+less: Connected and Idle rest dim, Running breathes, Waiting double-pulses,
+Done holds full, Error is dark red; the selected agent's key sits brighter,
+and a locked one fades to white and back. The four shape keys above are a top
+line showing that agent in the patterns of the table.
 
 Idle is silence, not a verdict: Done and Connected dim to Idle after 30
 minutes, Running after 2 hours, and Waiting and Error never — they are exactly
@@ -134,8 +143,9 @@ for it.
 2. Restart your agents so they read their hooks. **Codex also needs `/hooks`
    run inside it and the entry trusted** — until then it looks installed and
    nothing happens.
-3. For the keyboard: remap the F-row to **F13–F24** in the keyboard's own
-   software — see [Keyboards](#keyboards) for each.
+3. For a keyboard: remap the F-row to **F13–F24** in the keyboard's own
+   software; for the V0 Ultra numpad, import the keymap file in the Launcher
+   — see [Keyboards](#keyboards) for each.
 
 Upgrading is the same gesture with a newer zip. "Start with Windows" is a
 checkbox in the window. Windows will warn on first run: the zip is not
@@ -146,11 +156,12 @@ registered, and when it was last heard from, with Install and Remove per agent.
 
 ## Keyboards
 
-Two keyboards and a Stream Deck are supported, and all may be plugged in at
-once. On a keyboard the app touches only the twelve F-row LEDs and leaves the
-rest of the board to you. The F-row is three lanes of four keys: any key of a
-lane brings its agent forward, and while the lane is Waiting the three after
-the first are **Up, Down and Enter** — the same rule as a Stream Deck row,
+Two keyboards, a numpad and a Stream Deck are supported, and all may be
+plugged in at once. On a keyboard the app touches only the twelve F-row LEDs,
+on the numpad nine, and leaves the rest of the board to you. The F-row is
+three lanes of four keys: any key of a lane brings its agent forward, and
+while the lane is Waiting the three after the first are **Up, Down and
+Enter** — the same rule as a Stream Deck row and as the numpad's top line,
 with the same care about where the keystroke goes. A held key is one answer,
 not a stream of them.
 
@@ -186,7 +197,15 @@ Keymap tab, **Export** your current keymap first (that is your undo), then
 **Import** [keychron_v0_ultra_ansi.json](firmware/keychron-ultra/keymaps/keychron_v0_ultra_ansi.json)
 over the cable. It is the stock layout with the knob and those nine keys
 changed; the numpad keys stay numpad keys. M5 stops being Fn — everything
-Fn did is in the Launcher's Lighting tab.
+Fn did is in the Launcher's Lighting tab. In use: M1–M5 are lanes 1–5, one
+key each, and the top line shows one of them in the F-row's patterns. The
+knob picks which — unlocked, the top line follows whatever changed last;
+press the knob to lock it there and the M key fades to white and back.
+Pressing an M key selects that agent and brings its window forward; the top
+line's four keys bring the shown agent forward, and while it is Waiting the
+three after the first answer **Up, Down and Enter**. With a Preview playing
+the knob and the M keys work on every lit key, so the cursor and the lock
+can be seen before any agent is there.
 
 **Elgato Stream Deck (a 2019 V2 with 15 keys verified; the driver knows
 every model with a screen).** Plain USB, no driver, nothing to install. One row per lane, like a
@@ -215,8 +234,9 @@ status line is registered.
 
 ## Settings
 
-- Lane count — three to six; the keyboard always carries lanes 1–3, four keys
-  each, and the rest are off it — and each lane's name and colour.
+- Lane count — three to six; each device carries as many lanes as it has
+  keys for — the F-row three, the numpad five, a deck one per row — and the
+  window and mini mode show them all — and each lane's name and colour.
 - Each device on its own line, with a tick in front: untick one to leave it
   alone — plugged in, found, and not driven — and tick it to take it back.
   Brightness (☀) for all of them and **colour balance** (🎨, a per-channel

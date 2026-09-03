@@ -45,6 +45,11 @@ everything):
 - Keychron Ultra, the remap in the Launcher keymap; light over the cable or
   the 2.4 GHz receiver, not Bluetooth. Per-key brightness needs Keychron's
   firmware fix (Keychron/zmk pull request 9).
+- Keychron V0 Ultra numpad: import the keymap file from the repository
+  (firmware/keychron-ultra/keymaps) in the Launcher's Keymap tab - the knob
+  and nine keys send Ctrl+Shift+F13-F24. One agent per M key, the top line
+  shows the one the knob picks; same cable-or-receiver rule and the same
+  firmware fix, built for the V0.
 - Stream Deck: quit the Stream Deck app. One row per lane - name, numbers,
   state; every key summons, and while a lane waits the middle keys answer.
 - The monitor: the Mini mode button, or a double-click on a lane, folds the
