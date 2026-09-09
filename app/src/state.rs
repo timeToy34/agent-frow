@@ -11,7 +11,36 @@
 //! still require no request ids or pending-request bookkeeping.
 
 use crate::agents::Agent;
-use crate::event::{Event, Kind};
+use crate::event::{ApprovalReviewer, Event, Kind};
+
+/// The cause of Waiting, without pretending permission payloads identify a
+/// particular tool invocation. Retained while unrelated automatic review runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitingReason {
+    Question,
+    Plan,
+    Permission,
+    Other,
+}
+
+pub fn waiting_reason(event: &Event) -> WaitingReason {
+    match event.kind {
+        Kind::PreToolUse if asks_user(event) => WaitingReason::Question,
+        Kind::Stop if event.proposed_plan => WaitingReason::Plan,
+        Kind::PermissionRequest => WaitingReason::Permission,
+        _ => WaitingReason::Other,
+    }
+}
+
+/// Only these canonical hook names have the established sandbox-review path.
+/// MCP and unknown tool paths may still involve a person and keep Waiting.
+pub fn automatically_reviewed(event: &Event) -> bool {
+    !event.subagent
+        && Agent::from_source(&event.source) == Some(Agent::Codex)
+        && event.kind == Kind::PermissionRequest
+        && event.codex_approvals_reviewer == Some(ApprovalReviewer::AutoReview)
+        && matches!(event.tool_name.as_deref(), Some("Bash" | "apply_patch"))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
@@ -118,8 +147,7 @@ pub fn classify(notification_type: &str) -> Note {
 
 /// Whether the tool about to run is the one that asks the user a question.
 ///
-/// The only place a tool's *name* means anything to a lane. Codex's
-/// `request_user_input` is an ordinary function tool whose handler draws the
+/// Codex's `request_user_input` is an ordinary function tool whose handler draws the
 /// question and blocks until it is answered, so "the tool is starting" and
 /// "the user is being asked" are the same moment. A received `PostToolUse`
 /// clears Waiting like any other activity; recording the answer inside Codex
@@ -150,6 +178,15 @@ pub fn step(current: State, event: &Event) -> Step {
         Kind::SessionStart => Step::Set(State::Connected),
 
         Kind::UserPromptSubmit => Step::Set(State::Running),
+        Kind::PermissionRequest if automatically_reviewed(event) => {
+            if current == State::Idle {
+                Step::Set(State::Running)
+            } else {
+                // Review is neither a new human request nor an answer to a
+                // question already pending. Late requests cannot revive Done.
+                Step::Stay
+            }
+        }
         Kind::PermissionRequest => Step::Set(State::Waiting),
         // A question is about to be put to the user. Same weight as a
         // permission prompt: it is asked, so it is pending, whatever the lane
@@ -251,6 +288,7 @@ pub fn adopt(event: &Event) -> Option<State> {
         Kind::SessionStart => State::Connected,
         Kind::Interrupt => State::Connected,
         Kind::UserPromptSubmit => State::Running,
+        Kind::PermissionRequest if automatically_reviewed(event) => State::Running,
         Kind::PermissionRequest => State::Waiting,
         Kind::PreToolUse if asks_user(event) => State::Waiting,
         Kind::Notification => match event.notification.as_deref().map(classify) {

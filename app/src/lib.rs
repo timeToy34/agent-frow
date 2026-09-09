@@ -6,6 +6,7 @@
 
 pub mod agents;
 pub mod autostart;
+mod codex_review;
 pub mod event;
 pub mod focus;
 pub mod gauges;

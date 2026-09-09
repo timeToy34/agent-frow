@@ -52,65 +52,6 @@ sequence in `events.log` before changing [the tracker](app/src/tracker.rs).
 See [diagnostics](docs/how-it-works.md#diagnostics). Do not assume the hook's
 reported working directory matches the launch directory.
 
-### KI-015: Codex shows Waiting with automatic permission approval enabled
-
-**Status:** Open investigation; reported twice on 2026-09-07.
-Automatic review confirmed in session logs; the event that set the affected
-lane to Waiting is still unconfirmed.
-
-With Codex configured to approve permissions automatically, Agent F-Row
-appears to receive a waiting signal even though no request is presented to
-the user. The exact incoming event still needs to be captured.
-
-**Log investigation, 2026-09-07 around 21:04 PDT:** The active
-`ai-brand-dna` session was Codex CLI 0.153.4 in WSL. Its applied settings
-recorded `approval_policy = "on-request"` together with
-`approvals_reviewer = "auto_review"`. Its automatic reviewer returned
-`allow` at 21:04:16.767 and 21:04:20.212, and both commands returned by
-21:04:20.622. This verifies automatic approval activity around the report;
-the affected lane was not independently identified during this inspection.
-
-There is another possible source: that session called `request_user_input`
-at 21:02:52.589 and received the answer at 21:03:07.210. A state left over
-from that answered question cannot yet be distinguished from a new Waiting
-caused by automatic review. At inspection, Agent F-Row's `events.log` had
-not been updated since 2026-08-25; `lane-events.log` records ownership changes
-only, and `hook.log` had no entries newer than 2026-09-02. These logs do not
-establish which hook arrived at the app during this occurrence.
-
-After the answer was recorded, five shell commands completed successfully
-at 21:03:32.355–21:03:32.837. The next hook notification visible in that
-Codex process's log was at 21:05:56.495, around turn completion; it did not
-name the hook. These internal records do not prove `PostToolUse` was emitted
-or delivered. The local hook configuration inspected afterward does include
-an unfiltered, synchronous Agent F-Row `PostToolUse` hook. Registration on
-disk does not establish that it ran in this session.
-
-**Expected behavior:** Automatically approved work should remain Running;
-Waiting should indicate that the agent actually needs user input.
-
-**Code evidence:** The [state table](app/src/state.rs) maps a main-agent
-`PermissionRequest` directly to Waiting, both for an existing session and
-when adopting a new one, without checking the approval setting. This could
-explain the symptom if Codex emits that hook for an automatic approval; it
-does not establish that Codex did so in this report. Questions and proposed
-plans can also set Waiting.
-
-**Workaround:** None confirmed. Subsequent main-agent activity may clear the
-state, but that would not prevent the false indication.
-
-**Next investigation:** Identify the affected lane and reproduce with fresh
-event logging enabled via `AGENT_FROW_DEBUG`. Record both `approval_policy`
-and `approvals_reviewer`, plus the version, environment, and time of the
-false indication. Compare `events.log` with the local session and automatic
-reviewer rollouts to identify the event that set Waiting and whether any
-user interaction was actually pending. See
-[diagnostics](docs/how-it-works.md#diagnostics). Confirm how automatic and
-interactive approvals differ before filtering permission events, so real
-requests remain visible. Compare with KI-003's completion delay, but keep
-this report distinct from [KI-001](#ki-001-codex-stays-waiting-after-a-response),
-where the user had responded to a request.
-
 ## Known limitations and workarounds
 
 These are documented integration, hardware, or distribution constraints.
@@ -137,8 +78,8 @@ for that scenario.
 
 | Behavior | Codex | Claude Code | Evidence and status |
 |---|---|---|---|
-| Questions and answers | The app registers `PreToolUse` for `request_user_input`; received `PostToolUse` clears Waiting. Recording the tool's answer does not prove hook delivery. | The app detects questions through `Notification`; subsequent main-agent activity clears Waiting. | Implemented paths: [registration](app/src/install.rs) and [state table](app/src/state.rs). Codex 0.153.4 WSL delivery is under investigation in KI-001/KI-015; no equivalent Claude trace was captured. |
-| Automatic permission approval | 0.153.4 WSL logs confirm `on-request` plus `auto_review` and automatic `allow` decisions. Whether those decisions produced the reported Waiting remains unknown. | No matching automatic-approval trace has been captured for this report. | Open: [KI-015](#ki-015-codex-shows-waiting-with-automatic-permission-approval-enabled). Record approval mode and reviewer separately. |
+| Questions and answers | The app registers `PreToolUse` for `request_user_input`; received `PostToolUse` clears Waiting. Recording the tool's answer does not prove hook delivery. | The app detects questions through `Notification`; subsequent main-agent activity clears Waiting. | Implemented paths: [registration](app/src/install.rs) and [state table](app/src/state.rs). Response-clearing delays remain under investigation in KI-001; KI-015 records verified automatic-review and user-request handling. No equivalent Claude trace was captured. |
+| Automatic permission approval | Verified `auto_review` exempts CLI `Bash`/`apply_patch` permission requests from Waiting. Effective session/turn settings come from the rollout; unknown data and other tools retain Waiting. | Existing permission handling remains unchanged; no matching automatic-review trace was captured. | Fixed in 0.8.2; the user verified automatic approvals and actual user requests in the installed WSL workflow: [KI-015](#ki-015-codex-shows-waiting-with-automatic-permission-approval-enabled). Approval policy and reviewer are separate settings. |
 | Long-running commands | In the 0.149.1 measurement, a yielded process supplied no `PostToolUse` until it exited; see KI-003. | The current adapter registers both `PostToolUse` and `PostToolUseFailure`. There is no equivalent timed background-command measurement here. | Historical Codex evidence: [lessons](docs/lessons.md). Recheck delivery after upgrades; do not assume identical timing. |
 | Tool and turn failures | No separate failure hook is registered. Current docs describe Bash `PostToolUse` even for nonzero exits. | `PostToolUseFailure` and `StopFailure` are registered; the latter sets Error. | Implementation difference; upstream contracts: [Codex PostToolUse](https://learn.chatgpt.com/docs/hooks#posttooluse), [Claude Code failures](https://code.claude.com/docs/en/hooks#posttoolusefailure). KI-004 remains open. |
 | Interrupts | `Interrupt` sets Connected with an Interrupted note; cancelled turn IDs protect a retry from delayed events. Active subagents keep the display Running until they stop. | The current adapter has no dedicated interrupt hook; it relies on subsequent activity or an applicable idle notification. | Implemented locally for Codex 0.150.0+. Verification status below; KI-004 still tracks missing error reporting. [Contract](https://learn.chatgpt.com/docs/hooks#interrupt). |
@@ -240,6 +181,88 @@ or automated review.
   code-mode command delivery on the affected 0.153.4 build; the general
   contract does not establish delivery for this occurrence.
   [Tool coverage](https://learn.chatgpt.com/docs/hooks#tool-coverage).
+
+## Fixes included in 0.8.2
+
+### KI-015: Codex shows Waiting with automatic permission approval enabled
+
+**Status:** Fixed in 0.8.2 for the reported Codex CLI workflow. On 2026-09-09
+the user confirmed that automatic approvals remain Running and actual user
+requests still set Waiting in the installed build.
+Reported twice on 2026-09-07 and again during a long task on 2026-09-09.
+The original event that set the affected lane to Waiting remains unconfirmed.
+
+Before the fix, Codex automatic approvals could leave Agent F-Row Waiting
+through a long command even though no request was presented to the user.
+The September 7 occurrence remains ambiguous; September 9 live logs
+confirmed automatically reviewed permission hooks.
+
+**Log investigation, 2026-09-07 around 21:04 PDT:** The active
+`ai-brand-dna` session was Codex CLI 0.153.4 in WSL. Its applied settings
+recorded `approval_policy = "on-request"` together with
+`approvals_reviewer = "auto_review"`. Its automatic reviewer returned
+`allow` at 21:04:16.767 and 21:04:20.212, and both commands returned by
+21:04:20.622. This verifies automatic approval activity around the report;
+the affected lane was not independently identified during this inspection.
+
+There is another possible source: that session called `request_user_input`
+at 21:02:52.589 and received the answer at 21:03:07.210. A state left over
+from that answered question cannot yet be distinguished from a new Waiting
+caused by automatic review. At inspection, Agent F-Row's `events.log` had
+not been updated since 2026-08-25; `lane-events.log` records ownership changes
+only, and `hook.log` had no entries newer than 2026-09-02. These logs do not
+establish which hook arrived at the app during this occurrence.
+
+After the answer was recorded, five shell commands completed successfully
+at 21:03:32.355–21:03:32.837. The next hook notification visible in that
+Codex process's log was at 21:05:56.495, around turn completion; it did not
+name the hook. These internal records do not prove `PostToolUse` was emitted
+or delivered. The local hook configuration inspected afterward does include
+an unfiltered, synchronous Agent F-Row `PostToolUse` hook. Registration on
+disk does not establish that it ran in this session.
+
+**Expected behavior:** Automatically approved work should remain Running;
+Waiting should indicate that the agent actually needs user input.
+
+**Implemented behavior:** Previously every main-agent `PermissionRequest`
+set Waiting. The [state table](app/src/state.rs) now exempts Codex CLI `Bash`
+and `apply_patch` requests when the app verifies `approvals_reviewer =
+"auto_review"` for that session and turn. An existing Running lane stays
+Running through review and execution; an unseen session starts Running.
+An automatic request preserves an existing Waiting state, its reason, and
+its prompt note. Questions, plans, manual approvals, MCP requests, and
+unknown tool types keep their existing handling.
+
+**Evidence and limits:** The active `ib-pulse` rollout inspected on
+2026-09-09 records Codex CLI 0.153.4, `on-request`, and `auto_review` in both
+`turn_context` and `thread_settings_applied`. The reader scans complete
+records once and follows appended settings, so a long turn's context need
+not remain in the gauge tail. Only session/turn identifiers, reviewer, and
+file metadata are retained. Unreadable, mismatched, incomplete, malformed,
+or unsupported data supplies no automatic-review exemption. Records larger
+than 1 MiB invalidate previous reviewer evidence until another valid setting
+arrives. The transcript format is internal to Codex and may change.
+This does not add an approval-result hook or resolve KI-001/KI-003's delay
+after a real user response. See the [Codex hook contract](https://learn.chatgpt.com/docs/hooks#common-input-fields)
+and [automatic-review lifecycle](https://learn.chatgpt.com/docs/sandboxing/auto-review).
+
+**Validation:** Regression tests cover long-running work, reviewer changes,
+late adoption, transcript failures, preserved questions/plans, and cancelled
+turns; all 301 Windows workspace tests pass. A compiled Windows probe read
+the active WSL `ib-pulse` transcript and correctly derived `auto_review`:
+351 ms for the cold read, 22 ms for the cached follow-up (including gauges).
+After installing the build, `events.log` captured a real `ib-pulse`
+`PermissionRequest` for `Bash` at **15:15:18.561 PDT** on 2026-09-09 with
+`reviewer=auto_review`, following a `PostToolUse` that adopted the session
+as Running. The exemption preserves Running for that event. Further real
+approval hooks from both active WSL sessions carried the same reviewer.
+The user subsequently confirmed both automatic-approval handling and Waiting
+for an actual user request in the installed build. This closes the reported
+workflow; other Codex versions and native Windows delivery still need their
+own live verification. `AGENT_FROW_DEBUG` now includes
+the locally derived `reviewer` in `events.log`; `-` means unknown. Compare
+that trace with the session rollout and the visible prompt. See
+[diagnostics](docs/how-it-works.md#diagnostics).
 
 ## Fixes included in 0.8.1
 

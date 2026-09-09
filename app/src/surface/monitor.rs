@@ -590,6 +590,7 @@ mod tests {
             agent: None,
             cwd: Some(PathBuf::from(cwd)),
             state,
+            waiting_reason: (state == State::Waiting).then_some(crate::state::WaitingReason::Other),
             since: 0,
             first_seen: 0,
             last_event: 0,

@@ -11,6 +11,31 @@ use serde_json::Value;
 
 use crate::gauges::Gauges;
 
+/// Effective Codex reviewer, derived by the app from its local transcript.
+/// Unknown or absent values must keep the normal permission indication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalReviewer {
+    User,
+    AutoReview,
+}
+
+impl ApprovalReviewer {
+    pub(crate) fn parse(value: &Value) -> Option<Self> {
+        match value.as_str()? {
+            "user" => Some(Self::User),
+            "auto_review" => Some(Self::AutoReview),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::AutoReview => "auto_review",
+        }
+    }
+}
+
 /// The hook events we register. Anything else is recorded as unrecognised
 /// rather than guessed at — a new agent release should show up as a number in
 /// the window, not as behaviour nobody can explain.
@@ -106,6 +131,8 @@ pub struct Event {
     pub turn_id: Option<String>,
     pub cwd: Option<PathBuf>,
     pub tool_name: Option<String>,
+    /// Locally verified evidence, never trusted directly from a hook payload.
+    pub codex_approvals_reviewer: Option<ApprovalReviewer>,
     /// `SessionStart`'s own `source` field: `startup`, `resume`, `clear`, `compact`.
     pub start_source: Option<String>,
     pub notification: Option<String>,
@@ -224,6 +251,7 @@ impl Event {
             turn_id: text("turn_id"),
             cwd: text("cwd").map(PathBuf::from),
             tool_name: text("tool_name"),
+            codex_approvals_reviewer: ApprovalReviewer::parse(&value["codex_approvals_reviewer"]),
             start_source: text("source"),
             notification: text("notification_type"),
             proposed_plan: value

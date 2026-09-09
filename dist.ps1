@@ -47,8 +47,8 @@ https://github.com/timeToy34/agent-frow
    it renders exactly as before - and continues from the installed copy;
    this folder can then be deleted. Upgrading is the same gesture with a
    newer zip.
-2. Restart your agents. For Codex, also run /hooks inside it and trust the
-   entry, or its hooks will never run.
+2. For first-time setup or hook configuration changes, restart your agents.
+   For Codex, run /hooks and trust any Agent F-Row entry marked for review.
 
 Devices (all optional; the app runs fine without any, the window shows
 everything):
@@ -59,8 +59,9 @@ everything):
   firmware fix (Keychron/zmk pull request 9).
 - Keychron V0 Ultra numpad: export your current Launcher keymap as a backup,
   then import the included keychron_v0_ultra_ansi.json over the cable.
-  This update requires the new map: the top row now sends single keys
-  (Intl1, Intl5, Intl6, Keypad Comma); Ctrl+Shift+F21-F24 is no longer captured.
+  Upgrading from 0.8.0 or earlier requires the new map: the top row sends
+  single keys (Intl1, Intl5, Intl6, Keypad Comma); Ctrl+Shift+F21-F24 is no
+  longer captured. The map is unchanged from 0.8.1.
   The knob and M1-M5 retain Ctrl+Shift+F13-F20. One agent per M key; the top
   line shows the one the knob picks. The new map was tested on US Windows.
   Importing the map needs no firmware flash; lighting still needs the

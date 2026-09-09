@@ -338,7 +338,7 @@ fn log_event(value: &serde_json::Value) {
             .to_owned()
     };
     let line = format!(
-        "{} src={} evt={} tool={} sid={} turn_id={} cwd={:?} agent_id={} agent_type={} ntype={} reason={} end={}\n",
+        "{} src={} evt={} tool={} sid={} turn_id={} cwd={:?} agent_id={} agent_type={} ntype={} reason={} end={} reviewer={}\n",
         now_ms(),
         field("src"),
         field("hook_event_name"),
@@ -351,6 +351,7 @@ fn log_event(value: &serde_json::Value) {
         field("notification_type"),
         field("reason"),
         field("end_reason"),
+        field("codex_approvals_reviewer"),
     );
     let path = dir.join("events.log");
     let _ = std::fs::create_dir_all(&dir);
@@ -642,8 +643,8 @@ fn run(dialog_on_busy: bool, notice: Option<String>) -> Result<(), String> {
             // Diagnostic (only when AGENT_FROW_DEBUG is set): raw cwd/agent
             // per event, to see what an agent actually reports for its
             // working directory.
-            log_event(&value);
             rollouts.attach(&mut value);
+            log_event(&value);
             let parsed = event::Event::parse(&value, now);
             // Recorded on disk as well as in memory, so `doctor` can answer
             // "is it actually working?" with the app not running.

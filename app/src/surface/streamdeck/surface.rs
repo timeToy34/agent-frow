@@ -668,6 +668,7 @@ mod tests {
             agent: None,
             cwd: Some(PathBuf::from("C:\\dev\\agent-frow")),
             state,
+            waiting_reason: (state == State::Waiting).then_some(crate::state::WaitingReason::Other),
             since,
             first_seen: since,
             last_event: since,

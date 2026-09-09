@@ -103,6 +103,8 @@ pub struct Session {
     pub agent: Option<Agent>,
     pub cwd: Option<PathBuf>,
     pub state: State,
+    /// Human attention currently requested; automatic review cannot dismiss it.
+    pub waiting_reason: Option<state::WaitingReason>,
     /// When it entered the state it is in.
     pub since: u64,
     pub first_seen: u64,
@@ -150,6 +152,7 @@ impl Session {
             agent: Agent::from_source(&event.source),
             cwd: (!event.subagent).then(|| event.cwd.clone()).flatten(),
             state,
+            waiting_reason: (state == State::Waiting).then(|| state::waiting_reason(event)),
             since: event.at,
             first_seen: event.at,
             last_event: event.at,
@@ -562,11 +565,13 @@ impl Tracker {
             let session = &mut self.sessions[index];
             session.last_event = event.at;
             session.events += 1;
-            // Subagents may outlive the cancelled main turn. Keep its reason
+            // Automatic review must not replace a pending prompt's note.
+            // Subagents can outlive a cancelled turn; keep its interruption
             // visible when their final roster update reveals Connected again.
-            if !(session.turns.is_interrupted()
-                && (event.subagent
-                    || matches!(event.kind, Kind::SubagentStart | Kind::SubagentStop)))
+            if !(session.state == State::Waiting && state::automatically_reviewed(event))
+                && !(session.turns.is_interrupted()
+                    && (event.subagent
+                        || matches!(event.kind, Kind::SubagentStart | Kind::SubagentStop)))
             {
                 session.note = event.note();
             }
@@ -605,6 +610,10 @@ impl Tracker {
             }
             if event.kind == Kind::StopFailure {
                 session.failure = Some(failure_word(event.error_type.as_deref()));
+            }
+            if let Step::Set(next) = step {
+                session.waiting_reason =
+                    (next == State::Waiting).then(|| state::waiting_reason(event));
             }
             match step {
                 Step::Stay => {}
@@ -1149,6 +1158,7 @@ mod tests {
             agent: None,
             cwd: None,
             state: State::Connected,
+            waiting_reason: None,
             since: 0,
             first_seen: lane as u64,
             last_event: 0,

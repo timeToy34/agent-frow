@@ -261,6 +261,7 @@ pub struct Rollouts {
     distros: Option<Vec<String>>,
     resolved: HashMap<String, PathBuf>,
     metadata: HashMap<PathBuf, RolloutMetadata>,
+    reviewers: HashMap<PathBuf, crate::codex_review::ReviewerReader>,
 }
 
 struct RolloutMetadata {
@@ -300,10 +301,13 @@ impl Rollouts {
     /// `proposed_plan` on Stop from a completed Plan with the same turn id.
     /// Both use one bounded tail read. The first complete metadata record
     /// supplies `codex_cli`, cached per file and matched to the session id.
+    /// Reviewer settings are read incrementally from the full transcript;
+    /// a long-running turn's context need not remain in the gauge tail.
     pub fn attach(&mut self, value: &mut Value) {
         // This fact is derived locally, not accepted from an ingress payload.
         if let Some(object) = value.as_object_mut() {
             object.remove("codex_cli");
+            object.remove("codex_approvals_reviewer");
         }
         let Some(source) = value.get("src").and_then(Value::as_str) else {
             return;
@@ -344,6 +348,28 @@ impl Rollouts {
             && let Some(object) = value.as_object_mut()
         {
             object.insert("codex_cli".to_owned(), Value::Bool(true));
+        }
+        let nonempty = |key: &str| {
+            value
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        };
+        if nonempty("agent_id").is_none()
+            && nonempty("agent_type").is_none()
+            && let (Some(session), Some(turn)) = (nonempty("session_id"), nonempty("turn_id"))
+            && let Some(reviewer) = self
+                .reviewers
+                .entry(resolved.clone())
+                .or_default()
+                .read(&resolved, session, turn)
+            && let Some(object) = value.as_object_mut()
+        {
+            object.insert(
+                "codex_approvals_reviewer".to_owned(),
+                Value::from(reviewer.label()),
+            );
         }
         let Some(text) = rollout_tail(&resolved) else {
             return;
@@ -788,6 +814,61 @@ mod tests {
             found,
             [PathBuf::from(r"C:\Users\me\.codex\sessions\r.jsonl")]
         );
+    }
+
+    #[test]
+    fn reviewer_enrichment_verifies_transcript_and_overrides_ingress_claims() {
+        use crate::event::{ApprovalReviewer, Event, Parsed};
+        use crate::state::{self, State};
+
+        let scratch = Scratch::new("review-enrichment");
+        let path = scratch.0.join("rollout.jsonl");
+        let metadata = json!({"type":"session_meta", "payload":{"id":"s1", "source":"cli"}});
+        let context = json!({"type":"turn_context", "payload":{"turn_id":"t1", "approvals_reviewer":"auto_review"}});
+        std::fs::write(&path, format!("{metadata}\n{context}\n")).unwrap();
+        for source in ["codex-win", "codex-wsl"] {
+            let mut rollouts = Rollouts::default();
+            // Test the resolved WSL share seam without depending on a named
+            // distro on the machine running the unit tests.
+            let wire_path = if source == "codex-wsl" {
+                "/home/me/session.jsonl"
+            } else {
+                path.to_str().unwrap()
+            };
+            rollouts.resolved.insert(wire_path.to_owned(), path.clone());
+            for (extra, expected) in [
+                (json!({}), Some(ApprovalReviewer::AutoReview)),
+                (
+                    json!({"codex_approvals_reviewer":"user"}),
+                    Some(ApprovalReviewer::AutoReview),
+                ),
+                (json!({"session_id":"wrong"}), None),
+                (json!({"turn_id":"wrong"}), None),
+                (json!({"turn_id":null}), None),
+                (json!({"agent_id":"child"}), None),
+                (json!({"agent_type":"guardian"}), None),
+                (json!({"transcript_path":null}), None),
+                (json!({"src":"claude-win"}), None),
+            ] {
+                let mut value = json!({"src":source, "session_id":"s1", "turn_id":"t1",
+                    "hook_event_name":"PermissionRequest", "tool_name":"Bash",
+                    "codex_approvals_reviewer":"auto_review", "transcript_path":wire_path});
+                value
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(extra.as_object().unwrap().clone());
+                rollouts.attach(&mut value);
+                let Parsed::Event(event) = Event::parse(&value, 1) else {
+                    panic!("event");
+                };
+                assert_eq!(event.codex_approvals_reviewer, expected);
+                if expected.is_some() {
+                    assert_eq!(state::adopt(&event), Some(State::Running));
+                } else {
+                    assert!(!state::automatically_reviewed(&event));
+                }
+            }
+        }
     }
 
     #[test]

@@ -209,6 +209,19 @@ has a test named after it:
   a no — by the user, a rule, or an interrupt — so it is no longer pending,
   and the turn is formally still open. If the interrupt killed the turn, the
   idle notification says so a minute later.
+- Codex CLI `PermissionRequest` for `Bash` or `apply_patch` does not set
+  Waiting when the app verifies `approvals_reviewer = "auto_review"` for
+  that session and turn. It keeps Running, can wake Idle, and adopts an
+  unseen session as Running. Existing Waiting, Done, Error, and Connected
+  states are preserved. A Waiting lane retains its reason (question, plan,
+  permission, or other) and its prompt note. Manual or unknown reviewers,
+  other tool types, and Claude keep the normal permission behavior.
+  The worker streams the existing transcript once, then reads appended
+  complete records for `turn_context` and `thread_settings_applied`.
+  Session identity, turn identity, and file identity are verified; missing
+  or uncertain settings never suppress Waiting. Only settings, identifiers,
+  and file-reading metadata are cached. Hook commands and registration stay
+  unchanged; no approval decision is made by Agent F-Row.
 - `PostToolUse` promotes **from Waiting or Idle**. Hook processes post
   concurrently, so one emitted before `Stop` can arrive after it.
 - A `Stop` carrying `proposed_plan` sets Waiting, not Done. Codex has no
@@ -219,8 +232,8 @@ has a test named after it:
   from a completed `Plan` item in the rollout tail, matched to the Stop's
   turn id. The plan text is never retained; the answer arrives as the next
   prompt.
-- `PreToolUse` for `request_user_input` sets Waiting. It is the only tool
-  name the table reads: Codex asks its questions through that tool, whose
+- `PreToolUse` for `request_user_input` sets Waiting. Codex asks its questions
+  through that tool, whose
   handler shows the dialog and blocks until it is answered, so the tool
   starting *is* the question appearing. Receiving its `PostToolUse` clears
   Waiting, but an immediate update after answering is not guaranteed: see

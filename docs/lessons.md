@@ -72,6 +72,18 @@ upstream changelogs using the
   is stated in the window rather than papered over with a timer. The current
   limitation and workaround are tracked as KI-003 in
   [Known issues](../KNOWN_ISSUES.md#known-limitations-and-workarounds).
+- **Automatic review is a different reviewer, not a different approval policy.**
+  Codex CLI 0.153.4 records `on-request` together with `auto_review` in
+  `turn_context` and subsequent `thread_settings_applied` records. A hook's
+  `permission_mode` alone cannot distinguish it. The app verifies those
+  settings for the main session and turn before exempting `Bash` and
+  `apply_patch` permission requests from Waiting. A long task can push the
+  context far outside the gauge tail: read complete records incrementally,
+  including a cold scan when the app starts late. Unknown evidence keeps
+  the original behavior. An automatic request is not an answer to a pending
+  question and must preserve its Waiting reason and note. Track live
+  verification under KI-015; the lack of an approval-result hook still
+  limits how soon manual approvals clear.
 - **`PreToolUse` is 46% of all hook traffic and tells a lane nothing**, because
   agents auto-approve nearly every tool call. It is never registered
   unfiltered. Codex gets it with the matcher `^request_user_input$` (a Codex
