@@ -1436,14 +1436,11 @@ fn footnotes(ui: &mut egui::Ui, tracker: &Tracker) {
         .iter()
         .any(|session| session.state == State::Waiting)
     {
-        // Stated rather than hidden: no agent emits an event when the user
-        // *answers* a prompt. The next observable event is the tool finishing,
-        // so a lane can read Waiting while the approved tool already runs —
-        // and Codex reports a command only once its process has exited, so a
-        // server or a long install it was allowed to start holds the lane on
-        // Waiting until some later command finishes.
+        // The lane follows received activity, so answering does not guarantee
+        // an immediate update. In particular, Codex reports an approved
+        // command only once its process exits.
         note(
-            "Waiting clears when the next tool finishes — no agent reports that you answered it. \
+            "Waiting can remain after you respond, until the agent reports more activity. \
              Codex reports a command only when it exits, so an approved server or long install \
              holds Waiting until a later command finishes."
                 .to_owned(),
@@ -1716,7 +1713,7 @@ fn keyboard_panel(ui: &mut egui::Ui, tracker: &mut Tracker) -> bool {
     if let Some(error) = &tracker.keys_error {
         ui.colored_label(
             egui::Color32::from_rgb(230, 180, 60),
-            format!("Summon keys are not being captured: {error}"),
+            format!("Keyboard input: {error}"),
         );
     } else if tracker.last_key.is_none() {
         // Only until the first press lands: a summon key that works needs no

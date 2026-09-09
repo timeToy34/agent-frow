@@ -1,19 +1,21 @@
 //! What a lane is doing, and how an event changes it.
 //!
-//! A total function over (state, event) with **no request ids, no queues, no
-//! tombstones and no timers**. That is the whole design. The previous
+//! A total function over (state, event), without permission-request
+//! correlation or timers. The previous
 //! application tried to correlate a permission prompt to the tool call it
 //! belonged to, using a `tool_use_id` that those payloads do not carry; it
 //! invented one, nothing ever resolved it, and lanes stuck in Waiting forever.
 //!
-//! Here, *activity clears Waiting*. Nothing has to be correlated to anything,
-//! so nothing can fail to correlate.
+//! Here, *activity clears Waiting*. The tracker filters cancelled Codex turns
+//! by their upstream turn ids before applying this table; permission answers
+//! still require no request ids or pending-request bookkeeping.
 
+use crate::agents::Agent;
 use crate::event::{Event, Kind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
-    /// Alive, nothing run yet.
+    /// Alive, with no main turn running (new session or interrupted turn).
     Connected,
     Running,
     /// Needs the user.
@@ -21,7 +23,7 @@ pub enum State {
     Done,
     Error,
     /// Nothing heard for a while. Not a guess about the agent — a fact about
-    /// the wire. Set only by the tracker's sweep, never by an event, and the
+    /// the wire. Set by the tracker's sweep or an idle notification, and the
     /// session keeps its lane: the user who stepped away comes back to the
     /// board they left.
     Idle,
@@ -119,9 +121,9 @@ pub fn classify(notification_type: &str) -> Note {
 /// The only place a tool's *name* means anything to a lane. Codex's
 /// `request_user_input` is an ordinary function tool whose handler draws the
 /// question and blocks until it is answered, so "the tool is starting" and
-/// "the user is being asked" are the same moment — and nothing is correlated
-/// to anything: the answer arrives as that tool's `PostToolUse`, which clears
-/// Waiting like any other activity. Claude's `AskUserQuestion` is named too
+/// "the user is being asked" are the same moment. A received `PostToolUse`
+/// clears Waiting like any other activity; recording the answer inside Codex
+/// does not prove the hook was delivered. Claude's `AskUserQuestion` is named too
 /// because it means the same thing; Claude never sends us a `PreToolUse`, so
 /// it is inert there, and its questions reach us as a notification instead.
 fn asks_user(event: &Event) -> bool {
@@ -206,6 +208,9 @@ pub fn step(current: State, event: &Event) -> Step {
         Kind::Stop if event.proposed_plan => Step::Set(State::Waiting),
         Kind::Stop => Step::Set(State::Done),
         Kind::StopFailure => Step::Set(State::Error),
+        // The tracker checks turn identity before this table. Malformed or
+        // non-Codex interrupts are not evidence of a cancelled main turn.
+        Kind::Interrupt => adopt(event).map_or(Step::Stay, Step::Set),
         Kind::SessionEnd => Step::Release,
         // Numbers, not news: a status line says how full the context is,
         // never what the agent is doing — and it also fires on a config
@@ -222,9 +227,15 @@ pub fn step(current: State, event: &Event) -> Step {
 /// to seed — a `PostToolUse` from a session we have never heard of means a tool
 /// just ran, so a turn is open, so: Running.
 ///
-/// `None` means "do not create a session from this" — only `SessionEnd`, which
-/// is the end of something we never saw the start of.
+/// `None` means "do not create a session from this": a session ending, a
+/// status-line reading, or an interrupt without valid main-turn evidence.
 pub fn adopt(event: &Event) -> Option<State> {
+    if event.kind == Kind::Interrupt {
+        return (!event.subagent
+            && Agent::from_source(&event.source) == Some(Agent::Codex)
+            && event.turn_id.is_some())
+        .then_some(State::Connected);
+    }
     // A subagent's event proves the session is alive, and proves nothing about
     // what the main agent is doing — a background subagent outlives the turn
     // that spawned it. Connected is the claim that can be stood behind; the
@@ -238,6 +249,7 @@ pub fn adopt(event: &Event) -> Option<State> {
         // progress.
         Kind::SessionStart if event.start_source.as_deref() == Some("compact") => State::Running,
         Kind::SessionStart => State::Connected,
+        Kind::Interrupt => State::Connected,
         Kind::UserPromptSubmit => State::Running,
         Kind::PermissionRequest => State::Waiting,
         Kind::PreToolUse if asks_user(event) => State::Waiting,

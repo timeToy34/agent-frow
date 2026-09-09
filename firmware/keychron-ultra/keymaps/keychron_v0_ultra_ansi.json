@@ -10,22 +10,22 @@
    {
     "col": 1,
     "row": 0,
-    "val": 880
+    "val": 135
    },
    {
     "col": 2,
     "row": 0,
-    "val": 881
+    "val": 139
    },
    {
     "col": 3,
     "row": 0,
-    "val": 882
+    "val": 140
    },
    {
     "col": 4,
     "row": 0,
-    "val": 883
+    "val": 133
    },
    {
     "col": 0,
@@ -427,7 +427,7 @@
   ]
  ],
  "version": "1.0.0",
- "MD5": "226a642880e0672c50dbf000f4df29c4",
+ "MD5": "714d9a36687ca2bc56b0aefd351ebbb1",
  "knob": [
   {
    "left": "LCTL(LSFT(KC_F13))",

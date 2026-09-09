@@ -30,6 +30,8 @@ pub enum Kind {
     SubagentStop,
     Stop,
     StopFailure,
+    /// Codex's active main turn was cancelled; the session remains connected.
+    Interrupt,
     SessionEnd,
     /// Not a hook: Claude's status line, as the hook's `--status` mode
     /// reports it — numbers for a session we already hold, never a state.
@@ -51,6 +53,7 @@ impl Kind {
             "SubagentStop" => Self::SubagentStop,
             "Stop" => Self::Stop,
             "StopFailure" => Self::StopFailure,
+            "Interrupt" => Self::Interrupt,
             "SessionEnd" => Self::SessionEnd,
             "StatusLine" => Self::StatusLine,
             _ => return None,
@@ -71,6 +74,7 @@ impl Kind {
             Self::SubagentStop => "SubagentStop",
             Self::Stop => "Stop",
             Self::StopFailure => "StopFailure",
+            Self::Interrupt => "Interrupt",
             Self::SessionEnd => "SessionEnd",
             Self::StatusLine => "StatusLine",
         }
@@ -98,14 +102,17 @@ pub struct Event {
     pub source: String,
     pub kind: Kind,
     pub session_id: String,
+    /// Codex's main-turn identity, when supplied by the hook.
+    pub turn_id: Option<String>,
     pub cwd: Option<PathBuf>,
     pub tool_name: Option<String>,
     /// `SessionStart`'s own `source` field: `startup`, `resume`, `clear`, `compact`.
     pub start_source: Option<String>,
     pub notification: Option<String>,
     /// A `Stop` whose final message carried Codex's `<proposed_plan>` tag —
-    /// the hook reports the tag, this names it. Codex has no dialog for
-    /// approving a plan: its UI asks "implement?" when a turn ends like this.
+    /// the hook reports the tag, or the rollout supplies a completed Plan
+    /// for the same turn. Codex's UI asks "implement?" when a turn ends
+    /// like this.
     pub proposed_plan: bool,
     /// The subagent this event belongs to, when it belongs to one — subagents
     /// share their parent's `session_id` and are told apart by this. Their
@@ -115,8 +122,11 @@ pub struct Event {
     /// This event belongs to a subagent (an `agent_id` or `agent_type` is
     /// present). Either field is enough — a guard that needs both fails open.
     pub subagent: bool,
-    /// Milestone 4 carries this; nothing reads it yet.
+    /// Windows Terminal tab identity, stable across conversations.
     pub wt_session: Option<String>,
+    /// The worker verified this session's rollout metadata identifies a CLI
+    /// session. Desktop sessions must never be grouped by inherited tab ids.
+    pub codex_cli: bool,
     /// The processes above the agent, nearest first — what summon walks to
     /// find the window the agent is sitting in.
     pub ancestors: Vec<Ancestor>,
@@ -211,6 +221,7 @@ impl Event {
             source,
             kind,
             session_id,
+            turn_id: text("turn_id"),
             cwd: text("cwd").map(PathBuf::from),
             tool_name: text("tool_name"),
             start_source: text("source"),
@@ -222,6 +233,7 @@ impl Event {
             subagent: text("agent_id").is_some() || text("agent_type").is_some(),
             agent: text("agent_id"),
             wt_session: text("wt_session"),
+            codex_cli: value.get("codex_cli").and_then(Value::as_bool) == Some(true),
             ancestors,
             gauges: value
                 .get("gauges")
@@ -233,6 +245,9 @@ impl Event {
 
     /// The short line a lane shows: what just happened on it.
     pub fn note(&self) -> String {
+        if self.kind == Kind::Interrupt {
+            return "Interrupted".to_owned();
+        }
         let detail = self
             .tool_name
             .as_deref()

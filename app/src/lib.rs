@@ -14,6 +14,7 @@ pub mod ingress;
 pub mod install;
 pub mod keys;
 pub mod lastseen;
+pub mod lifecycle;
 pub mod paths;
 pub mod settings;
 pub mod state;

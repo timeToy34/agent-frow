@@ -30,6 +30,8 @@
 //! "the right tab is in front", and the user can see which they got.
 
 #[cfg(windows)]
+mod input;
+#[cfg(windows)]
 mod uia_tabs;
 #[cfg(windows)]
 mod window;

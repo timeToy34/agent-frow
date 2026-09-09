@@ -1,14 +1,25 @@
-# Builds dist\agent-frow-win64.zip: a fresh release build, the iCUE SDK DLL if
-# the build found one, the MIT license, and a README with the install steps.
+# Builds dist\agent-frow-<version>-win64.zip and its SHA256 checksum: a fresh
+# release build, the iCUE SDK DLL if found, the V0 keymap, license and README.
 # Run from anywhere; everything is relative to this script.
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
 
-# cargo writes progress to stderr, which Stop-preference PowerShell would
-# treat as a terminating error; let cmd merge the streams first.
-cmd /c "cargo build --release 2>&1"
-if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
+# Invoke cargo from PowerShell so a WSL UNC checkout remains the working
+# directory (cmd falls back to Windows). Native stderr contains progress;
+# the exit code, rather than that stream, determines whether the build failed.
+$buildPreference = $ErrorActionPreference
+try {
+    $ErrorActionPreference = 'Continue'
+    & cargo build --release --workspace --locked 2>&1 | ForEach-Object { $_.ToString() }
+    $buildExitCode = $LASTEXITCODE
+} finally {
+    $ErrorActionPreference = $buildPreference
+}
+if ($buildExitCode -ne 0) { throw "cargo build failed" }
+
+$versionMatch = Select-String -Path (Join-Path $root 'Cargo.toml') -Pattern '^version = "([^"]+)"$'
+$releaseVersion = $versionMatch.Matches[0].Groups[1].Value
 
 $stage = Join-Path $root 'target\dist-stage'
 Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
@@ -20,13 +31,14 @@ $dll = Join-Path $root 'target\release\iCUESDK.x64_2019.dll'
 if (Test-Path $dll) {
     Copy-Item $dll $stage
 } else {
-    Write-Warning 'no iCUE SDK DLL in the build; the zip will ship without lighting'
+    Write-Warning 'no iCUE SDK DLL in the build; the zip will ship without Corsair lighting'
 }
 # MIT's notice must travel with every copy, binaries included.
 Copy-Item (Join-Path $root 'LICENSE') (Join-Path $stage 'LICENSE.txt')
+Copy-Item (Join-Path $root 'firmware\keychron-ultra\keymaps\keychron_v0_ultra_ansi.json') $stage
 
 @"
-Agent F-Row - your coding agents on the keyboard's RGB F-row.
+Agent F-Row $releaseVersion - your coding agents on the keyboard's RGB F-row.
 https://github.com/timeToy34/agent-frow
 
 1. Unzip anywhere and run agent-frow.exe once. It installs itself to
@@ -45,11 +57,14 @@ everything):
 - Keychron Ultra, the remap in the Launcher keymap; light over the cable or
   the 2.4 GHz receiver, not Bluetooth. Per-key brightness needs Keychron's
   firmware fix (Keychron/zmk pull request 9).
-- Keychron V0 Ultra numpad: import the keymap file from the repository
-  (firmware/keychron-ultra/keymaps) in the Launcher's Keymap tab - the knob
-  and nine keys send Ctrl+Shift+F13-F24. One agent per M key, the top line
-  shows the one the knob picks; same cable-or-receiver rule and the same
-  firmware fix, built for the V0.
+- Keychron V0 Ultra numpad: export your current Launcher keymap as a backup,
+  then import the included keychron_v0_ultra_ansi.json over the cable.
+  This update requires the new map: the top row now sends single keys
+  (Intl1, Intl5, Intl6, Keypad Comma); Ctrl+Shift+F21-F24 is no longer captured.
+  The knob and M1-M5 retain Ctrl+Shift+F13-F20. One agent per M key; the top
+  line shows the one the knob picks. The new map was tested on US Windows.
+  Importing the map needs no firmware flash; lighting still needs the
+  existing per-key-brightness firmware fix built for the V0.
 - Stream Deck: quit the Stream Deck app. One row per lane - name, numbers,
   state; every key summons, and while a lane waits the middle keys answer.
 - The monitor: the Mini mode button, or a double-click on a lane, folds the
@@ -64,6 +79,8 @@ https://corsairofficial.github.io/cue-sdk/#end-user-license-agreement
 "@ | Set-Content -Encoding UTF8 (Join-Path $stage 'README.txt')
 
 New-Item -ItemType Directory (Join-Path $root 'dist') -Force | Out-Null
-$zip = Join-Path $root 'dist\agent-frow-win64.zip'
+$zip = Join-Path $root "dist\agent-frow-$releaseVersion-win64.zip"
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -Force
+$hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+"$hash  $([System.IO.Path]::GetFileName($zip))" | Set-Content -Encoding ASCII "$zip.sha256"
 Get-Item $zip | Select-Object FullName, Length

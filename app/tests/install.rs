@@ -124,6 +124,44 @@ fn a_configuration_we_cannot_parse_is_refused_untouched() {
 }
 
 #[test]
+fn codex_interrupt_install_is_repeatable_and_preserves_other_hooks() {
+    for host in [
+        Host::Windows,
+        Host::Wsl {
+            distro: "Ubuntu".to_owned(),
+            user: "test-user".to_owned(),
+        },
+    ] {
+        let dir = scratch("interrupt-install");
+        let original = r#"{"custom":true,"hooks":{"Interrupt":[{"hooks":[{"type":"command","command":"my-cleanup"}]}]}}"#;
+        let mut entry = found(Agent::Codex, &dir, Some(original));
+        entry.flavor.host = host;
+        install::apply(&install::plan_install(&entry, &install_dir()).unwrap()).unwrap();
+        let first = std::fs::read_to_string(&entry.config).unwrap();
+        let second = install::plan_install(&entry, &install_dir()).unwrap();
+        assert_eq!(second.after, first);
+        let written: serde_json::Value = serde_json::from_str(&first).unwrap();
+        let hooks = &written["hooks"]["Interrupt"];
+        assert_eq!(hooks.as_array().unwrap().len(), 2);
+        assert_eq!(hooks[0]["hooks"][0]["command"], "my-cleanup");
+        assert_eq!(
+            hooks[1]["hooks"][0]["command"],
+            written["hooks"]["Stop"][0]["hooks"][0]["command"]
+        );
+        assert_eq!(hooks[1]["hooks"][0]["timeout"], 3);
+        assert!(hooks[1].get("matcher").is_none());
+        assert!(hooks[1]["hooks"][0].get("async").is_none());
+        install::apply(&install::plan_remove(&entry).unwrap()).unwrap();
+        let remaining: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&entry.config).unwrap()).unwrap();
+        assert_eq!(
+            remaining,
+            serde_json::from_str::<serde_json::Value>(original).unwrap()
+        );
+    }
+}
+
+#[test]
 fn codex_hooks_are_never_async_and_claude_gets_a_matcher() {
     let dir = scratch("shape");
     let codex = found(Agent::Codex, &dir, None);
@@ -140,6 +178,7 @@ fn codex_hooks_are_never_async_and_claude_gets_a_matcher() {
         "PreToolUse",
         "PostToolUse",
         "Stop",
+        "Interrupt",
         "SessionEnd",
     ] {
         assert!(
@@ -151,6 +190,7 @@ fn codex_hooks_are_never_async_and_claude_gets_a_matcher() {
     }
     // Codex clamps this one to 3s and warns about anything larger.
     assert_eq!(written["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"], 3);
+    assert_eq!(written["hooks"]["Interrupt"][0]["hooks"][0]["timeout"], 3);
     assert_eq!(written["hooks"]["Stop"][0]["hooks"][0]["timeout"], 5);
     // Codex reads a matcher as a regex, where "*" is not a valid pattern — so
     // every event but one omits it, and that one uses a real pattern: Codex
@@ -172,6 +212,7 @@ fn codex_hooks_are_never_async_and_claude_gets_a_matcher() {
     assert_eq!(written["hooks"]["Stop"][0]["matcher"], "*");
     // The state Claude could never reach before, because it was never registered.
     assert!(written["hooks"].get("StopFailure").is_some());
+    assert!(written["hooks"].get("Interrupt").is_none());
     // 46% of all hook traffic, and no use to a lane: Claude's questions reach
     // us as a notification, so it gets no PreToolUse at all.
     assert!(written["hooks"].get("PreToolUse").is_none());

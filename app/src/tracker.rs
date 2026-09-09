@@ -4,12 +4,13 @@
 //! the same path an agent started before the app takes — one code path, so
 //! there is no second one to be wrong.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::agents::Agent;
 use crate::event::{Ancestor, Event, Kind, Parsed, failure_word};
 use crate::gauges::Gauges;
+use crate::lifecycle::{self, Action};
 use crate::settings::{SavedAgent, Settings};
 use crate::state::{self, Note, State, Step};
 
@@ -28,6 +29,71 @@ pub const ACTIVE_IDLE_MS: u64 = 2 * 60 * 60 * 1000;
 /// `SubagentStop`. The stop event is the real signal — this is the safety net
 /// for a subagent that died without one, so a lane cannot read busy forever.
 pub const SUBAGENT_IDLE_MS: u64 = 30 * 60 * 1000;
+
+/// Cancellation evidence lasts for this session only. A new prompt names the
+/// current turn; late tool results cannot replace that identity. These are
+/// upstream turn ids, never inferred permission-request ids.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CodexTurns {
+    current: Option<String>,
+    interrupted: BTreeSet<String>,
+}
+
+fn main_codex_turn(event: &Event) -> bool {
+    Agent::from_source(&event.source) == Some(Agent::Codex)
+        && !event.subagent
+        && !matches!(
+            event.kind,
+            Kind::SessionStart
+                | Kind::SessionEnd
+                | Kind::SubagentStart
+                | Kind::SubagentStop
+                | Kind::StatusLine
+        )
+}
+
+impl CodexTurns {
+    /// Remember a delayed interrupt even when terminal routing would discard
+    /// its old timestamp. Later results from that turn may have newer clocks.
+    fn rejects(&mut self, event: &Event) -> bool {
+        if !main_codex_turn(event) {
+            return false;
+        }
+        let Some(id) = &event.turn_id else {
+            return false;
+        };
+        if self.interrupted.contains(id) {
+            return true;
+        }
+        if event.kind == Kind::Interrupt
+            && self.current.as_ref().is_some_and(|current| current != id)
+        {
+            self.interrupted.insert(id.clone());
+            return true;
+        }
+        false
+    }
+
+    fn observe(&mut self, event: &Event) {
+        if !main_codex_turn(event) {
+            return;
+        }
+        if event.kind == Kind::Interrupt
+            && let Some(id) = &event.turn_id
+        {
+            self.interrupted.insert(id.clone());
+        }
+        if event.kind == Kind::UserPromptSubmit || self.current.is_none() {
+            self.current.clone_from(&event.turn_id);
+        }
+    }
+
+    fn is_interrupted(&self) -> bool {
+        self.current
+            .as_ref()
+            .is_some_and(|id| self.interrupted.contains(id))
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Session {
@@ -51,8 +117,9 @@ pub struct Session {
     /// read Done and busy at once — see [`Session::effective_state`].
     pub subagents: std::collections::BTreeMap<String, u64>,
     pub lane: Option<usize>,
-    /// Milestone 4 material, stored and unused.
+    /// Windows Terminal tab identity, stable across CLI conversations.
     pub wt_session: Option<String>,
+    pub codex_cli: bool,
     /// The processes above the agent, nearest first, with the exe name each
     /// pid had at event time — what summon walks to find and verify the
     /// window the agent is sitting in.
@@ -63,9 +130,43 @@ pub struct Session {
     /// Why the lane is in Error, while it is: the word a `StopFailure`
     /// carried. Cleared the moment the lane is anything else.
     pub failure: Option<&'static str>,
+    pub(crate) turns: CodexTurns,
 }
 
 impl Session {
+    fn from_event(event: &Event) -> Option<Self> {
+        let state = state::adopt(event)?;
+        let mut turns = CodexTurns::default();
+        turns.observe(event);
+        let mut subagents = BTreeMap::new();
+        if let Some(id) = &event.agent
+            && event.kind != Kind::SubagentStop
+        {
+            subagents.insert(id.clone(), event.at);
+        }
+        Some(Self {
+            source: event.source.clone(),
+            session_id: event.session_id.clone(),
+            agent: Agent::from_source(&event.source),
+            cwd: (!event.subagent).then(|| event.cwd.clone()).flatten(),
+            state,
+            since: event.at,
+            first_seen: event.at,
+            last_event: event.at,
+            events: 1,
+            note: event.note(),
+            subagents,
+            lane: None,
+            wt_session: event.wt_session.clone(),
+            codex_cli: event.codex_cli && !event.subagent,
+            ancestors: event.ancestors.clone(),
+            gauges: event.gauges.unwrap_or_default(),
+            failure: (event.kind == Kind::StopFailure)
+                .then(|| failure_word(event.error_type.as_deref())),
+            turns,
+        })
+    }
+
     /// The project folder's name. Works for a WSL path too: `/` is a separator
     /// on Windows as well, so `Path::file_name` reads both.
     pub fn project(&self) -> Option<String> {
@@ -178,6 +279,15 @@ impl KeyboardStatus {
     }
 }
 
+/// One foreground Codex conversation per terminal tab. Remember previous ids
+/// even after a handoff so delayed events with missing metadata cannot adopt
+/// them as new lanes. This routing history lasts only for this app run.
+struct Terminal {
+    session_id: String,
+    activated_at: u64,
+    known_sessions: BTreeSet<String>,
+}
+
 #[derive(Default)]
 pub struct Tracker {
     pub settings: Settings,
@@ -203,11 +313,11 @@ pub struct Tracker {
     /// Focus button alike. "Raised, showing the api tab" is a different outcome
     /// from "no tab there matches", and the user can see which they got.
     pub summon: Option<String>,
-    /// The last F13–F24 press seen: key index and when. The diagnostic that
+    /// The last F-row or V0 control seen: key index and when. The diagnostic that
     /// tells an unremapped keyboard apart from a broken hook.
     pub last_key: Option<(usize, u64)>,
-    /// Why the summon keys are not being captured, when they are not. Its own
-    /// field so no later summon report can bury it.
+    /// Registration failures or capture errors, including individual V0 keys.
+    /// Its own field so no later summon report can bury it.
     pub keys_error: Option<String>,
     /// The lane the numpad's top line is showing, when there is one. Chases
     /// lane state changes while unlocked; the knob always moves it.
@@ -215,6 +325,10 @@ pub struct Tracker {
     /// Whether the selection is pinned: events stop moving it, the knob and
     /// the M keys still do.
     pub locked: bool,
+    terminals: BTreeMap<(String, String), Terminal>,
+    /// A bounded, nonblocking handoff to the journal worker. Never disk I/O
+    /// under the tracker lock; unset in tests that do not inspect the journal.
+    pub lifecycle: Option<std::sync::mpsc::SyncSender<lifecycle::Change>>,
 }
 
 /// See [`Tracker::preview`]. Expiry is absolute, so a forgotten preview can
@@ -296,6 +410,22 @@ impl Tracker {
             return;
         }
 
+        // Invalid interrupts cannot introduce a lane, change terminal routing,
+        // or refresh an existing session. They still count as received events.
+        if event.kind == Kind::Interrupt && state::adopt(&event).is_none() {
+            return;
+        }
+        // Filter before routing: a delayed prompt from a cancelled turn must
+        // not advance the terminal's activation timestamp either.
+        if let Some(index) = self.find(&event.source, &event.session_id)
+            && self.sessions[index].turns.rejects(&event)
+        {
+            return;
+        }
+
+        if self.route_terminal(&event) {
+            return;
+        }
         match self.find(&event.source, &event.session_id) {
             Some(index) => self.update(index, &event),
             None => self.introduce(&event),
@@ -308,7 +438,123 @@ impl Tracker {
             .position(|session| session.source == source && session.session_id == session_id)
     }
 
+    /// Returns true when an event was consumed by a handoff, or belongs to
+    /// an inactive conversation. Only explicit foreground lifecycle events
+    /// can switch conversations; a late tool result cannot take over a tab.
+    fn route_terminal(&mut self, event: &Event) -> bool {
+        let direct = if event.codex_cli && Agent::from_source(&event.source) == Some(Agent::Codex) {
+            event
+                .wt_session
+                .as_ref()
+                .map(|tab| (event.source.clone(), tab.clone()))
+        } else {
+            None
+        };
+        let key = direct.or_else(|| {
+            self.terminals.iter().find_map(|(key, terminal)| {
+                (key.0 == event.source && terminal.known_sessions.contains(&event.session_id))
+                    .then(|| key.clone())
+            })
+        });
+        let Some(key) = key else { return false };
+        let Some(terminal) = self.terminals.get_mut(&key) else {
+            if !event.subagent && state::adopt(event).is_some() {
+                self.terminals.insert(
+                    key,
+                    Terminal {
+                        session_id: event.session_id.clone(),
+                        activated_at: event.at,
+                        known_sessions: BTreeSet::from([event.session_id.clone()]),
+                    },
+                );
+            }
+            return false;
+        };
+        terminal.known_sessions.insert(event.session_id.clone());
+        if event.at < terminal.activated_at {
+            return true;
+        }
+        let activates =
+            !event.subagent && matches!(event.kind, Kind::SessionStart | Kind::UserPromptSubmit);
+        if terminal.session_id == event.session_id {
+            if activates {
+                terminal.activated_at = event.at;
+            }
+            return false;
+        }
+        if !activates || event.at == terminal.activated_at {
+            return true;
+        }
+        terminal.activated_at = event.at;
+        let previous = std::mem::replace(&mut terminal.session_id, event.session_id.clone());
+        let Some(mut index) = self.find(&event.source, &previous) else {
+            return false;
+        };
+        let Some(mut replacement) = Session::from_event(event) else {
+            return true;
+        };
+        // A conversation first seen without metadata may already have a row.
+        // Keep the terminal's original lane when its identity becomes known.
+        let duplicate = self.find(&event.source, &event.session_id);
+        if let Some(duplicate) = duplicate {
+            let removed = self.sessions.remove(duplicate);
+            self.record_change(
+                &removed,
+                event.at,
+                Action::Removed,
+                None,
+                "terminal_handoff",
+            );
+            if duplicate < index {
+                index -= 1;
+            }
+        }
+        let old = &self.sessions[index];
+        replacement.lane = old.lane;
+        replacement.first_seen = old.first_seen;
+        replacement.wt_session = Some(key.1);
+        replacement.codex_cli = true;
+        if replacement.ancestors.is_empty() {
+            replacement.ancestors.clone_from(&old.ancestors);
+        }
+        self.record_change(
+            &replacement,
+            event.at,
+            Action::Replaced,
+            Some(previous),
+            event.kind.label(),
+        );
+        self.sessions[index] = replacement;
+        if duplicate.is_some() {
+            self.fill_lanes();
+        }
+        true
+    }
+
+    fn record_change(
+        &self,
+        session: &Session,
+        at: u64,
+        action: Action,
+        previous_session_id: Option<String>,
+        reason: &'static str,
+    ) {
+        if let Some(journal) = &self.lifecycle {
+            let _ = journal.try_send(lifecycle::Change {
+                at,
+                action,
+                source: session.source.clone(),
+                terminal_id: session.wt_session.clone(),
+                session_id: session.session_id.clone(),
+                previous_session_id,
+                lane: session.lane,
+                reason,
+            });
+        }
+    }
+
     fn update(&mut self, index: usize, event: &Event) {
+        self.sessions[index].turns.observe(event);
         let step = state::step(self.sessions[index].state, event);
         let mut learned_cwd = false;
         let mut moved: Option<usize> = None;
@@ -316,7 +562,14 @@ impl Tracker {
             let session = &mut self.sessions[index];
             session.last_event = event.at;
             session.events += 1;
-            session.note = event.note();
+            // Subagents may outlive the cancelled main turn. Keep its reason
+            // visible when their final roster update reveals Connected again.
+            if !(session.turns.is_interrupted()
+                && (event.subagent
+                    || matches!(event.kind, Kind::SubagentStart | Kind::SubagentStop)))
+            {
+                session.note = event.note();
+            }
             roster(session, event);
             // The project directory is the *main* agent's, and `SessionStart`
             // carries the authoritative launch directory. A subagent may be
@@ -340,9 +593,10 @@ impl Tracker {
             }
             // Other fields fill in whenever they show up, and are never cleared
             // by an event that omits them.
-            if event.wt_session.is_some() {
+            if !event.subagent && event.wt_session.is_some() {
                 session.wt_session.clone_from(&event.wt_session);
             }
+            session.codex_cli |= event.codex_cli && !event.subagent;
             if !event.ancestors.is_empty() {
                 session.ancestors.clone_from(&event.ancestors);
             }
@@ -367,7 +621,14 @@ impl Tracker {
             }
         }
         if step == Step::Release {
-            self.sessions.remove(index);
+            let removed = self.sessions.remove(index);
+            self.record_change(
+                &removed,
+                event.at,
+                Action::Removed,
+                None,
+                event.kind.label(),
+            );
             self.fill_lanes();
         } else if learned_cwd {
             self.fill_lanes();
@@ -378,42 +639,20 @@ impl Tracker {
     }
 
     fn introduce(&mut self, event: &Event) {
-        let Some(state) = state::adopt(event) else {
+        let Some(mut session) = Session::from_event(event) else {
             return;
         };
-        let mut subagents = std::collections::BTreeMap::new();
-        if let Some(id) = &event.agent
-            && event.kind != Kind::SubagentStop
-        {
-            subagents.insert(id.clone(), event.at);
+        if let Some((key, _)) = self.terminals.iter().find(|(key, terminal)| {
+            key.0 == event.source && terminal.session_id == event.session_id
+        }) {
+            session.wt_session = Some(key.1.clone());
+            session.codex_cli = true;
         }
-        self.sessions.push(Session {
-            source: event.source.clone(),
-            session_id: event.session_id.clone(),
-            agent: Agent::from_source(&event.source),
-            // A session adopted from a subagent's event must not take that
-            // subagent's working directory as its project; the main agent's
-            // next event (or its SessionStart) sets it.
-            cwd: if event.subagent {
-                None
-            } else {
-                event.cwd.clone()
-            },
-            state,
-            since: event.at,
-            first_seen: event.at,
-            last_event: event.at,
-            events: 1,
-            note: event.note(),
-            subagents,
-            lane: None,
-            wt_session: event.wt_session.clone(),
-            ancestors: event.ancestors.clone(),
-            gauges: event.gauges.unwrap_or_default(),
-            failure: (event.kind == Kind::StopFailure)
-                .then(|| failure_word(event.error_type.as_deref())),
-        });
+        self.sessions.push(session);
         self.fill_lanes();
+        if let Some(session) = self.sessions.last() {
+            self.record_change(session, event.at, Action::Created, None, event.kind.label());
+        }
         // A session arriving is news like any state change.
         if let Some(lane) = self.sessions.last().and_then(|session| session.lane) {
             self.follow(lane);
@@ -554,9 +793,19 @@ impl Tracker {
     /// removes is a session whose agent died without a `SessionEnd` — a killed
     /// terminal, a crash — which otherwise sits until eviction.
     pub fn dismiss(&mut self, lane: usize) {
-        let before = self.sessions.len();
-        self.sessions.retain(|session| session.lane != Some(lane));
-        if self.sessions.len() != before {
+        if let Some(index) = self
+            .sessions
+            .iter()
+            .position(|session| session.lane == Some(lane))
+        {
+            let removed = self.sessions.remove(index);
+            self.record_change(
+                &removed,
+                crate::now_ms(),
+                Action::Removed,
+                None,
+                "dismissed",
+            );
             self.fill_lanes();
         }
     }
@@ -589,10 +838,15 @@ impl Tracker {
     /// how an off-keyboard card is dismissed. Same safety: if the agent is
     /// actually still alive, its next event re-adopts it.
     pub fn dismiss_session(&mut self, source: &str, session_id: &str) {
-        let before = self.sessions.len();
-        self.sessions
-            .retain(|session| !(session.source == source && session.session_id == session_id));
-        if self.sessions.len() != before {
+        if let Some(index) = self.find(source, session_id) {
+            let removed = self.sessions.remove(index);
+            self.record_change(
+                &removed,
+                crate::now_ms(),
+                Action::Removed,
+                None,
+                "dismissed",
+            );
             self.fill_lanes();
         }
     }
@@ -903,9 +1157,11 @@ mod tests {
             subagents: Default::default(),
             lane: Some(lane),
             wt_session: None,
+            codex_cli: false,
             ancestors: Vec::new(),
             gauges: Default::default(),
             failure: None,
+            turns: Default::default(),
         }
     }
 

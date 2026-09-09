@@ -31,7 +31,8 @@ const ALLOWED: [&str; 15] = [
     // The path of the agent's own transcript — a name of a file on this
     // machine, handed to a process on this machine. The app opens only a
     // Codex rollout, read-only, and reads only its tail for the last
-    // `token_count` line: the numbers a lane can show. Never the content.
+    // `token_count` line and, on Stop, a completed Plan for that turn.
+    // Only numbers and a proposed-plan flag are retained, never content.
     "transcript_path",
     // Why a turn failed, as Claude classifies it: `rate_limit`,
     // `overloaded`, `auth`. The message beside it is free text and stays.

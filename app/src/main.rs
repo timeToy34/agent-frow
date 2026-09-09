@@ -338,12 +338,13 @@ fn log_event(value: &serde_json::Value) {
             .to_owned()
     };
     let line = format!(
-        "{} src={} evt={} tool={} sid={} cwd={:?} agent_id={} agent_type={} ntype={} reason={} end={}\n",
+        "{} src={} evt={} tool={} sid={} turn_id={} cwd={:?} agent_id={} agent_type={} ntype={} reason={} end={}\n",
         now_ms(),
         field("src"),
         field("hook_event_name"),
         field("tool_name"),
         field("session_id"),
+        field("turn_id"),
         field("cwd"),
         field("agent_id"),
         field("agent_type"),
@@ -617,6 +618,9 @@ fn run(dialog_on_busy: bool, notice: Option<String>) -> Result<(), String> {
     let (mini, mini_window) = (saved.mini, saved.mini_window);
     let mut started = tracker::Tracker::new(saved, lastseen::load(&last_seen_path));
     started.settings_error = settings_error;
+    if let Some(root) = paths::root() {
+        started.lifecycle = Some(agent_frow::lifecycle::start(root.join("lane-events.log")));
+    }
     let tracker = Arc::new(Mutex::new(started));
 
     let ingress_tracker = Arc::clone(&tracker);

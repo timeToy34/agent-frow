@@ -3,7 +3,8 @@
 The engineering companion to the [README](../README.md): how the pieces fit,
 what each rule in the product actually does, and the build-and-install
 mechanics. The *histories* — why each rule exists, measured against real
-sessions — are in [lessons.md](lessons.md).
+sessions — are in [lessons.md](lessons.md). Open bugs, limitations, and
+workarounds are tracked in [Known issues](../KNOWN_ISSUES.md).
 
 ## The pieces
 
@@ -132,16 +133,49 @@ for questions like "what does this agent actually report as its working
 directory?". Off by default; the log self-truncates past 256 KB. Failed hook
 posts are logged by the hook itself to `~/.agent-frow/hook.log`.
 
+Lane ownership has its own always-on journal, `~/.agent-frow/lane-events.log`.
+Each JSON line records creation, conversation replacement, or removal, with
+the event timestamp, source, terminal id, current and previous session ids,
+lane number (one-based, or null off the keyboard), and reason. Tool activity
+does not fill this log. A separate worker writes it from a bounded queue;
+neither the ingress path nor the tracker lock waits for disk I/O. The file
+restarts at 256 KB, and an oversized record is skipped. Prompts, tool contents
+and credentials are never included.
+
+### Codex terminal ownership
+
+Codex CLI lanes follow `(source, WT_SESSION)`, with one foreground agent per
+Windows Terminal tab. The worker verifies `source = "cli"` in the rollout's
+first complete `session_meta` record and matches its id to the hook's
+`session_id`. This read is bounded to 64 KB; valid metadata is cached per
+file, while incomplete metadata is retried. The app derives the `codex_cli`
+flag locally, without changing the hook payload or command string.
+
+A main-agent `SessionStart` or `UserPromptSubmit` for another conversation
+in the same tab replaces the session on that lane. Position, name, colour,
+selection, lock and queue age stay; conversation state, gauges and subagents
+start fresh from the event. An already adopted duplicate is removed when
+its terminal identity is learned. Desktop sessions, Claude, and events with
+no verified terminal identity retain session-based tracking; folders never
+decide ownership.
+
+The tracker remembers prior conversation ids for each terminal during the
+app run. Their tool results, subagent events and session endings cannot
+revive an old lane or alter the current conversation, even if an event lacks
+terminal metadata. Only an explicit foreground start or prompt can switch
+back. Events older than the current activation are ignored, including late
+lifecycle events. The state transition table itself remains unchanged.
+
 ## Events and the state machine
 
-Six states: **Connected** (alive, nothing run yet), **Running**, **Waiting**
+Six states: **Connected** (alive, no main turn running), **Running**, **Waiting**
 (needs you), **Done**, **Error**, and **Idle** — nothing heard for a while.
-Idle is the one state no event sets: it reports silence, a fact about the
-wire, not a guess about the agent. An interrupt lands here too — the agent
-sits back at its prompt, and interrupting is something *you* did, not an
-alarm. The transition table is `app/src/state.rs` and it is a total function
-over (state, event) — no request ids, no queues, no tombstones, no timers.
-**Activity clears Waiting**, so nothing has to be correlated to anything.
+Idle reports silence, through a sweep or an applicable idle notification.
+Codex's explicit `Interrupt` instead returns the main session to Connected
+with an **Interrupted** note. The transition table is `app/src/state.rs`, a
+total function over (state, event), without permission-request correlation
+or timers. **Activity clears Waiting** after the tracker filters events from
+known cancelled Codex turns.
 
 None of its conditions are stylistic — each prevents an observed failure and
 has a test named after it:
@@ -159,24 +193,39 @@ has a test named after it:
 - `idle_prompt` demotes to Idle only **from Running**. It means "a prompt has
   sat unanswered", which is equally true of a permission dialog nobody has
   answered, so from Waiting it changes nothing. It is also why an interrupted
-  turn dims about a minute late: no hook fires at the moment of an interrupt —
-  Claude only reveals one by idling with a turn still open (~60 s).
+  Claude turn dims about a minute late: the current Claude adapter only
+  reveals one by idling with a turn still open (~60 s).
+- Codex `Interrupt` sets Connected, keeps the lane and initial launch folder,
+  and records Interrupted. The next `UserPromptSubmit` starts Running again.
+  Subagents retain their roster and keep the display Running while busy;
+  their completion reveals Connected with the interruption note intact.
+  The tracker retains the current main-turn ID and cancelled IDs in memory.
+  A late interrupt for a different turn cannot change the current state, and
+  later main-turn events from cancelled IDs cannot reopen Waiting or finish
+  a retry. Only a new prompt replaces a known current turn identity.
+  Invalid interrupts (missing ID, non-Codex source, or subagent) are counted
+  without changing or creating a session. `SessionEnd` still releases it.
 - `PermissionDenied` promotes Waiting to Running: the prompt was answered with
   a no — by the user, a rule, or an interrupt — so it is no longer pending,
   and the turn is formally still open. If the interrupt killed the turn, the
   idle notification says so a minute later.
-- `PostToolUse` promotes **only from Waiting**. Hook processes post
+- `PostToolUse` promotes **from Waiting or Idle**. Hook processes post
   concurrently, so one emitted before `Stop` can arrive after it.
 - A `Stop` carrying `proposed_plan` sets Waiting, not Done. Codex has no
   dialog for approving a plan: it ends the plan-mode turn with the plan in
   its final message and its UI asks "implement?" from that. The hook reports
   only that the `<proposed_plan>` tag is present — the message stays where
-  it is — and the answer arrives as the next prompt.
+  it is. When Codex omits the final message, the app can recover the flag
+  from a completed `Plan` item in the rollout tail, matched to the Stop's
+  turn id. The plan text is never retained; the answer arrives as the next
+  prompt.
 - `PreToolUse` for `request_user_input` sets Waiting. It is the only tool
   name the table reads: Codex asks its questions through that tool, whose
   handler shows the dialog and blocks until it is answered, so the tool
-  starting *is* the question appearing, and its `PostToolUse` *is* the
-  answer. It is registered for Codex with that one tool as its matcher;
+  starting *is* the question appearing. Receiving its `PostToolUse` clears
+  Waiting, but an immediate update after answering is not guaranteed: see
+  [KI-001](../KNOWN_ISSUES.md#ki-001-codex-stays-waiting-after-a-response). It is
+  registered for Codex with that one tool as its matcher;
   Claude's questions arrive as a notification instead.
 
 Unknown `notification_type` values are ignored and **counted**, and shown in the
@@ -187,14 +236,12 @@ There is no handshake and nothing to seed: an event from a session we have never
 seen creates it and infers the state from the event itself. An agent started
 before the app, after it, or an hour ago all behave identically.
 
-**Known limitation, stated in the window rather than hidden:** no agent emits an
-event when you *answer* a prompt. The next observable event is that tool
-finishing, so a lane can read Waiting while the approved tool already runs —
-seconds usually, up to about a minute. Codex stretches this: it reports a
-command only once its process has exited, so a server or a long install you
-allowed it to start holds Waiting until some later command finishes. A Codex
-*question* is the opposite case — its `PostToolUse` fires the moment you
-answer. Self-clearing in every case.
+**Waiting follows received activity.** Answering a prompt does not guarantee
+an immediate update; a lane can remain Waiting while an approved command
+runs or until a later event arrives. The observed response delay and the
+known command-completion limitation are tracked as KI-001 and KI-003 in
+[Known issues](../KNOWN_ISSUES.md). Do not promise immediate clearing for
+Codex questions based only on when their tool handler returns.
 
 **Silence is reported, never punished.** A session leaves only on `SessionEnd`
 or the ✕ — never on a timer, because the user who stepped away comes back to
@@ -238,8 +285,9 @@ A session's **project folder** is the *main* agent's launch directory: it is
 taken from `SessionStart`'s `cwd` (authoritative) and, until that arrives, from
 the first non-subagent event that carries one. A **subagent's** `cwd` never sets
 it — a subagent working in `…/frontend` under a project rooted at `…/` must not
-make the subfolder the lane's project, which was a real "bound to the wrong
-folder" bug.
+make the subfolder the lane's project. The historical report that this rule
+did not fully fix a folder mismatch still needs verification; see
+[KI-002](../KNOWN_ISSUES.md#ki-002-lane-binds-to-a-subfolder-instead-of-the-launch-folder).
 
 Lane names, colours, saved agents, the lane count and whether Settings is
 unfolded live in `%LOCALAPPDATA%\agent-frow\settings.json`, written
@@ -275,14 +323,20 @@ turns both into one shape: three percentages, each possibly unknown.
   a WSL agent and cannot see `/home`, while the app knows every
   distribution and reaches it through `\\wsl.localhost`. Context follows
   the Codex TUI's arithmetic (twelve thousand tokens of baseline subtracted
-  from both usage and window); the two limits are told apart by the length
-  of their window, not by which slot they arrived in — the five-hour window
-  is `primary` on one plan and absent on another.
+  from both usage and window). Limits come only from the general `codex`
+  bucket (or legacy records with no limit id); model-specific buckets such
+  as Spark must not supply the account's percentages. The two limits are
+  told apart by the length of their window, not by which slot they arrived
+  in — the five-hour window is `primary` on one plan and absent on another.
+  Each field uses the newest matching reading in the bounded tail. If the
+  tail contains only other buckets, context can still update, but limits
+  stay at their last known reading or show a dash if none has been received.
 - **A status line is numbers, not news.** It changes no state, counts as no
   event, revives no Idle lane — it also fires on a config edit — and one
   for a session the app does not hold is dropped, since Claude re-runs it
-  after a session has ended. The limits are an account's, not a lane's:
-  every lane of one account reads the same two.
+  after a session has ended. The limits describe an account's allowance;
+  each lane holds the latest reading received for its session, so a quiet
+  session can lag behind an active one.
 
 ## The keyboard
 
@@ -402,11 +456,15 @@ under its own `Geometry`. What differs is the shape and the vocabulary:
   and each M key selects its lane — the cursor and the lock can be seen on a
   full column before any agent is there; when the preview ends the cursor
   falls back to a real agent, or to nothing.
-- **Input is chords.** The knob and keys are remapped to Ctrl+Shift+F13–F24
-  (bare F13–F24 belong to the F-row) by importing a keymap file into the
-  Launcher — its key picker records only a physically pressed key, so a chord
-  cannot be chosen from the list; `firmware/keychron-ultra/keymaps/` holds
-  the file. The encoder takes a modified keycode like any key: knob CCW/CW/press
+- **The top row sends single keys.** It uses Intl1, Intl5, Intl6 and Keypad
+  Comma, mapped on US Windows to `0xC1`, `0xEB`, `0xEA` and `0xC2`.
+  The knob and M1–M5 retain Ctrl+Shift+F13–F20; bare F13–F24 belong to the
+  F-row. Import the file in `firmware/keychron-ultra/keymaps/` through the
+  Launcher, whose key picker cannot enter the remaining chords. The old
+  Ctrl+Shift+F21–F24 top-row bindings are removed, so both the app and JSON
+  must be updated. All registrations use `MOD_NOREPEAT`. A V0 registration
+  failure names the key in the Keyboard panel while other controls remain
+  active. The encoder takes a modified keycode like any key: knob CCW/CW/press
   select and lock; M1–M5 select + summon their lane; the top line's four
   keys are an F-row lane for the shown agent — any of them summons it, and
   while it is Waiting the three after the first are ⏶⏷Enter. Both keyboards
@@ -532,6 +590,18 @@ permission — the deck's harder case, not a new one. `MOD_NOREPEAT` means a
 held F14 is one Up, not a stream of them. Waiting's double-pulse on those
 three keys was already the affordance: the keys that beat are the keys that
 answer.
+
+The shared Windows answer sender temporarily releases held left/right Ctrl
+and Shift around Up/Down/Enter, restoring those same modifiers within the
+same `SendInput` batch, while preserving answers on key press. This improved
+the old V0 chords, but rapid physical presses still sometimes scrolled the
+terminal. The V0 top-row remap therefore removes those chords at the source;
+the sender's normalization remains for modifiers held elsewhere. With no
+Ctrl/Shift held, an answer uses just keydown and keyup. Partial
+input failures trigger one cleanup attempt, never an answer retry, and are
+reported in the status bar. See
+[KI-016](../KNOWN_ISSUES.md#ki-016-v0-answer-keys-sometimes-scroll-the-terminal)
+for physical keyboard verification.
 
 **The lane's colour is the base for everything, and colour change means
 trouble.** Every ordinary state is the lane's own colour at some brightness and

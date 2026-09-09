@@ -4,10 +4,6 @@ use core::ffi::c_void;
 
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
-    KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC, MapVirtualKeyW, SendInput, VK_DOWN, VK_RETURN, VK_UP,
-};
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, EnumWindows, FlashWindow, GA_ROOT, GWL_EXSTYLE, GetAncestor, GetClassNameW,
     GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
@@ -777,7 +773,7 @@ pub fn type_key(window: isize, key: Key) -> Result<String, String> {
         Some(false)
     };
     super::ready_to_type(in_front, on_tab_strip).map_err(str::to_owned)?;
-    send_key(key)?;
+    super::input::send_key(key)?;
     let title = title_of(hwnd);
     let what = if title.is_empty() {
         "the terminal".to_owned()
@@ -785,41 +781,6 @@ pub fn type_key(window: isize, key: Key) -> Result<String, String> {
         title
     };
     Ok(format!("sent {} to {what}", key.name()))
-}
-
-/// One press and release of `key`, as the keyboard would send it — scan code
-/// included, and the arrows flagged extended, which is what they are.
-fn send_key(key: Key) -> Result<(), String> {
-    let (vk, flags) = match key {
-        Key::Up => (VK_UP, KEYEVENTF_EXTENDEDKEY),
-        Key::Down => (VK_DOWN, KEYEVENTF_EXTENDEDKEY),
-        Key::Enter => (VK_RETURN, KEYBD_EVENT_FLAGS(0)),
-    };
-    // SAFETY: FFI, pure lookup.
-    let scan = unsafe { MapVirtualKeyW(u32::from(vk.0), MAPVK_VK_TO_VSC) } as u16;
-    let stroke = |flags: KEYBD_EVENT_FLAGS| INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: vk,
-                wScan: scan,
-                dwFlags: flags,
-                time: 0,
-                dwExtraInfo: 0,
-            },
-        },
-    };
-    let inputs = [stroke(flags), stroke(flags | KEYEVENTF_KEYUP)];
-    // SAFETY: FFI with a slice of fully initialised structures of the size
-    // stated.
-    let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
-    if sent < inputs.len() as u32 {
-        return Err(
-            "Windows refused the keystroke — an elevated terminal cannot be typed into from here"
-                .to_owned(),
-        );
-    }
-    Ok(())
 }
 
 #[cfg(test)]

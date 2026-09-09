@@ -44,7 +44,7 @@ static RECEIVED: AtomicU64 = AtomicU64::new(0);
 static QUEUED: AtomicU64 = AtomicU64::new(0);
 static HANDLED: AtomicU64 = AtomicU64::new(0);
 
-/// (F13–F24 hotkeys received, queued to the worker, handled).
+/// (F-row and V0 hotkeys received, queued to the worker, handled).
 pub fn stages() -> (u64, u64, u64) {
     (
         RECEIVED.load(Ordering::Relaxed),
@@ -59,19 +59,35 @@ pub const VK_F13: u32 = 0x7C;
 /// How many codes: F13 through F24, one per F-row key.
 pub const SUMMON_KEYS: usize = KEYS;
 
-/// The numpad's controls: the same twelve codes again, under Ctrl+Shift —
-/// knob CCW/CW/press, M1–M5, then the top line's four keys left to right.
-/// The user imports the keymap file into the Keychron Launcher; bare F13–F24
-/// belong to the F-row.
-pub const NUMPAD_KEYS: usize = 12;
+/// Knob CCW/CW/press and M1–M5 use Ctrl+Shift+F13–F20.
+const NUMPAD_CHORDS: usize = 8;
+
+/// The top line uses single keys so answering cannot itself hold Ctrl/Shift.
+/// These Windows virtual keys were checked on the US layout (00000409):
+/// Launcher KC_INT1 / KC_INT5 / KC_INT6 / KC_KP_COMMA, left to right.
+/// Bare F13–F24 belong to the F-row; the old top-row chords are not registered.
+const NUMPAD_TOP_ROW: [(u32, &str); 4] = [
+    (0xC1, "Intl1"),
+    (0xEB, "Intl5"),
+    (0xEA, "Intl6"),
+    (0xC2, "Keypad Comma"),
+];
+
+/// The numpad's controls: the knob's three, M1–M5, then the top line's four.
+pub const NUMPAD_KEYS: usize = NUMPAD_CHORDS + NUMPAD_TOP_ROW.len();
 
 /// The label a key index carries in the window: 0 → "F13"; the numpad's
-/// chords follow, 12 → "Ctrl+Shift+F13".
+/// controls follow, 12 → "Ctrl+Shift+F13", 20 → "Intl1".
 pub fn key_label(index: usize) -> String {
     if index < SUMMON_KEYS {
         format!("F{}", 13 + index)
-    } else {
+    } else if index < SUMMON_KEYS + NUMPAD_CHORDS {
         format!("Ctrl+Shift+F{}", 13 + index - SUMMON_KEYS)
+    } else {
+        NUMPAD_TOP_ROW
+            .get(index - SUMMON_KEYS - NUMPAD_CHORDS)
+            .map_or("Unknown key", |(_, label)| label)
+            .to_owned()
     }
 }
 
@@ -126,7 +142,7 @@ pub fn press_of(index: usize, lane_count: usize, answerable: bool) -> Option<Pre
     Some(lane_press(lane, index % KEYS_PER_LANE, answerable))
 }
 
-/// What pressing numpad chord `index` (0 → Ctrl+Shift+F13) means: the knob's
+/// What pressing numpad control `index` (0 → Ctrl+Shift+F13) means: the knob's
 /// three, then M1–M5 summoning their lanes, then the top line's four keys
 /// acting on `selected` — the agent it is showing — as one F-row lane: any of
 /// them summons it, and while it is answerable the three after the first are
@@ -158,9 +174,9 @@ pub struct Keys {
     _inner: windows_impl::Hotkeys,
 }
 
-/// Starts global capture of F13–F24. `None` when the hotkeys cannot be registered
-/// (or off Windows) — the buttons in the window still work, and the Keyboard
-/// panel says the keys do not.
+/// Starts global capture of F13–F24 and the V0 controls. `None` when the F-row
+/// hotkeys cannot be registered (or off Windows). V0 registration failures are
+/// reported individually without disabling the working keys.
 pub fn start(tracker: Arc<Mutex<Tracker>>) -> Option<Keys> {
     #[cfg(windows)]
     {
@@ -169,9 +185,13 @@ pub fn start(tracker: Arc<Mutex<Tracker>>) -> Option<Keys> {
         // nobody has done yet, so the outcome is recorded either way — in its
         // own field, where nothing later overwrites it.
         if let Ok(mut tracker) = tracker.lock() {
-            tracker.keys_error = outcome.as_ref().err().cloned();
+            tracker.keys_error = match &outcome {
+                Ok((_, warnings)) if !warnings.is_empty() => Some(warnings.join("; ")),
+                Err(error) => Some(error.clone()),
+                _ => None,
+            };
         }
-        outcome.ok().map(|inner| Keys { _inner: inner })
+        outcome.ok().map(|(inner, _)| Keys { _inner: inner })
     }
     #[cfg(not(windows))]
     {
@@ -186,7 +206,7 @@ pub fn start(tracker: Arc<Mutex<Tracker>>) -> Option<Keys> {
 fn handle_press(tracker: &Arc<Mutex<Tracker>>, index: usize) {
     HANDLED.fetch_add(1, Ordering::Relaxed);
     if index >= SUMMON_KEYS {
-        return handle_chord(tracker, index - SUMMON_KEYS);
+        return handle_numpad(tracker, index - SUMMON_KEYS);
     }
     let press = {
         let Ok(mut tracker) = tracker.lock() else {
@@ -204,21 +224,21 @@ fn handle_press(tracker: &Arc<Mutex<Tracker>>, index: usize) {
     }
 }
 
-/// One numpad chord, handled like [`handle_press`]: selection and lock are a
+/// One numpad control, handled like [`handle_press`]: selection and lock are a
 /// mutation under the lock and done; a summon or answer runs unlocked on this
 /// same worker. An M key and a top-line key select what they summon — the user's
 /// hand moves the cursor, always, locked or not.
-fn handle_chord(tracker: &Arc<Mutex<Tracker>>, chord: usize) {
+fn handle_numpad(tracker: &Arc<Mutex<Tracker>>, index: usize) {
     let press = {
         let Ok(mut tracker) = tracker.lock() else {
             return;
         };
-        tracker.last_key = Some((SUMMON_KEYS + chord, crate::now_ms()));
+        tracker.last_key = Some((SUMMON_KEYS + index, crate::now_ms()));
         let answerable = tracker
             .selected
             .is_some_and(|lane| tracker.answerable(lane));
         match numpad_press_of(
-            chord,
+            index,
             tracker.settings.lane_count,
             tracker.selected,
             answerable,
@@ -307,13 +327,13 @@ mod windows_impl {
     use windows::Win32::Foundation::{LPARAM, WPARAM};
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, RegisterHotKey, UnregisterHotKey,
+        HOT_KEY_MODIFIERS, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, RegisterHotKey, UnregisterHotKey,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         GetMessageW, MSG, PostThreadMessageW, WM_HOTKEY, WM_QUIT,
     };
 
-    use super::{NUMPAD_KEYS, SUMMON_KEYS, VK_F13};
+    use super::{NUMPAD_CHORDS, NUMPAD_KEYS, NUMPAD_TOP_ROW, SUMMON_KEYS, VK_F13};
     use crate::tracker::Tracker;
 
     /// Every id this module may hold: the F-row's twelve, then the numpad's.
@@ -356,19 +376,27 @@ mod windows_impl {
         }
     }
 
-    pub fn install(tracker: Arc<Mutex<Tracker>>) -> Result<Hotkeys, String> {
+    struct Ready {
+        thread_id: u32,
+        warnings: Vec<String>,
+    }
+
+    pub fn install(tracker: Arc<Mutex<Tracker>>) -> Result<(Hotkeys, Vec<String>), String> {
         let (sender, receiver) = sync_channel::<usize>(64);
 
         // The install is reported back so a failure is a reason the caller can
         // show, not a thread that died where nobody was looking.
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<u32, String>>();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<Ready, String>>();
         let pump = std::thread::Builder::new()
             .name("agent-frow-keys".to_owned())
             .spawn(move || pump_thread(&ready_tx, sender))
             .map_err(|error| format!("could not start the hotkey thread: {error}"))?;
 
-        let thread_id = match ready_rx.recv() {
-            Ok(Ok(thread_id)) => thread_id,
+        let Ready {
+            thread_id,
+            warnings,
+        } = match ready_rx.recv() {
+            Ok(Ok(ready)) => ready,
             outcome => {
                 let _ = pump.join();
                 return Err(match outcome {
@@ -409,11 +437,14 @@ mod windows_impl {
             }
         };
 
-        Ok(Hotkeys {
-            thread_id,
-            pump: Some(pump),
-            worker: Some(worker),
-        })
+        Ok((
+            Hotkeys {
+                thread_id,
+                pump: Some(pump),
+                worker: Some(worker),
+            },
+            warnings,
+        ))
     }
 
     fn unregister_hotkeys(count: usize) {
@@ -423,39 +454,75 @@ mod windows_impl {
         }
     }
 
-    fn pump_thread(
-        ready: &std::sync::mpsc::Sender<Result<u32, String>>,
-        sender: SyncSender<usize>,
-    ) {
-        for index in 0..SUMMON_KEYS {
+    /// Registration order is the control index sent to the worker. There are
+    /// exactly twelve F-row and twelve V0 bindings, with no legacy aliases.
+    fn bindings() -> impl Iterator<Item = (HOT_KEY_MODIFIERS, u32)> {
+        (0..SUMMON_KEYS)
+            .map(|index| (MOD_NOREPEAT, VK_F13 + index as u32))
+            .chain((0..NUMPAD_CHORDS).map(|index| {
+                (
+                    MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT,
+                    VK_F13 + index as u32,
+                )
+            }))
+            .chain(NUMPAD_TOP_ROW.map(|(vk, _)| (MOD_NOREPEAT, vk)))
+    }
+
+    fn register_hotkeys(
+        mut register: impl FnMut(i32, HOT_KEY_MODIFIERS, u32) -> Result<(), String>,
+        mut unregister: impl FnMut(i32),
+    ) -> Result<Vec<String>, String> {
+        let mut warnings = Vec::new();
+        for (index, (modifiers, vk)) in bindings().enumerate() {
             let id = FIRST_HOTKEY_ID + index as i32;
-            let vk = VK_F13 + index as u32;
-            // SAFETY: thread-owned registration with a unique id and one
-            // modifier-free virtual key from F13 through F24.
-            if let Err(error) = unsafe { RegisterHotKey(None, id, MOD_NOREPEAT, vk) } {
-                unregister_hotkeys(index);
-                let _ = ready.send(Err(format!(
-                    "could not register F{} as a summon key: {error}",
-                    13 + index
-                )));
-                return;
+            if let Err(error) = register(id, modifiers, vk) {
+                let reason = format!("could not register {}: {error}", super::key_label(index));
+                if index < SUMMON_KEYS {
+                    for previous in 0..index {
+                        unregister(FIRST_HOTKEY_ID + previous as i32);
+                    }
+                    return Err(reason);
+                }
+                // A V0 collision must not take down the F-row or other V0
+                // controls, but it must be visible in the Keyboard panel.
+                warnings.push(reason);
             }
         }
-        // The numpad's chords, best-effort: a collision on one of these must
-        // not take down the F-row's twelve, so a refusal skips that one key
-        // rather than failing the install.
-        for chord in 0..NUMPAD_KEYS {
-            let id = FIRST_HOTKEY_ID + (SUMMON_KEYS + chord) as i32;
-            let vk = VK_F13 + chord as u32;
-            // SAFETY: thread-owned registration with a unique id and one
-            // Ctrl+Shift-modified virtual key from F13 through F24.
-            let _ = unsafe { RegisterHotKey(None, id, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, vk) };
-        }
+        Ok(warnings)
+    }
+
+    fn pump_thread(
+        ready: &std::sync::mpsc::Sender<Result<Ready, String>>,
+        sender: SyncSender<usize>,
+    ) {
+        let warnings = match register_hotkeys(
+            // SAFETY: thread-owned registrations, each with a unique id.
+            |id, modifiers, vk| {
+                unsafe { RegisterHotKey(None, id, modifiers, vk) }
+                    .map_err(|error| error.to_string())
+            },
+            |id| {
+                // SAFETY: unregistering an id owned by this calling thread.
+                let _ = unsafe { UnregisterHotKey(None, id) };
+            },
+        ) {
+            Ok(warnings) => warnings,
+            Err(error) => {
+                let _ = ready.send(Err(error));
+                return;
+            }
+        };
 
         // SAFETY: this thread's own id.
         let thread_id = unsafe { GetCurrentThreadId() };
         PUMP_THREAD.store(thread_id, Ordering::SeqCst);
-        if ready.send(Ok(thread_id)).is_err() {
+        if ready
+            .send(Ok(Ready {
+                thread_id,
+                warnings,
+            }))
+            .is_err()
+        {
             unregister_hotkeys(ALL_KEYS);
             PUMP_THREAD.store(0, Ordering::SeqCst);
             return;
@@ -480,6 +547,115 @@ mod windows_impl {
 
         unregister_hotkeys(ALL_KEYS);
         let _ = PUMP_THREAD.compare_exchange(thread_id, 0, Ordering::SeqCst, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn launcher_keys_register_once_without_the_old_top_row_chords() {
+            let keymap: serde_json::Value = serde_json::from_str(include_str!(
+                "../../firmware/keychron-ultra/keymaps/keychron_v0_ultra_ansi.json"
+            ))
+            .unwrap();
+            let bindings: Vec<_> = bindings().collect();
+            assert_eq!(bindings.len(), 24);
+            let unique: std::collections::BTreeSet<_> = bindings
+                .iter()
+                .map(|(modifiers, vk)| (modifiers.0, *vk))
+                .collect();
+            assert_eq!(unique.len(), bindings.len());
+            for index in 0..SUMMON_KEYS {
+                assert_eq!(bindings[index], (MOD_NOREPEAT, VK_F13 + index as u32));
+            }
+            let chord_modifiers = MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT;
+            for index in 0..8 {
+                assert_eq!(
+                    bindings[SUMMON_KEYS + index],
+                    (chord_modifiers, VK_F13 + index as u32)
+                );
+            }
+            for old_vk in 0x84..=0x87 {
+                assert!(!bindings.contains(&(chord_modifiers, old_vk)));
+            }
+
+            // Independent HID -> Windows mapping, checked on US layout 00000409.
+            // Read the shipped Launcher file so an app/firmware mismatch fails.
+            let hid_to_vk = [(135, 0xC1), (139, 0xEB), (140, 0xEA), (133, 0xC2)];
+            for (offset, &(qmk, vk)) in hid_to_vk.iter().enumerate() {
+                let key = keymap["keymap"][0]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|key| key["row"] == 0 && key["col"] == offset + 1)
+                    .unwrap();
+                assert_eq!(key["val"], qmk);
+                assert_eq!(bindings[20 + offset], (MOD_NOREPEAT, vk));
+            }
+        }
+
+        #[test]
+        fn a_v0_registration_failure_is_named_and_keeps_other_controls() {
+            for failed_index in SUMMON_KEYS..ALL_KEYS {
+                let mut registered = Vec::new();
+                let mut unregistered = Vec::new();
+                let warnings = register_hotkeys(
+                    |id, _, _| {
+                        if id == FIRST_HOTKEY_ID + failed_index as i32 {
+                            Err("already registered".to_owned())
+                        } else {
+                            registered.push(id);
+                            Ok(())
+                        }
+                    },
+                    |id| unregistered.push(id),
+                )
+                .unwrap();
+                assert_eq!(
+                    warnings,
+                    [format!(
+                        "could not register {}: already registered",
+                        crate::keys::key_label(failed_index)
+                    )]
+                );
+                assert_eq!(registered.len(), ALL_KEYS - 1);
+                for index in 0..SUMMON_KEYS {
+                    assert!(registered.contains(&(FIRST_HOTKEY_ID + index as i32)));
+                }
+                assert!(unregistered.is_empty(), "working controls must remain live");
+            }
+        }
+
+        #[test]
+        fn an_f_row_registration_failure_cleans_up_before_reporting() {
+            for failed_index in 0..SUMMON_KEYS {
+                let mut registered = Vec::new();
+                let mut unregistered = Vec::new();
+                let error = register_hotkeys(
+                    |id, _, _| {
+                        if id == FIRST_HOTKEY_ID + failed_index as i32 {
+                            Err("already registered".to_owned())
+                        } else {
+                            registered.push(id);
+                            Ok(())
+                        }
+                    },
+                    |id| unregistered.push(id),
+                )
+                .unwrap_err();
+                assert_eq!(
+                    error,
+                    format!(
+                        "could not register F{}: already registered",
+                        13 + failed_index
+                    )
+                );
+                assert_eq!(registered.len(), failed_index);
+                assert_eq!(unregistered, registered);
+            }
+        }
     }
 }
 
@@ -527,14 +703,19 @@ mod tests {
         assert_eq!(key_label(0), "F13");
         assert_eq!(key_label(11), "F24");
         assert_eq!(key_label(12), "Ctrl+Shift+F13", "the numpad's first chord");
-        assert_eq!(key_label(23), "Ctrl+Shift+F24");
+        assert_eq!(key_label(19), "Ctrl+Shift+F20", "the numpad's last chord");
+        assert_eq!(key_label(20), "Intl1");
+        assert_eq!(key_label(21), "Intl5");
+        assert_eq!(key_label(22), "Intl6");
+        assert_eq!(key_label(23), "Keypad Comma");
+        assert_eq!(key_label(24), "Unknown key");
         assert_eq!(lane_keys_label(0).as_deref(), Some("F13–F16"));
         assert_eq!(lane_keys_label(2).as_deref(), Some("F21–F24"));
         assert_eq!(lane_keys_label(3), None, "no keys past the keyboard");
     }
 
     #[test]
-    fn the_numpad_chords_mean_the_owners_table() {
+    fn the_numpad_controls_mean_the_owners_table() {
         assert_eq!(
             numpad_press_of(0, 5, Some(2), false),
             Some(Press::Select(-1))
@@ -601,13 +782,13 @@ mod tests {
         assert_eq!(
             numpad_press_of(12, 5, Some(0), true),
             None,
-            "past the chords"
+            "past the controls"
         );
     }
 
     #[test]
     fn the_top_line_is_an_f_row_lane_for_the_shown_agent() {
-        // Chords 8..12 on the shown lane mean exactly what F-row keys 4..8
+        // Controls 8..12 on the shown lane mean exactly what F-row keys 4..8
         // mean on lane 1, answerable or not — one rule, two keyboards.
         for answerable in [false, true] {
             for offset in 0..KEYS_PER_LANE {

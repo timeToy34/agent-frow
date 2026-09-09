@@ -61,6 +61,7 @@ fn stdout_is_empty_and_exit_is_zero_for_every_shape() {
         r#"{"hook_event_name":"Notification","session_id":"s","notification_type":"permission_prompt"}"#,
         r#"{"hook_event_name":"Stop","session_id":"s","prompt_id":"p","last_assistant_message":"done"}"#,
         r#"{"hook_event_name":"SessionEnd","session_id":"s","reason":"clear"}"#,
+        r#"{"hook_event_name":"Interrupt","session_id":"s","turn_id":"t","permission_mode":"on-request"}"#,
         // Shapes that are not hooks at all.
         "",
         "not json at all",

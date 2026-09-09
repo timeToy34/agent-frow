@@ -598,9 +598,11 @@ mod tests {
             subagents: Default::default(),
             lane,
             wt_session: None,
+            codex_cli: false,
             ancestors: Vec::new(),
             gauges: Default::default(),
             failure: None,
+            turns: Default::default(),
         }
     }
 

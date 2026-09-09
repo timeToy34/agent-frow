@@ -26,10 +26,10 @@ const BRIDGE_NAME: &str = "agent-frow-hook";
 /// them; nothing here ever blocks an agent on a human.
 const TIMEOUT_SECS: u64 = 5;
 
-/// Codex clamps `SessionEnd` to three seconds and warns when asked for more.
+/// Codex clamps `SessionEnd` and `Interrupt` to three seconds.
 /// Asking for exactly what it allows keeps its hooks screen clean, so a real
 /// problem there is not buried among warnings we caused ourselves.
-const CODEX_SESSION_END_TIMEOUT_SECS: u64 = 3;
+const CODEX_LIFECYCLE_TIMEOUT_SECS: u64 = 3;
 
 /// The one tool Codex's `PreToolUse` is registered for. Codex reads a matcher
 /// as a regular expression against the tool name, so this keeps the hook to
@@ -70,12 +70,11 @@ fn events(agent: Agent) -> &'static [&'static str] {
             "StopFailure",
             "SessionEnd",
         ],
-        // Codex emits no `Notification` at all, and has neither an error nor an
-        // interrupt event. It asks the user two ways: `PermissionRequest` for
-        // an approval, and the `request_user_input` tool for a question — an
-        // ordinary function tool whose handler shows the dialog and blocks on
-        // the answer, so its `PreToolUse` is the moment the question appears
-        // and its `PostToolUse` the moment it was answered.
+        // Codex has no error or notification path here. Since 0.150 it reports
+        // active main-turn cancellation through Interrupt. PermissionRequest
+        // and request_user_input's PreToolUse indicate potential user input;
+        // later received activity clears Waiting. A recorded answer alone
+        // does not prove that its PostToolUse hook reached this app.
         Agent::Codex => &[
             "SessionStart",
             "UserPromptSubmit",
@@ -85,6 +84,7 @@ fn events(agent: Agent) -> &'static [&'static str] {
             "SubagentStart",
             "SubagentStop",
             "Stop",
+            "Interrupt",
             "SessionEnd",
         ],
     }
@@ -421,8 +421,8 @@ fn entry_for(agent: Agent, event: &str, command: &str) -> Value {
     let mut hook = Map::new();
     hook.insert("type".to_owned(), Value::String("command".to_owned()));
     hook.insert("command".to_owned(), Value::String(command.to_owned()));
-    let timeout = if agent == Agent::Codex && event == "SessionEnd" {
-        CODEX_SESSION_END_TIMEOUT_SECS
+    let timeout = if agent == Agent::Codex && matches!(event, "SessionEnd" | "Interrupt") {
+        CODEX_LIFECYCLE_TIMEOUT_SECS
     } else {
         TIMEOUT_SECS
     };

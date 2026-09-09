@@ -18,7 +18,7 @@ https://github.com/user-attachments/assets/2d799d6d-d815-481b-9ae2-f113a0af6aeb
 | **Keychron Ultra** — V3 Ultra 8K (the other Ultras speak the same protocol) | the F-row as lanes; the same keys, from the Launcher keymap | the cable or the 2.4 GHz receiver, not Bluetooth; Keychron's per-key-brightness fix for true darks | verified |
 | **Elgato Stream Deck** — 2019 V2, 15 keys (every model with a screen, through the driver) | one row per lane: name, context, 5h, 7d, state; every key a summon; ▲▼Enter while Waiting | USB; the Stream Deck app closed | verified |
 | **The monitor** — mini mode | the same rows on screen, five keys each; click a key to summon | nothing | verified |
-| **Keychron V0 Ultra** — the numpad | the M column one key per agent, up to five — glow, breathe, double pulse, full, red — and the four shape keys as a top line showing one agent in the F-row's patterns; the knob picks which (press to lock), an M key selects and summons, the top line summons and answers ⏶⏷Enter while Waiting | the cable or the 2.4 GHz receiver; the per-key-brightness fix; the knob and keys remapped to Ctrl+Shift+F13–F24 by importing [the keymap file](firmware/keychron-ultra/keymaps/) | verified, two boards |
+| **Keychron V0 Ultra** — the numpad | the M column one key per agent, up to five — glow, breathe, double pulse, full, red — and the four shape keys as a top line showing one agent in the F-row's patterns; the knob picks which (press to lock), an M key selects and summons, the top line summons and answers ⏶⏷Enter while Waiting | the cable or the 2.4 GHz receiver; the per-key-brightness fix; import [the keymap file](firmware/keychron-ultra/keymaps/) for single-key top-row controls and Ctrl+Shift+F13–F20 on the knob and M keys | lighting verified on two boards; rapid V0 Up/Down verified with Codex |
 
 Without any of them the window shows everything; the keys and the light are
 the part you would be missing.
@@ -92,6 +92,13 @@ beside the state ("rate limit", "overloaded", "auth"). Sessions beyond the lane 
 that frees up. The ⏶⏷ arrows reorder lanes; nothing else ever moves a lane out
 from under you.
 
+**New Codex conversations.** With one Codex CLI agent per Windows Terminal
+tab, starting a new conversation in that tab keeps its lane, name and colour.
+Different tabs keep separate lanes even in the same project. This requires
+the terminal identity and readable Codex session metadata; otherwise each
+conversation is tracked separately. Delayed events from the previous
+conversation cannot take the lane back, but an explicit prompt in it can.
+
 **Saved agents.** Press *Save* on a lane and the app remembers that agent and
 project folder, with that lane as its preferred one. Next time the agent
 starts it lands there if the lane is free, otherwise on another lane. The
@@ -124,13 +131,12 @@ The tab it looks for is the lane's name, then the project folder — so naming a
 lane is a feature. If no tab matches, it says so and lists the tabs it found,
 rather than leaving you looking at the wrong agent.
 
-Two limitations, stated in the window too: no agent reports when you *answer*
-a permission prompt, so a lane can read Waiting after you approved until that
-tool finishes — seconds for Claude; for Codex, which reports a command only
-once it exits, a server or long install you allowed holds Waiting until a
-later command finishes (a Codex *question* is the exception, and clears the
-moment you answer it); and Codex has no error event, so Error cannot be shown
-for it.
+**Waiting can remain after you respond**, until the agent reports more
+activity, and Error cannot be shown for Codex. The window states these
+limitations too. See [Known issues](KNOWN_ISSUES.md) for the central list of
+bugs, limitations, workarounds, and investigation status.
+It also tracks [Codex versus Claude Code hook differences](KNOWN_ISSUES.md#codex-and-claude-code-hook-differences)
+and includes a note to review both agents' changelogs regularly.
 
 ## Install
 
@@ -186,17 +192,23 @@ so every lit key shows at full and dark keys show white until Keychron ships
 firmware with the fix applied and explains how the Launcher flashes it — read
 it before deciding. `agent-frow doctor` lists what it finds on the bus.
 
-**Keychron V0 Ultra (the numpad; verified on two boards).** The same
+**Keychron V0 Ultra (the numpad; lighting verified on two boards).** The same
 protocol, the same cable-or-receiver rule and the same brightness caveat as
 the Ultra above — `./build.sh keychron_v0_ultra_ansi` in the same folder
 builds the numpad's firmware with the fix, and the Launcher flashes it the
-same way. The knob and the nine keys the app uses send **Ctrl+Shift+F13–F24**,
-and the Launcher's key picker cannot enter a chord — it only records a key
+same way. The knob and M1–M5 send **Ctrl+Shift+F13–F20**; the four top-row
+controls send **Intl1, Intl5, Intl6 and Keypad Comma**, without modifiers.
+The Launcher's key picker cannot enter a chord — it only records a key
 you physically press — so the keymap goes in as a file: in the Launcher's
 Keymap tab, **Export** your current keymap first (that is your undo), then
 **Import** [keychron_v0_ultra_ansi.json](firmware/keychron-ultra/keymaps/keychron_v0_ultra_ansi.json)
-over the cable. It is the stock layout with the knob and those nine keys
-changed; the numpad keys stay numpad keys. M5 stops being Fn — everything
+over the cable. Update the app and import the current file together: the old
+Ctrl+Shift+F21–F24 top-row bindings have been removed. This keymap change
+requires no firmware flash. The spare top-row codes target the US Windows
+layout; verification details are tracked in
+[KI-016](KNOWN_ISSUES.md#ki-016-v0-answer-keys-sometimes-scroll-the-terminal).
+It is the stock layout with the knob and nine keys changed; the numpad keys
+stay numpad keys. M5 stops being Fn — everything
 Fn did is in the Launcher's Lighting tab. In use: M1–M5 are lanes 1–5, one
 key each, and the top line shows one of them in the F-row's patterns. The
 knob picks which — unlocked, the top line follows whatever changed last;
@@ -228,9 +240,10 @@ the deck goes back to its logo. `agent-frow doctor` lists it too.
 The numbers come from where the agents keep them: for Claude, its status
 line — `install` registers Agent F-Row as the status-line command, or wraps
 the one you have so it keeps rendering exactly as before; for Codex, the
-session's own log, read by the app. The limits are your account's, so every
-lane of one account shows the same two. `agent-frow doctor` says whether the
-status line is registered.
+session's own log, read by the app. The limits are your account's, but each
+lane shows its latest reading, so a quiet session can lag behind an active
+one; see [gauge limitations](KNOWN_ISSUES.md#known-limitations-and-workarounds).
+`agent-frow doctor` says whether the status line is registered.
 
 ## Settings
 
@@ -255,7 +268,8 @@ Rust on Windows. `cargo build --release`, then
 `target\release\agent-frow.exe install` — the app runs from `%LOCALAPPDATA%`,
 and only `install` puts a build there. For Corsair lighting, unzip Corsair's
 iCUE SDK (not committed; its own license) at `<repo>/iCUESDK`; Keychron needs
-nothing extra. `dist.ps1` builds the release zip.
+nothing extra. `dist.ps1` builds `dist/agent-frow-<version>-win64.zip`,
+including the V0 Launcher keymap, and writes a `.zip.sha256` checksum beside it.
 
 How it all works — the hook, the state machine, lane placement, the lighting,
 focus — is in [docs/how-it-works.md](docs/how-it-works.md); the reasons behind

@@ -11,6 +11,10 @@ change to `app/src/rgb/keychron/per_key_rgb.c`, open upstream as
 applied. Once Keychron ships the fix in a Launcher update, none of this is
 needed.
 
+The brightness bug and other hardware limitations are tracked in
+[Known issues](../../KNOWN_ISSUES.md#known-limitations-and-workarounds).
+This guide contains the build, flashing, and keymap instructions.
+
 **This is your keyboard and your risk.** The steps below were done on a
 V3 Ultra 8K ANSI and on two V0 Ultra ANSI numpads and it works; the other
 Ultras run the same firmware from the same repository, but nobody has flashed
@@ -73,14 +77,33 @@ script, is in [naaraxi/zmk](https://github.com/naaraxi/zmk) (`openrgb/`).
 
 ## Keymap for the V0 Ultra numpad
 
-`keymaps/keychron_v0_ultra_ansi.json` is a Launcher keymap export — the stock
-layout with the knob and the nine keys the app uses set to Ctrl+Shift+F13–F24
-(knob left/right F13/F14, knob press F15, M1–M5 F16–F20, the top row's four
-keys F21–F24 left to right: summon, then ⏶ ⏷ Enter while Waiting). The
-Launcher's key picker cannot enter chords, so this is the only way in:
+`keymaps/keychron_v0_ultra_ansi.json` is a Launcher keymap export. The knob
+left/right/press uses Ctrl+Shift+F13/F14/F15, and M1–M5 use
+Ctrl+Shift+F16–F20. The top row uses four single keys, left to right:
+
+| Position | Action | Launcher key | JSON `val` | Windows virtual key (US layout) |
+|---|---|---|---|---|
+| 1 | Summon | `KC_INT1` | 135 | `0xC1` |
+| 2 | Up while Waiting | `KC_INT5` | 139 | `0xEB` |
+| 3 | Down while Waiting | `KC_INT6` | 140 | `0xEA` |
+| 4 | Enter while Waiting | `KC_KP_COMMA` | 133 | `0xC2` |
+
+These top-row codes do not press Ctrl or Shift. They were checked for distinct
+Windows mappings and successful hotkey registration on US layout `00000409`.
+On 2026-09-09 the user imported the JSON and verified rapid V0 Up/Down in a
+Codex question: only the selection moved, with no terminal scrolling. Other
+keyboard layouts need their own validation. The knob and M keys still produce
+modifiers if used at the same time as the top row. See
+[KI-016](../../KNOWN_ISSUES.md#ki-016-v0-answer-keys-sometimes-scroll-the-terminal).
+
+Update Agent F-Row and import this keymap together: the app no longer captures
+the old Ctrl+Shift+F21–F24 top-row chords. This is a keymap import, with no
+firmware flash required. The Launcher's key picker cannot enter the remaining
+chords, so use the file:
 Keymap tab → **Export** your current keymap (the undo) → **Import** this file,
 over the cable. The Launcher accepts it only on a V0 Ultra ANSI (it checks the
-board id and an MD5 of the keymap array). M5 stops being Fn; the Launcher's
-Lighting tab does everything Fn did. Reading the file: `val` is a QMK 16-bit
+board id and an MD5 of the compact JSON serialization of the keymap array).
+The stock number keys and second layer are preserved. M5 stops being Fn;
+the Launcher's Lighting tab does everything Fn did. Reading the file: `val` is a QMK 16-bit
 keycode (`0x0300 | 104` = Ctrl+Shift+F13), the `knob` list is one
 `{left, right}` of QMK names per layer.

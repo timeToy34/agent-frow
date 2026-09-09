@@ -4,7 +4,11 @@ The companion to [how-it-works.md](how-it-works.md): the constraints in this
 codebase that were measured against real sessions rather than read from
 documentation — in two cases the documentation is wrong — plus the history of
 how each was learned. Read this before touching the state machine, focus, the
-hook, or the lighting.
+hook, or the lighting. Current bug status and workarounds live in
+[Known issues](../KNOWN_ISSUES.md); this file keeps the evidence and design
+constraints behind them. Track agent differences and regularly check both
+upstream changelogs using the
+[comparison and manual review note](../KNOWN_ISSUES.md#codex-and-claude-code-hook-differences).
 
 - **`PermissionRequest` and `Notification` carry no `tool_use_id`.** Only
   `session_id` and `prompt_id`, which are turn-level while a turn holds dozens
@@ -13,24 +17,30 @@ hook, or the lighting.
 - **Claude prompts the user itself about six seconds after `PermissionRequest`.**
   Blocking that hook to collect an answer does not work; the tool proceeds
   regardless.
-- **Every Codex hook blocks, and `async` is not usable.** Codex documents an
+- **Synchronous Codex hooks preserve compatibility with 0.147.** Codex documents an
   `"async": true` flag and 0.148 accepts it, but 0.147 *skips any hook carrying
   it* — "async hooks are not supported yet" — so five of six events would
   silently never fire. We register plain synchronous hooks. That is safe: ours
   connects to loopback, writes a few hundred bytes and exits. What made the
   previous version unusable with Codex was the broker holding a hook open for
   ninety seconds, not the hook being synchronous.
-- **Codex clamps `SessionEnd` to 3 seconds**, so we ask for exactly 3 rather
+- **Codex clamps `SessionEnd` and `Interrupt` to 3 seconds**, so we ask for exactly 3 rather
   than collecting a warning on its hooks screen.
-- **Codex has no error and no interrupt event, and emits no `Notification` at
-  all.** It asks the user two ways: `PermissionRequest` for an approval, and
+- **Codex interrupts are observable since 0.150.0; error reporting remains unavailable.**
+  The adapter registers and parses `Interrupt`, returning the main turn to
+  Connected with an Interrupted note. Turn IDs prevent cancelled work from
+  changing a retry; surviving subagents retain their busy display. Track
+  actual delivery verification and the remaining error gap under KI-004 and the
+  [comparison](../KNOWN_ISSUES.md#codex-and-claude-code-hook-differences).
+  The adapter detects user input two ways: `PermissionRequest` for an approval, and
   the `request_user_input` tool for a question. That tool is an ordinary
   function call whose handler draws the dialog and blocks until it is
   answered (read in `codex-rs/core/src/tools/handlers/request_user_input.rs`;
   measured: 39 s between the call and its output in a real session), so its
-  `PreToolUse` fires as the question appears and its `PostToolUse` as it is
-  answered — Codex is the one agent that reports an answer. Say so rather
-  than guessing.
+  `PreToolUse` is used to detect the question and its `PostToolUse` to clear
+  Waiting. The handler returning does not by itself prove that the app
+  received that hook immediately; see
+  [KI-001](../KNOWN_ISSUES.md#ki-001-codex-stays-waiting-after-a-response).
 - **Codex has no dialog for approving a plan.** A plan-mode turn *ends* with
   the plan wrapped in `<proposed_plan>` in the final message, and the TUI and
   desktop app draw "implement this plan?" from that tag; accepting sends a
@@ -40,6 +50,15 @@ hook, or the lighting.
   one boolean, `proposed_plan`, when the tag is present (the message itself
   never leaves), and the table reads that `Stop` as Waiting. Claude's plans
   are the `ExitPlanMode` tool and arrive as a `PermissionRequest`.
+- **Codex can omit the plan from its completion message.** Measured
+  2026-09-05 at 14:20 PDT with 0.153.2: the rollout contains an
+  `item_completed` event with `item.type = "Plan"` and the turn's id, followed
+  by the tagged final response, but `task_complete.last_agent_message` is
+  null. The hook's message-based flag alone therefore misses the prompt.
+  On `Stop`, the app also checks the rollout tail it already reads for gauges
+  for a completed, nonempty Plan belonging to the hook's `turn_id` (or
+  `prompt_id`). Only the boolean is retained. Never borrow a plan from a
+  different turn or infer Waiting merely from being in Plan mode.
 - **Codex fires `PostToolUse` only when the command's process has exited.**
   Measured 2026-08-25 (0.149.1, code mode) with `AGENT_FROW_DEBUG` against the
   session rollout: every command is a JS cell calling `exec_command` /
@@ -50,7 +69,9 @@ hook, or the lighting.
   So after the user approves such a command the lane holds Waiting until
   *some* later command finishes: 42 s for `npm run dev`, two minutes for
   `npm install`. Codex has no hook for the approval decision itself, so this
-  is stated in the window rather than papered over with a timer.
+  is stated in the window rather than papered over with a timer. The current
+  limitation and workaround are tracked as KI-003 in
+  [Known issues](../KNOWN_ISSUES.md#known-limitations-and-workarounds).
 - **`PreToolUse` is 46% of all hook traffic and tells a lane nothing**, because
   agents auto-approve nearly every tool call. It is never registered
   unfiltered. Codex gets it with the matcher `^request_user_input$` (a Codex
@@ -62,7 +83,8 @@ hook, or the lighting.
   every event carrying it is its heartbeat, `SubagentStop` retires it, and 30
   minutes of silence retires one that died unannounced. A resting lane with a
   non-empty roster shows the Running pattern and "N subagents busy" — but
-  Waiting, Error and Interrupted always win, because those need the user.
+  Waiting and Error always win, because those need the user. A Codex interrupt
+  returns the main state to Connected, so surviving subagents still show busy.
   Subagent events never change the lane's state itself: they carry the
   *parent's* `session_id`, and acting on them is how the old app cleared a
   Waiting nobody had answered.
@@ -84,6 +106,24 @@ hook, or the lighting.
   terminal visibly frontmost without foreground permission, while an attached
   `SetForegroundWindow` still requests keyboard activation. Success is checked
   with the root window at the terminal's centre, not the foreground flag.
+- **A V0 answer can inherit the hotkey's Ctrl+Shift.** Reported 2026-09-09:
+  V3 Up/Down moved Codex's prompt selection, but the same actions on the V0
+  sometimes scrolled Windows Terminal. The original V0 map used Ctrl+Shift+F13–F24,
+  while the V3 uses bare function keys. `SendInput` preserves held modifiers,
+  and Ctrl+Shift+Up/Down are Terminal's scroll shortcuts. The shared answer
+  sender now releases held left/right Ctrl/Shift, sends the answer, and
+  restores the same modifiers in one batch. That improved behavior, but the
+  user still reproduced scrolling by pressing the V0 keys very quickly.
+  The top row now uses bare Intl1/Intl5/Intl6/Keypad Comma, with the old
+  Ctrl+Shift+F21–F24 registrations removed; the knob and M keys retain their
+  chords. Windows accepted the four spare codes on US layout 00000409; after
+  importing the JSON, the user verified rapid Up/Down changed only the
+  selection in a Codex question, with no terminal scrolling. Keep answers on
+  press, as chosen by the user. If a batch is partial,
+  recover key state without repeating an answer that might already have
+  confirmed a choice. Keep `RegisterHotKey` and `MOD_NOREPEAT`; real held-key
+  and modifier-release behavior must be checked on hardware. Track results
+  under [KI-016](../KNOWN_ISSUES.md#ki-016-v0-answer-keys-sometimes-scroll-the-terminal).
 - **The hook must never print to stdout.** It is registered on `PermissionRequest`,
   which is a decision hook on both agents: anything it prints that parses could
   approve a real tool call. `hook/tests/silence.rs` asserts zero bytes.
@@ -132,6 +172,31 @@ hook, or the lighting.
   against the docs and the hook structs. Claude says it to its status-line
   command, Codex writes it into its session log; the app reads both and the
   hook forwards, at most, the log's path.
+- **Codex rollouts can carry a different limit bucket.** Investigated
+  2026-09-06 after a reported 0% seven-day gauge despite 65% usage: one
+  active rollout's latest `token_count` records contained
+  `limit_id = "codex_bengalfox"`, named `GPT-5.3-Codex-Spark`, with both
+  windows at zero. Another active rollout reported the general `codex`
+  bucket at 71% by the time of inspection. Selecting only by window length
+  let Spark's zero replace the general allowance. Read the bucket id first:
+  accept `codex` and legacy absent/null ids, ignore other buckets' limits,
+  and still use their context counts. Never substitute a model-specific
+  zero when the general reading is absent. OpenAI's
+  [App Server documentation](https://learn.chatgpt.com/docs/app-server#6-rate-limits-chatgpt)
+  likewise distinguishes limits by their metered bucket id.
+- **A new Codex conversation can leave the old conversation's lane behind.**
+  Investigated 2026-09-06 after a duplicate for `ai-brand-dna`: the previous
+  conversation completed at 20:40:33 PDT; a new thread started at 20:46:33
+  in the same Codex process. Its first task was interrupted at 20:47:17
+  and retried at 20:47:26 without changing that new thread's id. The
+  conversation change preceded the interrupt. The app's hook trace was
+  disabled, so the exact ingress sequence was unavailable; Codex's rollout
+  and process logs establish the two ids and shared process. The tracker
+  formerly keyed every lane by source and conversation id. With one CLI
+  agent per terminal tab, it now follows the existing `WT_SESSION` instead,
+  after verifying CLI metadata. Do not merge by folder: separate agents
+  legitimately share one. Keep old ids for routing delayed events, and
+  journal lane ownership so the next report has a direct app-side trace.
 - **Two agents once came up reversed** — Agent A on B's lane and B on A's,
   each summon raising the other's window. Cause: lanes are claimed at first
   sight, hooks post concurrently, and a session adopted from a *subagent's*

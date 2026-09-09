@@ -30,6 +30,34 @@ fn event(name: &str, extra: Value) -> Event {
 }
 
 #[test]
+fn a_codex_interrupt_reconnects_the_main_session() {
+    let interrupted = event("Interrupt", json!({"src": "codex-wsl", "turn_id": "t1"}));
+    for current in State::ALL {
+        assert_eq!(
+            state::step(current, &interrupted),
+            Step::Set(State::Connected)
+        );
+    }
+    assert_eq!(state::adopt(&interrupted), Some(State::Connected));
+    assert_eq!(interrupted.note(), "Interrupted");
+}
+
+#[test]
+fn an_invalid_interrupt_neither_changes_nor_adopts_a_session() {
+    for extra in [
+        json!({"src": "codex-win"}),
+        json!({"src": "codex-win", "turn_id": " "}),
+        json!({"src": "codex-win", "turn_id": "t1", "agent_id": "child"}),
+        json!({"src": "codex-win", "turn_id": "t1", "agent_type": "worker"}),
+        json!({"src": "claude-win", "turn_id": "t1"}),
+    ] {
+        let interrupted = event("Interrupt", extra);
+        assert_eq!(state::step(State::Waiting, &interrupted), Step::Stay);
+        assert_eq!(state::adopt(&interrupted), None);
+    }
+}
+
+#[test]
 fn a_permission_request_asks_for_the_user_and_activity_clears_it() {
     // The whole design in one test. Nothing is correlated: the next tool that
     // finishes is what says somebody answered.
