@@ -23,7 +23,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::event::Ancestor;
+use crate::focus::FocusTarget;
 use crate::focus::Key;
 use crate::settings::{KEYBOARD_LANES, KEYS, KEYS_PER_LANE};
 use crate::tracker::Tracker;
@@ -273,7 +273,7 @@ fn handle_numpad(tracker: &Arc<Mutex<Tracker>>, index: usize) {
 fn act_on_lane(
     tracker: &Arc<Mutex<Tracker>>,
     lane: usize,
-    act: impl FnOnce(&[Ancestor], &[String]) -> String,
+    act: impl FnOnce(&FocusTarget) -> String,
 ) {
     let target = {
         let Ok(tracker) = tracker.lock() else {
@@ -282,7 +282,7 @@ fn act_on_lane(
         tracker.summon_target(lane)
     };
     let report = match target {
-        Ok((ancestors, names)) => act(&ancestors, &names),
+        Ok(target) => act(&target),
         Err(reason) => reason,
     };
     if let Ok(mut tracker) = tracker.lock() {
@@ -294,9 +294,7 @@ fn act_on_lane(
 /// surface with a button: the F-row's lane keys and a Stream Deck's row keys
 /// arrive here alike.
 pub fn summon_lane(tracker: &Arc<Mutex<Tracker>>, lane: usize) {
-    act_on_lane(tracker, lane, |ancestors, names| {
-        crate::focus::raise(ancestors, names).detail
-    });
+    act_on_lane(tracker, lane, |target| crate::focus::raise(target).detail);
 }
 
 /// Brings a lane's agent forward and answers it with one key — the product's
@@ -306,10 +304,10 @@ pub fn summon_lane(tracker: &Arc<Mutex<Tracker>>, lane: usize) {
 /// keyboard; otherwise the press has focused the lane, and the status bar
 /// says what to do next.
 pub fn answer_lane(tracker: &Arc<Mutex<Tracker>>, lane: usize, key: crate::focus::Key) {
-    act_on_lane(tracker, lane, |ancestors, names| {
-        let raise = crate::focus::raise(ancestors, names);
+    act_on_lane(tracker, lane, |target| {
+        let raise = crate::focus::raise(target);
         match raise.window {
-            Some(window) => match crate::focus::type_key(window, key) {
+            Some(_) => match crate::focus::answer(&raise, key) {
                 Ok(typed) => format!("{} — {typed}", raise.detail),
                 Err(why) => format!("{} — {why}", raise.detail),
             },
@@ -567,8 +565,8 @@ mod windows_impl {
                 .map(|(modifiers, vk)| (modifiers.0, *vk))
                 .collect();
             assert_eq!(unique.len(), bindings.len());
-            for index in 0..SUMMON_KEYS {
-                assert_eq!(bindings[index], (MOD_NOREPEAT, VK_F13 + index as u32));
+            for (index, binding) in bindings.iter().take(SUMMON_KEYS).enumerate() {
+                assert_eq!(*binding, (MOD_NOREPEAT, VK_F13 + index as u32));
             }
             let chord_modifiers = MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT;
             for index in 0..8 {

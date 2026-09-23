@@ -29,10 +29,9 @@ const ALLOWED: [&str; 15] = [
     "end_reason",
     "permission_mode",
     // The path of the agent's own transcript — a name of a file on this
-    // machine, handed to a process on this machine. The app opens only a
-    // Codex rollout, read-only, and reads only its tail for the last
-    // `token_count` line and, on Stop, a completed Plan for that turn.
-    // Only numbers and a proposed-plan flag are retained, never content.
+    // machine, handed to a process on this machine. The app reads launch
+    // metadata and Codex gauges/turn metadata. Transcript content is not
+    // retained or forwarded.
     "transcript_path",
     // Why a turn failed, as Claude classifies it: `rate_limit`,
     // `overloaded`, `auth`. The message beside it is free text and stays.
@@ -113,13 +112,9 @@ pub fn project(
     Value::Object(out)
 }
 
-/// The status line, projected: three percentages and the session they
-/// belong to, and nothing else. Claude hands its status-line command a JSON
-/// with the model, the cost, the working directory and more; a lane shows
-/// how full the context is and how much of the two limits is used, so
-/// those three are what leave. `None` when there is no session to attach
-/// them to or nothing yet to attach — before the first reply, or on a plan
-/// without limits.
+/// Status metadata only: percentages, current directory, launch directory,
+/// and session/child identity. The launch directory remains useful before
+/// the first reply, even when no usage readings are available yet.
 pub fn status(payload: &Value, source: &str, now_ms: u128) -> Option<Value> {
     let session_id = payload
         .get("session_id")
@@ -137,10 +132,22 @@ pub fn status(payload: &Value, source: &str, now_ms: u128) -> Option<Value> {
     if let Some(value) = reading("/rate_limits/seven_day/used_percentage") {
         gauges.insert("d7".to_owned(), value);
     }
-    if gauges.is_empty() {
+    let mut out = Map::new();
+    for (key, pointer) in [
+        ("project_dir", "/workspace/project_dir"),
+        ("cwd", "/cwd"),
+        ("agent_id", "/agent_id"),
+        ("agent_type", "/agent_type"),
+    ] {
+        if let Some(text) = payload.pointer(pointer).and_then(Value::as_str)
+            && !text.trim().is_empty()
+        {
+            out.insert(key.to_owned(), Value::from(text));
+        }
+    }
+    if gauges.is_empty() && !out.contains_key("project_dir") {
         return None;
     }
-    let mut out = Map::new();
     out.insert("t".to_owned(), Value::from(now_ms as u64));
     out.insert("src".to_owned(), Value::String(source.to_owned()));
     out.insert(
@@ -151,7 +158,9 @@ pub fn status(payload: &Value, source: &str, now_ms: u128) -> Option<Value> {
         "session_id".to_owned(),
         Value::String(session_id.to_owned()),
     );
-    out.insert("gauges".to_owned(), Value::Object(gauges));
+    if !gauges.is_empty() {
+        out.insert("gauges".to_owned(), Value::Object(gauges));
+    }
     Some(Value::Object(out))
 }
 
@@ -201,7 +210,7 @@ mod tests {
             assert!(!out.contains_key(leaky), "{leaky} must not be forwarded");
         }
         // The transcript's *path* does travel — it names a file on this
-        // machine, and the app reads only a Codex rollout's tail from it.
+        // machine, where the app can read identity and usage metadata.
         // Its content never does: nothing here opens it.
         assert_eq!(
             out.get("transcript_path"),
@@ -210,11 +219,12 @@ mod tests {
     }
 
     #[test]
-    fn a_status_line_keeps_three_numbers_and_nothing_else() {
+    fn a_status_line_keeps_numbers_and_directories_without_other_content() {
         let out = status(
             &json!({
                 "session_id": "s1",
                 "cwd": "/home/me/project",
+                "workspace": { "project_dir": "/home/me", "added_dirs": ["PRIVATE"] },
                 "model": { "id": "claude-opus-5", "display_name": "Opus" },
                 "cost": { "total_cost_usd": 1.42 },
                 "context_window": { "used_percentage": 41.6, "context_window_size": 200000 },
@@ -231,11 +241,37 @@ mod tests {
         assert_eq!(out["src"], json!("claude-wsl"));
         assert_eq!(out["session_id"], json!("s1"));
         assert_eq!(out["gauges"], json!({ "ctx": 42, "h5": 10, "d7": 3 }));
-        let keys: Vec<&String> = out.as_object().unwrap().keys().collect();
-        assert_eq!(
-            keys,
-            ["t", "src", "hook_event_name", "session_id", "gauges"]
-        );
+        assert_eq!(out["cwd"], "/home/me/project");
+        assert_eq!(out["project_dir"], "/home/me");
+        assert_eq!(out.as_object().unwrap().len(), 7);
+        assert!(!out.to_string().contains("PRIVATE"));
+    }
+
+    #[test]
+    fn launch_identity_is_forwarded_before_usage_exists_and_children_stay_identified() {
+        let out = status(
+            &json!({
+                "session_id":"parent", "agent_id":"child", "agent_type":"Explore",
+                "workspace":{"project_dir":"/project/frontend"}
+            }),
+            "claude-wsl",
+            1,
+        )
+        .unwrap();
+        assert_eq!(out["project_dir"], "/project/frontend");
+        assert_eq!(out["agent_id"], "child");
+        assert_eq!(out["agent_type"], "Explore");
+        assert!(out.get("gauges").is_none());
+        for invalid in [json!(null), json!(" "), json!({"path":"/project"})] {
+            assert!(
+                status(
+                    &json!({"session_id":"s", "workspace":{"project_dir":invalid}}),
+                    "claude-wsl",
+                    1
+                )
+                .is_none()
+            );
+        }
     }
 
     #[test]

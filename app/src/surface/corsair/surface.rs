@@ -191,6 +191,7 @@ fn render(tracker: Arc<Mutex<Tracker>>, running: Arc<AtomicBool>) {
 
         let colors: Vec<CorsairLedColor> = palette::frame(
             frame.states,
+            frame.agent_counts,
             frame.settings,
             frame.settings.tuning(SURFACE),
             frame.elapsed_ms,

@@ -25,6 +25,8 @@ pub struct Poisoned;
 /// settings, at which moment of the animation.
 pub struct Frame<'a> {
     pub states: &'a [Option<State>],
+    /// Main agent plus active children; zero for empty or reserved lanes.
+    pub agent_counts: &'a [usize],
     pub settings: &'a Settings,
     /// Monotonic since the scene began — the animation's clock.
     pub elapsed_ms: u64,
@@ -37,6 +39,7 @@ pub struct Scene {
     start: Instant,
     /// What the keys were last told, so a still board is written once.
     last_states: Vec<Option<State>>,
+    last_agent_counts: Vec<usize>,
     /// Kept so it is re-made only when the settings actually change — it
     /// carries every lane-name String.
     settings: Option<Settings>,
@@ -54,6 +57,7 @@ impl Scene {
         Self {
             start: Instant::now(),
             last_states: Vec::new(),
+            last_agent_counts: Vec::new(),
             settings: None,
             dirty: true,
         }
@@ -75,6 +79,7 @@ impl Scene {
         let settings = self.settings.as_ref()?;
         Some(Frame {
             states: &self.last_states,
+            agent_counts: &self.last_agent_counts,
             settings,
             elapsed_ms: self.start.elapsed().as_millis() as u64,
         })
@@ -91,7 +96,7 @@ impl Scene {
         tracker: &Mutex<Tracker>,
         now: u64,
     ) -> Result<Option<Frame<'_>>, Poisoned> {
-        let states = {
+        let (states, agent_counts) = {
             let mut tracker = tracker.lock().map_err(|_| Poisoned)?;
             tracker.sweep(now);
             // A preview overrides every lane while it lasts, and this is what
@@ -106,11 +111,15 @@ impl Scene {
             let lanes = tracker.settings.lane_count;
             let states: Vec<Option<State>> = match tracker.preview {
                 Some(preview) => vec![Some(preview.state); lanes],
+                None => (0..lanes).map(|lane| tracker.lane_state(lane)).collect(),
+            };
+            let agent_counts: Vec<usize> = match tracker.preview {
+                Some(_) => vec![1; lanes],
                 None => (0..lanes)
                     .map(|lane| {
                         tracker
                             .on_lane(lane)
-                            .map(|session| session.effective_state())
+                            .map_or(0, crate::tracker::Session::agent_count)
                     })
                     .collect(),
             };
@@ -122,10 +131,14 @@ impl Scene {
                 self.settings = Some(tracker.settings.clone());
                 self.dirty = true;
             }
-            states
+            (states, agent_counts)
         };
         if states != self.last_states {
             self.last_states = states;
+            self.dirty = true;
+        }
+        if agent_counts != self.last_agent_counts {
+            self.last_agent_counts = agent_counts;
             self.dirty = true;
         }
         if !self.dirty && !palette::animated(&self.last_states) {
@@ -137,6 +150,7 @@ impl Scene {
         self.dirty = false;
         Ok(Some(Frame {
             states: &self.last_states,
+            agent_counts: &self.last_agent_counts,
             settings,
             elapsed_ms: self.start.elapsed().as_millis() as u64,
         }))
@@ -155,6 +169,7 @@ mod tests {
             session_id: format!("s{lane}"),
             agent: None,
             cwd: None,
+            current_cwd: None,
             state,
             waiting_reason: (state == State::Waiting).then_some(crate::state::WaitingReason::Other),
             since: 0,
@@ -219,6 +234,34 @@ mod tests {
         for now in 0..5 {
             assert!(scene.tick(&tracker, now).unwrap().is_some(), "tick {now}");
         }
+    }
+
+    #[test]
+    fn count_changes_repaint_without_restarting_the_animation_clock() {
+        let tracker = Mutex::new(Tracker::default());
+        tracker
+            .lock()
+            .unwrap()
+            .sessions
+            .push(session(State::Idle, 0));
+        let mut scene = Scene::new();
+        scene.start -= std::time::Duration::from_millis(700);
+        let start = scene.start;
+        assert_eq!(scene.tick(&tracker, 0).unwrap().unwrap().agent_counts[0], 1);
+        assert!(scene.tick(&tracker, 1).unwrap().is_none());
+        tracker.lock().unwrap().sessions[0]
+            .subagents
+            .insert("child".into(), 2);
+        let frame = scene
+            .tick(&tracker, 2)
+            .unwrap()
+            .expect("count change repaints");
+        assert_eq!(frame.states[0], Some(State::Idle));
+        assert_eq!(frame.agent_counts[0], 2);
+        assert!(frame.elapsed_ms >= 700);
+        assert_eq!(scene.start, start);
+        assert_eq!(scene.current().unwrap().agent_counts[0], 2);
+        assert!(scene.tick(&tracker, 3).unwrap().is_none());
     }
 
     #[test]

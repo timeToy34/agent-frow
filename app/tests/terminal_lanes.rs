@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 fn send(tracker: &mut Tracker, session: &str, kind: &str, at: u64, extra: Value) {
     let mut value = json!({
         "src": "codex-wsl", "session_id": session, "hook_event_name": kind,
-        "wt_session": "tab-one", "codex_cli": true, "cwd": "/project"
+        "wt_session": "tab-one", "codex_cli": true, "cwd": "/project", "project_dir":"/project"
     });
     value
         .as_object_mut()
@@ -52,7 +52,7 @@ fn a_new_conversation_keeps_the_lane_but_resets_conversation_data() {
         "new",
         "UserPromptSubmit",
         40,
-        json!({"cwd": "/new-project"}),
+        json!({"cwd": "/new-project", "project_dir":"/new-project"}),
     );
     assert_eq!(tracker.sessions.len(), 1);
     let session = tracker.on_lane(0).unwrap();

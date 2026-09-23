@@ -528,7 +528,7 @@ impl App {
                 });
             }
             let rows = (0..tracker.settings.lane_count)
-                .filter(|lane| tracker.on_lane(*lane).is_some())
+                .filter(|lane| tracker.lane_state(*lane).is_some())
                 .count()
                 + tracker.overflow().len();
             (rows, tracker.settings.mini_window, tracker.summon.clone())
@@ -592,7 +592,7 @@ impl App {
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let report = match target {
-                Some(Ok((ancestors, names))) => crate::focus::raise(&ancestors, &names).detail,
+                Some(Ok(target)) => crate::focus::raise(&target).detail,
                 Some(Err(reason)) => reason,
                 None => return,
             };
@@ -671,12 +671,14 @@ enum FocusRequest {
 /// What one lane shows. Copied out of the tracker first, so the settings for
 /// the same lane can be edited in place without borrowing it twice.
 struct LaneView {
+    reservation: Option<usize>,
     state: State,
     since: u64,
     note: String,
     session_id: String,
     project: Option<String>,
     cwd: Option<PathBuf>,
+    current_cwd: Option<PathBuf>,
     agent: Option<agents::Agent>,
     source: String,
     /// Subagents still at work on this session.
@@ -689,17 +691,57 @@ struct LaneView {
 
 fn view_of(session: &tracker::Session) -> LaneView {
     LaneView {
+        reservation: None,
         state: session.state,
         since: session.since,
         note: session.note.clone(),
         session_id: session.session_id.clone(),
         project: session.project(),
         cwd: session.cwd.clone(),
+        current_cwd: session.current_cwd.clone(),
         agent: session.agent,
         source: session.source.clone(),
         subagents: session.subagents.len(),
         gauges: session.gauges,
         failure: session.failure,
+    }
+}
+
+impl LaneView {
+    fn reserved(index: usize, saved: &SavedAgent) -> Self {
+        Self {
+            reservation: Some(index),
+            state: State::Idle,
+            since: 0,
+            note: "Reserved — waiting for agent".to_owned(),
+            session_id: String::new(),
+            project: Some(saved.project()),
+            cwd: Some(saved.folder.clone()),
+            current_cwd: None,
+            agent: match saved.agent {
+                AgentFilter::Any => None,
+                AgentFilter::Claude => Some(agents::Agent::Claude),
+                AgentFilter::Codex => Some(agents::Agent::Codex),
+            },
+            source: String::new(),
+            subagents: 0,
+            gauges: Default::default(),
+            failure: None,
+        }
+    }
+
+    fn folder_details(&self) -> String {
+        let mut text = self
+            .cwd
+            .as_ref()
+            .map(|path| format!("Launch folder: {}", path.display()))
+            .unwrap_or_else(|| "Launch folder: not yet known".to_owned());
+        if let Some(current) = &self.current_cwd
+            && Some(current) != self.cwd.as_ref()
+        {
+            text.push_str(&format!("\nWorking folder: {}", current.display()));
+        }
+        text
     }
 }
 
@@ -747,18 +789,25 @@ fn lanes_panel(
             }
         });
     });
-    let caption = format!(
-        "{} Four keys per lane on the F-row: any of them summons the agent, and while it is \
-         Waiting the three after the first are ⏶ ⏷ Enter; on the numpad an M key summons \
-         its agent and the top line answers the one it shows. A lane keeps its position for \
-         as long as its session lives.",
-        lanes_carried(tracker.settings.lane_count)
+    ui.label(
+        "Each lane tracks one agent and stays assigned until the session ends. \
+         Use Focus or the lane’s summon key to bring its terminal forward. \
+         When the agent is waiting, the answer keys let you move up, move down, or press Enter.",
     );
-    ui.label(egui::RichText::new(caption).weak());
     ui.add_space(6.0);
 
     let views: Vec<Option<LaneView>> = (0..tracker.settings.lane_count)
-        .map(|lane| tracker.on_lane(lane).map(view_of))
+        .map(|lane| {
+            tracker.on_lane(lane).map(view_of).or_else(|| {
+                tracker
+                    .settings
+                    .saved
+                    .iter()
+                    .enumerate()
+                    .find(|(_, saved)| saved.reserved_lane == Some(lane))
+                    .map(|(index, saved)| LaneView::reserved(index, saved))
+            })
+        })
         .collect();
 
     let mut actions = LaneActions::default();
@@ -782,7 +831,7 @@ fn lanes_panel(
         *focus = Some(FocusRequest::Lane(lane));
     }
     if let Some(lane) = actions.dismiss {
-        tracker.dismiss(lane);
+        changed |= tracker.dismiss(lane);
     }
     if let Some((from, to)) = actions.moved {
         tracker.move_lane(from, to);
@@ -824,6 +873,7 @@ fn lanes_panel(
     }
     if let Some((source, id)) = off.promote {
         tracker.promote(&source, &id);
+        changed = true;
     }
     if let Some((source, id)) = off.dismiss {
         tracker.dismiss_session(&source, &id);
@@ -840,19 +890,28 @@ fn lanes_panel(
         group_label(
             ui,
             "Saved agents",
-            "remembered from a lane, not running now. Each takes its preferred lane \
-             when it starts, if the lane is free; otherwise another lane.",
+            "Use Add to lane to reserve an idle slot before starting an agent.",
         );
         ui.add_space(2.0);
         for index in idle {
+            let target = tracker.reservation_target(index);
             ui.push_id(("saved", index), |ui| {
-                changed |= saved_card(ui, index, &mut tracker.settings, &mut actions);
+                changed |= saved_card(ui, index, &mut tracker.settings, &mut actions, target);
             });
             ui.add_space(4.0);
         }
     }
     // After every card has drawn: a roster index is only stable until
     // something is removed.
+    if let Some(lane) = actions.release {
+        changed |= tracker.release_reservation(lane);
+    }
+    if let Some(index) = actions.reserve {
+        match tracker.reserve_saved(index) {
+            Ok(_) => changed = true,
+            Err(reason) => tracker.summon = Some(reason),
+        }
+    }
     if let Some(index) = actions.forget
         && index < tracker.settings.saved.len()
     {
@@ -873,6 +932,8 @@ fn lanes_panel(
 /// fistful of out-parameters.
 #[derive(Default)]
 struct LaneActions {
+    reserve: Option<usize>,
+    release: Option<usize>,
     /// The saved roster changed; assignment gets another look.
     reseat: bool,
     /// Drop this roster entry, by index — applied once every card has drawn.
@@ -953,10 +1014,18 @@ fn lane_card(
                         // without saying so. Only when there is one to dismiss.
                         if view.is_some()
                             && ui
-                                .add(egui::Button::new("❌").small())
+                                .add(
+                                    egui::Button::new(
+                                        if view.is_some_and(|view| view.reservation.is_some()) {
+                                            "Release"
+                                        } else {
+                                            "❌"
+                                        },
+                                    )
+                                    .small(),
+                                )
                                 .on_hover_text(
-                                    "Remove this session. If the agent is actually still \
-                                     alive, its next event brings it back.",
+                                    "Remove this lane's occupant and release its reservation.",
                                 )
                                 .clicked()
                         {
@@ -1035,16 +1104,22 @@ fn lane_card(
                             view.project
                                 .clone()
                                 .unwrap_or_else(|| "unknown project".to_owned()),
-                            view.agent
-                                .map(|agent| agent.label())
-                                .unwrap_or("unknown agent"),
-                            agents::host_label(&view.source),
+                            view.agent.map(|agent| agent.label()).unwrap_or(
+                                if view.reservation.is_some() {
+                                    "Any agent"
+                                } else {
+                                    "unknown agent"
+                                }
+                            ),
+                            if view.reservation.is_some() {
+                                "reserved"
+                            } else {
+                                agents::host_label(&view.source)
+                            },
                         ))
                         .small(),
                     );
-                    if let Some(cwd) = &view.cwd {
-                        identity.on_hover_text(cwd.display().to_string());
-                    }
+                    identity.on_hover_text(view.folder_details());
                     // The numbers, when any are known: how full the context is,
                     // and how much of the two limits is used.
                     if let Some(line) = view.gauges.sentence() {
@@ -1062,7 +1137,9 @@ fn lane_card(
                                 "Bring this agent's terminal forward, with its tab in front. {}",
                                 focus_keys_hover(index)
                             );
-                            if ui.small_button("Focus").on_hover_text(hover).clicked() {
+                            if view.reservation.is_none()
+                                && ui.small_button("Focus").on_hover_text(hover).clicked()
+                            {
                                 actions.focus = Some(index);
                             }
                             changed |= save_controls(ui, index, view, config, actions);
@@ -1090,8 +1167,22 @@ fn save_controls(
     actions: &mut LaneActions,
 ) -> bool {
     let mut changed = false;
-    match config.saved_matching(view.agent, view.cwd.as_deref()) {
+    match view
+        .reservation
+        .or_else(|| config.saved_matching(view.agent, view.cwd.as_deref()))
+    {
         Some(saved) => {
+            if view.reservation.is_none()
+                && let Some(lane) = config.saved[saved].reserved_lane
+                && ui
+                    .small_button("Release reservation")
+                    .on_hover_text(
+                        "Keep this session here, but make the lane available after it ends.",
+                    )
+                    .clicked()
+            {
+                actions.release = Some(lane);
+            }
             if ui
                 .small_button("Forget")
                 .on_hover_text(
@@ -1125,7 +1216,8 @@ fn save_controls(
                 config.remember(SavedAgent {
                     agent: AgentFilter::Any,
                     folder: cwd.clone(),
-                    lane: index,
+                    lane: Some(index),
+                    reserved_lane: None,
                 });
                 changed = true;
                 actions.reseat = true;
@@ -1161,20 +1253,22 @@ fn saved_pickers(
         });
 
     let mut lane = was_lane;
-    let text = if lane < count {
-        format!("prefers lane {}", lane + 1)
-    } else {
-        format!("prefers lane {} (hidden)", lane + 1)
+    let text = match lane {
+        None => "Any lane".to_owned(),
+        Some(lane) if lane < count => format!("prefers lane {}", lane + 1),
+        Some(lane) => format!("prefers lane {} (hidden)", lane + 1),
     };
     let picker = egui::ComboBox::from_id_salt((salt, "lane"))
         .width(124.0)
         .selected_text(egui::RichText::new(text).small())
         .show_ui(ui, |ui| {
+            ui.selectable_value(&mut lane, None, "Any lane");
             for option in 0..count {
-                ui.selectable_value(&mut lane, option, format!("lane {}", option + 1));
+                ui.selectable_value(&mut lane, Some(option), format!("lane {}", option + 1));
             }
         });
     if let Some(here) = here
+        && let Some(was_lane) = was_lane
         && here != was_lane
     {
         picker.response.on_hover_text(format!(
@@ -1201,6 +1295,7 @@ fn saved_card(
     index: usize,
     config: &mut settings::Settings,
     actions: &mut LaneActions,
+    target: Result<usize, String>,
 ) -> bool {
     let mut changed = false;
     let project = config.saved[index].project();
@@ -1215,6 +1310,32 @@ fn saved_card(
                 ui.label(egui::RichText::new("saved").small().weak());
                 ui.label(egui::RichText::new(project).strong());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if let Some(lane) = config.saved[index].reserved_lane {
+                        if ui
+                            .small_button(format!("Release lane {}", lane + 1))
+                            .clicked()
+                        {
+                            actions.release = Some(lane);
+                        }
+                    } else {
+                        let hover = match &target {
+                            Ok(lane) => format!(
+                                "Reserve lane {} in Idle until this agent starts.",
+                                lane + 1
+                            ),
+                            Err(reason) => reason.clone(),
+                        };
+                        if ui
+                            .add_enabled(target.is_ok(), egui::Button::new("Add to lane").small())
+                            .on_hover_text(hover)
+                            .on_disabled_hover_text(
+                                "No free lane is available for this saved agent.",
+                            )
+                            .clicked()
+                        {
+                            actions.reserve = Some(index);
+                        }
+                    }
                     if ui
                         .small_button("Forget")
                         .on_hover_text("Drop this agent from the saved roster.")
@@ -1222,15 +1343,24 @@ fn saved_card(
                     {
                         actions.forget = Some(index);
                     }
+                });
+            });
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if saved_pickers(ui, ("roster", index), index, config, None) {
                         changed = true;
                         actions.reseat = true;
                     }
+                    // Keep both control rows against the same right edge;
+                    // long folders give way to the dropdowns on this row.
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(folder).small().monospace())
+                                .truncate(),
+                        );
+                    });
                 });
             });
-            // A `\\wsl.localhost\...` path is long enough to push everything
-            // else off a row, so it gets a row of its own and gives way.
-            ui.add(egui::Label::new(egui::RichText::new(folder).small().monospace()).truncate());
         });
     changed
 }
@@ -1336,9 +1466,7 @@ fn overflow_card(
                     ))
                     .small(),
                 );
-                if let Some(cwd) = &view.cwd {
-                    identity.on_hover_text(cwd.display().to_string());
-                }
+                identity.on_hover_text(view.folder_details());
                 if let Some(line) = view.gauges.sentence() {
                     ui.label(egui::RichText::new(line).small().weak().monospace());
                 }
@@ -1360,10 +1488,10 @@ fn overflow_card(
                         if let Some(saved) = config.saved_matching(view.agent, view.cwd.as_deref())
                         {
                             ui.label(
-                                egui::RichText::new(format!(
-                                    "saved · prefers lane {}",
-                                    config.saved[saved].lane + 1
-                                ))
+                                egui::RichText::new(match config.saved[saved].lane {
+                                    Some(lane) => format!("saved · prefers lane {}", lane + 1),
+                                    None => "saved · Any lane".to_owned(),
+                                })
                                 .small()
                                 .weak(),
                             );
@@ -1402,7 +1530,7 @@ fn empty_overflow_slot(ui: &mut egui::Ui) {
 /// itself, "Waiting 12m", one thing read in one glance.
 fn status_and_clock(ui: &mut egui::Ui, view: &LaneView, now: u64) {
     let held = (view.state == State::Waiting).then(|| tracker::held(view.since, now));
-    if held.is_none() {
+    if held.is_none() && view.reservation.is_none() {
         ui.label(egui::RichText::new(tracker::elapsed(view.since, now)).monospace());
     }
     state_pill(ui, view.state, held.as_deref());
@@ -1824,8 +1952,8 @@ fn device_tuning(ui: &mut egui::Ui, tuning: &mut settings::Tuning, balance: bool
 
 /// Where lanes have keys, device by device: the F-row carries the first
 /// three, the numpad's M column the first five, a deck one lane per row, and
-/// the window and mini mode every lane. The copy above the lane list and the
-/// lane-count picker both say it from here, for `count` lanes.
+/// the window and mini mode every lane. Used by the lane-count picker's hover
+/// for `count` lanes.
 fn lanes_carried(count: usize) -> String {
     if count <= KEYBOARD_LANES {
         return "Three lanes, on every device.".to_owned();

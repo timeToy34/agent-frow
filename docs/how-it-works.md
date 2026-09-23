@@ -35,48 +35,67 @@ must never change either — Codex records trust against a hash of it — which 
 why it names `%LOCALAPPDATA%` rather than a build directory, and why the token
 lives in a file rather than in the command.
 
-## Building, installing, and the two locations
+## Source, build outputs, and the installed app
 
-The workspace is the repository; it depends on nothing outside it.
+There is one source checkout. Windows Cargo compiles it directly, including
+when Windows reaches it through a WSL UNC path. The output folder is on a
+local Windows drive, separate from the source; there is no second checkout
+or source-copy step to get stale. Cargo's locks and caches stay on Windows.
 
+On the development machine:
+
+| Purpose | Location |
+|---|---|
+| Source and Git history | `/home/jerome/dev/ai-agent-keeb` |
+| Windows outputs | `C:\dev\ai-agent-keeb\target` |
+| Versioned release ZIPs | `C:\dev\ai-agent-keeb\dist` |
+| Running app and settings | `%LOCALAPPDATA%\agent-frow` |
+
+From Windows PowerShell, in the source checkout:
+
+```powershell
+.\build.ps1 -OutputRoot C:\dev\ai-agent-keeb                # test, build, install, restart
+.\build.ps1 -OutputRoot C:\dev\ai-agent-keeb -Mode Build    # release build only
+.\build.ps1 -OutputRoot C:\dev\ai-agent-keeb -Mode Test     # workspace tests only
+.\dist.ps1 -OutputRoot C:\dev\ai-agent-keeb                 # test, build, package
 ```
-cargo build                            # or: cargo build --release
-target\debug\agent-frow.exe            # tray app and setup window
-target\debug\agent-frow.exe doctor     # what is installed, and whether it works
-target\debug\agent-frow.exe install --dry-run
+
+The scripts resolve the source from their own location, so they also work
+when invoked by absolute path from another directory. From the WSL checkout:
+
+```bash
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w ./build.ps1)" -OutputRoot 'C:\dev\ai-agent-keeb'
 ```
 
-**Two locations, and this is the one thing that catches you out:**
+`OutputRoot` is required. A source checkout, the installed app directory,
+a drive root, or a network output path is refused. `build-source.json` in the
+output folder records which source owns it, preventing a different checkout
+from silently reusing its outputs. `CARGO_TARGET_DIR` is changed only for the
+script's duration; user environment and global Git settings are not changed.
 
-- `target\debug\` (or `target\release\`) is where `cargo build` writes the
-  freshly compiled `agent-frow.exe`. Building updates *only* here.
-- `%LOCALAPPDATA%\agent-frow\` is where the app **runs from** in normal use, and
-  the only path an agent's hook ever names. Nothing but `install` copies a build
-  there.
+The default `Install` mode tests before building and deploying. It invokes the
+app's installer, stops only the previous installed process, starts the installed
+copy, and checks its binary hashes, process path, and ingress listener. Build
+or test failure leaves the installation untouched. A failed update restores
+the prior installed files and restarts the previous app if it was running.
+One `.old` binary set is retained for rollback. Settings are preserved and the
+registered hook paths continue to point at the installed copy.
 
-A bare **release** exe launched from anywhere else installs itself there and
-hands over (that is the zip's whole setup story). Debug builds and the
-explicit `agent-frow.exe run` subcommand never self-install — running a build
-in place is the developer's move, and it stays theirs.
+`target\release\build-info.json` records the source, commit, dirty status,
+build time, and artifact hashes. It is copied alongside the installed app, so
+two builds with the same version number can still be distinguished. A raw
+`cargo build` only compiles; use the script when testing the installed app.
 
-So after every rebuild, `install` is the step that actually deploys it:
-`agent-frow.exe install` copies `agent-frow.exe`, `agent-frow-hook.exe`, and
-`iCUESDK.x64_2019.dll` into `%LOCALAPPDATA%\agent-frow\` (renaming the running
-copy aside so it can overwrite it) and registers the hook with every agent it
-finds. **If you rebuild but do not install, the running tray app stays the old
-one** — a fresh `target\...\agent-frow.exe` next to a stale
-`%LOCALAPPDATA%\...\agent-frow.exe` is exactly that mistake.
+Agents need restarting or Codex hook trust only when their hook configuration
+changes. Replacing an animation build with identical registrations does not
+require re-trusting hooks.
 
-Agents read hooks at startup, so restart them afterwards. **Codex additionally
-requires you to run `/hooks` inside it and trust the entry** — until then it
-looks installed and nothing happens, which is exactly what `doctor`'s
-"registered but never seen" is there to tell you.
-
-Developing against the live app: rebuild, then `install`, then relaunch
-`%LOCALAPPDATA%\agent-frow\agent-frow.exe`. `shot.ps1` screenshots the
-window to `window.png` for checking UI changes by looking, not by reasoning
-about layout code. Both `shot.ps1` and `window.png` are development scratch and
-are git-ignored.
+The one-time consolidation collected all existing versioned ZIPs in the
+Windows `dist`, their release notes in `dist\notes`, and unique legacy files
+and Windows Git references in a verified `archive\migration-*.zip`. The old
+Windows source checkout, former `frow` tree, duplicate WSL distributions, and
+obsolete build caches are retired. SDK and firmware resources remain with
+the source. `shot.ps1` and `window.png` remain ignored development scratch.
 
 ### The iCUE SDK
 
@@ -93,19 +112,22 @@ and is deliberately not committed to this repository.
 
 ### The zip
 
-`dist.ps1` builds the zip from a fresh release build; the release profile
-links the C runtime statically, so nothing has to be installed first. Run it
-on a checkout that is actually at the commit you mean to ship — cargo rebuilds
-only what changed, and a zip the same size as the previous release is the tell
-that nothing was.
+`dist.ps1 -OutputRoot <Windows-folder>` delegates to `build.ps1 -Mode Package`:
+it runs tests and a fresh release build, then writes the versioned ZIP and its
+SHA256 sidecar into that output folder's `dist`. Existing packages or checksum
+sidecars are never overwritten. Packaging does not install or restart the app.
+Temporary staging is removed on success and failure. The release profile links
+the C runtime statically, so nothing has to be installed first.
 
-```
-dist/agent-frow-win64.zip
+```text
+<OutputRoot>\dist\agent-frow-<version>-win64.zip
   agent-frow.exe          the app — it is also its own installer
   agent-frow-hook.exe     the shim the agents run
-  iCUESDK.x64_2019.dll    Corsair lighting; the app runs without it
-  README.txt              the install steps
-  LICENSE.txt             MIT — the notice travels with every copy
+  iCUESDK.x64_2019.dll    Corsair lighting; optional
+  build-info.json        source and binary identity
+  keychron_v0_ultra_ansi.json
+  README.txt
+  LICENSE.txt
 ```
 
 `iCUESDK.x64_2019.dll` is Corsair's, carried in the zip from the iCUE SDK's
@@ -137,7 +159,8 @@ Lane ownership has its own always-on journal, `~/.agent-frow/lane-events.log`.
 Each JSON line records creation, conversation replacement, or removal, with
 the event timestamp, source, terminal id, current and previous session ids,
 lane number (one-based, or null off the keyboard), and reason. Tool activity
-does not fill this log. A separate worker writes it from a bounded queue;
+does not fill this log. Records also distinguish `project_dir` (the launch
+folder) from `cwd` (the current main-agent working folder). A separate worker writes it from a bounded queue;
 neither the ingress path nor the tracker lock waits for disk I/O. The file
 restarts at 256 KB, and an oversized record is skipped. Prompts, tool contents
 and credentials are never included.
@@ -182,8 +205,10 @@ has a test named after it:
 
 - `SessionStart{source: "compact"}` changes nothing. Claude compacts *mid-turn*;
   without the guard a live turn drops to Connected until the next `Stop`.
-- An event carrying `agent_id` or `agent_type` is **liveness only**. Subagent
-  events carry the *parent's* `session_id`, so acting on one lets a subagent
+- An event carrying `agent_id` or `agent_type` is **liveness only**. Claude
+  subagent events carry the *parent's* `session_id`; Codex children can have
+  their own session id, whose verified rollout metadata supplies the parent.
+  Nested children follow that relationship to the root. Acting on one lets a subagent
   finishing a tool clear a Waiting another one raised. The tracker keeps a
   per-session subagent roster instead: `SubagentStart` enrols an id, every
   event carrying it is its heartbeat, `SubagentStop` retires it, and 30
@@ -245,8 +270,12 @@ Unknown `notification_type` values are ignored and **counted**, and shown in the
 window as a number, so a new agent release is a line you can read rather than
 behaviour nobody can explain. Same for hook events we do not register.
 
-There is no handshake and nothing to seed: an event from a session we have never
-seen creates it and infers the state from the event itself. An agent started
+There is no handshake and nothing to seed: a main-agent event from a session
+we have never seen creates it and infers the state from the event itself.
+Child activity waits in a bounded roster until its foreground parent is known;
+child events, `SubagentStop`, and `SessionEnd` never introduce a lane.
+Ended or dismissed sessions ignore late background events during this app run;
+an explicit main start or user prompt can reactivate them. An agent started
 before the app, after it, or an hour ago all behave identically.
 
 **Waiting follows received activity.** Answering a prompt does not guarantee
@@ -261,8 +290,8 @@ or the ✕ — never on a timer, because the user who stepped away comes back to
 the board they left. Instead, silence demotes: Done and Connected dim to Idle
 after 30 minutes, Running after 2 hours (a killed terminal stops glowing
 blue). Waiting and Error hold through any amount of time — they are exactly
-what you left to come back to. Any event from the agent revives its lane where
-it stood.
+what you left to come back to. Main-agent activity revives a quiet lane where it stood. A dismissed or
+ended session requires a new main start or user prompt.
 
 ## Lane placement
 
@@ -279,13 +308,28 @@ takes its preferred lane if the lane is free; otherwise the first free lane;
 otherwise it waits off the keyboard — and landing elsewhere never rewrites the
 save (`claim()` in `app/src/tracker.rs` reads the settings and cannot write
 them). A preference is not a reservation: an empty preferred lane is a free
-lane to whoever comes next. One refinement: a session whose folder is not
-known yet — one adopted from a subagent's event — takes a lane nobody prefers
-while there is one, so an unidentified agent cannot sit down in a saved
-agent's place during a restart. The window shows three groups: the lanes, the
+lane to whoever comes next. Child activity does not claim a lane before its
+parent is known. A main session whose folder is still unknown avoids preferred
+lanes while another lane is free. The window shows three groups: the lanes, the
 off-keyboard sessions, and the saved agents that are not running; a running
 saved agent is tagged on its card. The roster is where a save's agent and
 preferred lane are edited, and where it is forgotten.
+
+Saved agents can prefer **Any lane**, which keeps folder/agent recognition
+without preferring a slot. **Add to lane** makes an explicit reservation on
+the preferred lane if free, otherwise another free lane. It never displaces
+an occupant. Reservations persist in settings, display as Idle on the window,
+mini view and devices, and block unrelated automatic arrivals. They are not
+fake live sessions: they have no terminal identity, gauges, activity clock or
+answer keys. Focus explains that the agent has not started.
+
+The first matching live session takes the reserved slot, including when its
+launch metadata arrives after its initial hook. When it ends the slot returns
+to Idle. **Release** removes the reservation; releasing one occupied by its
+agent leaves that session in place. Forgetting the save also releases it.
+Lane reordering carries the reservation; reducing the lane count hides it
+until that lane is shown again. Explicit promotion into the bottom lane
+replaces any reservation there.
 
 **Nothing ever takes a lane away from a session that already has one** — lane
 position is identity, and a display you glance at teaches you nothing if lane
@@ -293,24 +337,44 @@ position is identity, and a display you glance at teaches you nothing if lane
 the ⏶⏷ buttons reorder lanes (everything — session, name, colour, saved
 preference, keys — travels together), and an off-keyboard card's ⏶ takes the
 bottom lane, its incumbent stepping off the keyboard in trade.
+An explicit reservation can also move its matching session to the held slot
+once delayed launch metadata identifies it; other occupied lanes stay put.
 
-A session's **project folder** is the *main* agent's launch directory: it is
-taken from `SessionStart`'s `cwd` (authoritative) and, until that arrives, from
-the first non-subagent event that carries one. A **subagent's** `cwd` never sets
-it — a subagent working in `…/frontend` under a project rooted at `…/` must not
-make the subfolder the lane's project. The historical report that this rule
-did not fully fix a folder mismatch still needs verification; see
-[KI-002](../KNOWN_ISSUES.md#ki-002-lane-binds-to-a-subfolder-instead-of-the-launch-folder).
+A session's **project folder** is the main agent's launch directory, kept
+separately from its changing working directory. Labels, saved-agent matching,
+and the project-name focus fallback use the launch folder. The tooltip shows
+both folders when they differ. Tool calls, subagents, compaction and resume
+events cannot replace an established launch folder.
+
+The ingestion worker recovers launch identity before lane assignment:
+previously learned `(source, session_id)` identities are loaded from
+`~/.agent-frow/session-projects.json`; Claude's status line supplies
+`workspace.project_dir`; Codex CLI supplies verified rollout metadata.
+For an existing Claude session, the worker can read the first matching main
+record's `cwd` from a bounded 256 KB transcript prefix. Child records, copied
+history with other session ids and incomplete records do not qualify. A fresh
+main `SessionStart` can establish the folder from `cwd`; a resume, compact or
+ordinary tool event cannot. If identity is unavailable, the project stays
+unknown until metadata arrives, rather than treating a current subfolder as
+the saved project. Learning it never displaces a lane that is already occupied.
+
+The identity cache is written atomically and holds at most 256 sessions.
+It stores only source, session id, launch path and discovery time; it never
+restores running sessions. Status updates can remember launch identity before
+the next main hook without creating lanes or refreshing activity. Subagent
+status updates cannot supply their parent's project or gauges.
 
 Lane names, colours, saved agents, the lane count and whether Settings is
 unfolded live in `%LOCALAPPDATA%\agent-frow\settings.json`, written
 atomically. A file that does not parse is refused and left exactly as it is:
 the window says so, and says that changing anything will overwrite it. Saved
-agents are stored as `{"agent", "folder", "lane"}` with the lane counted from
-one, as the window counts; a pre-0.5 file's per-lane `bind` is read as a saved
+agents are stored as `{"agent", "folder", "lane", "reserved_lane"}`. Numeric
+lanes count from one; `lane: null` means Any lane and `reserved_lane` is omitted
+when no reservation is held. Older numbered preferences remain unchanged;
+a pre-0.5 file's per-lane `bind` is read as a saved
 agent preferring that lane and never written back.
 
-The lane name is load-bearing: focus finds a terminal tab by it.
+A lane name is an optional focus preference; automatic discovery does not require one.
 
 ### Numbers: context and limits
 
@@ -322,8 +386,9 @@ turns both into one shape: three percentages, each possibly unknown.
 - **Claude** hands them to its status-line command on every assistant
   message (and on a compact, a mode change, a config edit). `install` makes
   the hook that command, in `--status` mode: it posts a `StatusLine` record
-  with the session id and three percentages, and nothing else out of that
-  JSON — not the model, not the cost, not the directory. Where a status
+  with the session id, three percentages and the current and launch folders.
+  Launch identity can arrive before the first usage reading. Model, cost and
+  other status content are discarded. Where a status
   line already exists it is wrapped, not replaced: `hook --status --tee … |
   <yours>`, and `--tee` writes back exactly the bytes it read, so your line
   renders as it always did. `remove` unwraps it. The limits appear only for
@@ -625,11 +690,21 @@ lane colours should stay away from it. The patterns (four keys per lane):
 |---|---|
 | empty lane | all off |
 | Connected | all keys, base colour, 20% |
-| Running | base 20% glow with one 100% light crossfading across five slots |
+| Running | base 20% glow with 1–4 adjacent 100% lights moving across five slots |
 | Waiting | leftmost key 100%; the three answer keys double-pulse base up to 100% |
 | Done | leftmost key 100%; the rest 20% |
 | Error | leftmost key base 100%; the rest dark red, steady |
 | Idle | leftmost key base 20%; the rest off |
+
+Running uses `1 + active subagents` from the existing roster, capped at the
+physical key count. A four-key lane starts `Oooo`, `OOoo`, `OOOo`, or `OOOO`
+for 1, 2, 3, or 4+ agents. The group moves through `n + 1` positions in the
+same 1400 ms cycle: the extra position is an off-lane gap, not another key.
+Adjacent highlights stay full inside the group while its edges ease in and
+out. Child starts, stops and expiry change its width without restarting the
+animation. Stream Deck rows and mini-mode rows, including off-keyboard
+sessions, use their own key count; the numpad's single M keys keep their
+existing pattern. Running previews show one agent. Waiting is unchanged.
 
 The leftmost key at full brightness marks "this lane has something to say" and
 names the lane by colour while saying it. The **Preview** row in the Keyboard
@@ -708,21 +783,38 @@ else the topmost window that is not a tool window, which keeps Electron splash
 screens and palettes out. `explorer.exe` is never the host and is skipped by
 name.
 
-Windows Terminal hosts **every window in one process** — that is what lets a
-tab be dragged out into a window of its own (1.22 and later) — so identity
-finds the process and a matching pid can own several terminal windows. The tab
-chooses between them: for each name tried, the window already showing it,
-else the window holding it, else the topmost. That read costs one UI Automation
-walk per window and happens only when there is more than one. Two unnamed lanes
-on the same project share a tab title, and the first in Z-order wins — naming
-the lane is the remedy, as it is for the tab itself.
+Windows Terminal can host several windows in one process. Focus enumerates
+all of that host's tabs and tries a unique custom lane name, a validated cached
+tab identity, the live console title, then a unique project name. It never
+chooses the first matching duplicate or the topmost window as a substitute.
+If ancestry is incomplete, unique evidence can recover a target among verified
+Windows Terminal windows. Children cannot overwrite the parent's ancestry;
+a shorter detached-tool chain does not replace a known terminal host.
 
-The tab it looks for is **the lane's name**, then the project folder — which is
-why naming a lane is a feature. That order is strict: a project tab that is
-already showing never beats a lane-named tab that exists, which matters when
-Claude and Codex share one project. When neither matches it says so and lists
-the tabs that are there, rather than quietly leaving you looking at the right
-terminal showing the wrong agent.
+The isolated `probe-console` helper attaches to a verified console ancestor
+and reads its title with `GetConsoleTitleW`. It duplicates its output pipe
+before attachment, so output cannot reach the agent's console. The GUI and
+hook never attach or change console state; hook command strings stay unchanged.
+The helper has an 800 ms deadline and returns only a bounded title.
+
+A custom tab label can hide that console title. On an explicit focus request,
+UI Automation can select candidate tabs and read the active `TermControl`'s
+`HelpText` (its console title), never the text buffer. Discovery has a four
+second / 24-tab budget between UIA calls. Original selections are restored
+before the final target is selected, or on failure. A changing title or
+multiple matching consoles cannot establish an automatic association.
+
+Successful associations are kept in memory by source and terminal identity
+(session identity if no terminal id exists). The cached window, process birth
+time and UIA runtime id must still match; rename survives, closure or movement
+triggers rediscovery. Every input surface uses the same `FocusTarget` and
+serialized resolver. A report distinguishes a raised window from a confirmed
+agent tab; answer keys recheck that exact selected tab before the existing
+foreground and keyboard checks.
+
+`~/.agent-frow/focus-events.log` records identities, matching method and failure
+reasons asynchronously, capped at 256 KB. It records no console titles,
+terminal contents, prompts or credentials.
 
 Three things it must keep doing (the histories are in [lessons.md](lessons.md)):
 

@@ -6,8 +6,8 @@
 //!
 //! - **Claude** hands them to its status-line command, on every assistant
 //!   message. The hook's `--status` mode projects three percentages out of
-//!   that JSON and posts them as a `StatusLine` record; nothing else in the
-//!   status JSON leaves the machine, and the JSON itself goes on to the
+//!   that JSON and posts them alongside current and launch directories in a
+//!   `StatusLine` record. The JSON itself goes on to the
 //!   user's own status line untouched.
 //! - **Codex** writes them into its session rollout, one `token_count` line
 //!   after each model response. Every Codex hook names that file
@@ -169,15 +169,17 @@ pub fn codex_gauges(line: &str) -> Option<Gauges> {
     Some(gauges)
 }
 
-/// Where a Codex transcript can be opened from Windows. A Windows agent's
+/// Where an agent transcript can be opened from Windows. A Windows agent's
 /// path is used as it is; a WSL agent's is a Linux path, reachable through
 /// `\\wsl.localhost\<distro>` — one candidate per distribution, since the
-/// hook cannot say which one it ran in. Claude transcripts are never read.
+/// hook cannot say which one it ran in.
 pub fn candidates(source: &str, transcript_path: &str, distros: &[String]) -> Vec<PathBuf> {
-    if source.starts_with("codex-win") {
+    if source.starts_with("codex-win") || source.starts_with("claude-win") {
         return vec![PathBuf::from(transcript_path)];
     }
-    if source.starts_with("codex-wsl") && transcript_path.starts_with('/') {
+    if (source.starts_with("codex-wsl") || source.starts_with("claude-wsl"))
+        && transcript_path.starts_with('/')
+    {
         return distros
             .iter()
             .map(|distro| {
@@ -267,6 +269,9 @@ pub struct Rollouts {
 struct RolloutMetadata {
     session_id: String,
     cli: bool,
+    subagent: bool,
+    parent: Option<String>,
+    cwd: Option<String>,
 }
 
 impl RolloutMetadata {
@@ -292,6 +297,21 @@ impl RolloutMetadata {
         Some(Self {
             session_id: session_id.to_owned(),
             cli: value["payload"]["source"] == "cli",
+            subagent: value["payload"]["source"].get("subagent").is_some(),
+            parent: value["payload"]["parent_thread_id"]
+                .as_str()
+                .or_else(|| {
+                    value
+                        .pointer("/payload/source/subagent/thread_spawn/parent_thread_id")
+                        .and_then(Value::as_str)
+                })
+                .map(str::trim)
+                .filter(|id| !id.is_empty() && *id != session_id)
+                .map(str::to_owned),
+            cwd: value["payload"]["cwd"]
+                .as_str()
+                .filter(|cwd| !cwd.is_empty())
+                .map(str::to_owned),
         })
     }
 }
@@ -308,6 +328,8 @@ impl Rollouts {
         if let Some(object) = value.as_object_mut() {
             object.remove("codex_cli");
             object.remove("codex_approvals_reviewer");
+            object.remove("codex_subagent");
+            object.remove("parent_session_id");
         }
         let Some(source) = value.get("src").and_then(Value::as_str) else {
             return;
@@ -315,6 +337,11 @@ impl Rollouts {
         if !source.starts_with("codex") {
             return;
         }
+        // Codex project identity comes only from its verified rollout.
+        if let Some(object) = value.as_object_mut() {
+            object.remove("project_dir");
+        }
+        let source = value["src"].as_str().unwrap_or_default();
         let Some(path) = value
             .get("transcript_path")
             .and_then(Value::as_str)
@@ -337,17 +364,34 @@ impl Rollouts {
                 found
             }
         };
-        if !self.metadata.contains_key(&resolved)
-            && let Some(metadata) = RolloutMetadata::read(&resolved)
+        if self.metadata.get(&resolved).is_none_or(|metadata| {
+            value["session_id"].as_str() != Some(metadata.session_id.as_str())
+        }) && let Some(metadata) = RolloutMetadata::read(&resolved)
         {
             self.metadata.insert(resolved.clone(), metadata);
         }
         if let Some(metadata) = self.metadata.get(&resolved)
-            && metadata.cli
             && value["session_id"].as_str() == Some(metadata.session_id.as_str())
             && let Some(object) = value.as_object_mut()
         {
-            object.insert("codex_cli".to_owned(), Value::Bool(true));
+            if metadata.cli {
+                object.insert("codex_cli".to_owned(), Value::Bool(true));
+                // A restart can first hear a tool running in a subdirectory.
+                // The verified rollout retains the main session's launch cwd.
+                if let Some(cwd) = &metadata.cwd {
+                    object.insert("project_dir".to_owned(), Value::from(cwd.clone()));
+                }
+            }
+            if metadata.subagent {
+                object.insert("codex_subagent".to_owned(), Value::Bool(true));
+                object.insert(
+                    "agent_id".to_owned(),
+                    Value::from(metadata.session_id.clone()),
+                );
+                if let Some(parent) = &metadata.parent {
+                    object.insert("parent_session_id".to_owned(), Value::from(parent.clone()));
+                }
+            }
         }
         let nonempty = |key: &str| {
             value
@@ -651,20 +695,26 @@ mod tests {
         {
             let path = scratch.0.join(format!("{index}.jsonl"));
             let metadata = json!({"type": "session_meta", "payload": {
-                "id": "s1", "source": source, "cwd": "PRIVATE PATH"
+                "id": "s1", "source": source, "cwd": "/launch/project", "instructions": "PRIVATE CONTENT"
             }});
             std::fs::write(&path, format!("{metadata}\n")).unwrap();
             for session in ["s1", "different-session"] {
                 let mut event = json!({
                     "src": "codex-win", "session_id": session, "hook_event_name": "SessionStart",
-                    "transcript_path": path.to_str().unwrap(), "codex_cli": true
+                    "transcript_path": path.to_str().unwrap(), "codex_cli": true,
+                    "cwd": "/launch/project/backend"
                 });
                 rollouts.attach(&mut event);
                 assert_eq!(
                     event["codex_cli"] == true,
                     source == "cli" && session == "s1"
                 );
-                assert!(!event.to_string().contains("PRIVATE PATH"));
+                assert_eq!(
+                    event["project_dir"].as_str(),
+                    (source == "cli" && session == "s1").then_some("/launch/project")
+                );
+                assert!(!event.to_string().contains("PRIVATE CONTENT"));
+                assert_eq!(event["cwd"], "/launch/project/backend");
                 let Parsed::Event(parsed) = Event::parse(&event, 1) else {
                     panic!("expected event")
                 };
@@ -675,6 +725,30 @@ mod tests {
             let mut forged = json!({"src": source, "codex_cli": true});
             rollouts.attach(&mut forged);
             assert!(forged.get("codex_cli").is_none());
+        }
+    }
+
+    #[test]
+    fn child_metadata_routes_only_its_own_session_to_the_parent() {
+        let scratch = Scratch::new("child-metadata");
+        let path = scratch.0.join("child.jsonl");
+        let metadata = json!({"type":"session_meta", "payload":{
+            "id":"child", "parent_thread_id":"parent",
+            "source":{"subagent":{"other":"guardian"}}, "cwd":"/project/frontend"
+        }});
+        std::fs::write(&path, format!("{metadata}\n")).unwrap();
+        let mut rollouts = Rollouts::default();
+        for sid in ["child", "unrelated"] {
+            let mut value = json!({"src":"codex-win", "session_id":sid,
+                "transcript_path":path.to_str().unwrap(), "parent_session_id":"forged", "codex_subagent":true});
+            rollouts.attach(&mut value);
+            assert_eq!(value["codex_subagent"] == true, sid == "child");
+            assert_eq!(
+                value["parent_session_id"].as_str(),
+                (sid == "child").then_some("parent")
+            );
+            assert!(value.get("codex_cli").is_none());
+            assert!(value.get("cwd").is_none());
         }
     }
 
@@ -872,16 +946,27 @@ mod tests {
     }
 
     #[test]
-    fn claude_transcripts_are_never_read() {
-        assert!(
+    fn claude_transcripts_resolve_for_launch_metadata_but_not_rollout_gauges() {
+        assert_eq!(
             candidates(
                 "claude-wsl",
                 "/home/me/.claude/projects/x/t.jsonl",
                 &["Ubuntu".to_owned()]
-            )
-            .is_empty()
+            ),
+            vec![PathBuf::from(
+                r"\\wsl.localhost\Ubuntu\home\me\.claude\projects\x\t.jsonl"
+            )]
         );
-        assert!(candidates("claude-win", r"C:\Users\me\.claude\t.jsonl", &[]).is_empty());
+        let path = PathBuf::from(r"C:\Users\me\.claude\t.jsonl");
+        assert_eq!(
+            candidates("claude-win", path.to_str().unwrap(), &[]),
+            vec![path]
+        );
+        let mut event = json!({"src":"claude-win", "session_id":"s",
+            "transcript_path":"missing", "project_dir":"/project"});
+        Rollouts::default().attach(&mut event);
+        assert!(event.get("gauges").is_none());
+        assert_eq!(event["project_dir"], "/project");
     }
 
     #[test]

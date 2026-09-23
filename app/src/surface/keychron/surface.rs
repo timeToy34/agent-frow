@@ -221,6 +221,7 @@ fn render(tracker: &Mutex<Tracker>) {
 
         let colours = palette::frame(
             frame.states,
+            frame.agent_counts,
             frame.settings,
             frame.settings.tuning(SURFACE),
             frame.elapsed_ms,

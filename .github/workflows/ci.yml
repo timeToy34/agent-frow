@@ -31,5 +31,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> ../agent-frow-output/target"
+      - name: Build workflow checks
+        shell: pwsh
+        run: ./scripts/build.tests.ps1
+      - name: Windows workspace tests
+        shell: pwsh
+        run: ./build.ps1 -OutputRoot "$env:GITHUB_WORKSPACE\..\agent-frow-output" -Mode Test
       - name: Build the workspace (release)
-        run: cargo build --release --workspace
+        shell: pwsh
+        run: ./build.ps1 -OutputRoot "$env:GITHUB_WORKSPACE\..\agent-frow-output" -Mode Build

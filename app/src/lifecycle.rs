@@ -36,6 +36,8 @@ pub struct Change {
     pub previous_session_id: Option<String>,
     /// Zero-based in memory; one-based in the journal, like the window.
     pub lane: Option<usize>,
+    pub project_dir: Option<PathBuf>,
+    pub cwd: Option<PathBuf>,
     pub reason: &'static str,
 }
 
@@ -58,6 +60,8 @@ fn append(path: &Path, change: &Change) -> std::io::Result<()> {
         "session_id": change.session_id,
         "previous_session_id": change.previous_session_id,
         "lane": change.lane.map(|lane| lane + 1),
+        "project_dir": change.project_dir,
+        "cwd": change.cwd,
         "reason": change.reason,
     }))?;
     bytes.push(b'\n');
@@ -98,6 +102,8 @@ mod tests {
             session_id: "new\nconversation".to_owned(),
             previous_session_id: Some("old".to_owned()),
             lane: Some(2),
+            project_dir: Some(PathBuf::from("/project")),
+            cwd: Some(PathBuf::from("/project/backend")),
             reason: "UserPromptSubmit",
         };
         std::fs::create_dir_all(&directory).unwrap();
@@ -110,7 +116,7 @@ mod tests {
             value,
             json!({"t":123,"action":"replaced","source":"codex-wsl",
             "terminal_id":"tab","session_id":"new\nconversation","previous_session_id":"old",
-            "lane":3,"reason":"UserPromptSubmit"})
+            "lane":3,"reason":"UserPromptSubmit", "project_dir":"/project", "cwd":"/project/backend"})
         );
         change.session_id = "x".repeat(MAX_BYTES as usize);
         append(&path, &change).unwrap();

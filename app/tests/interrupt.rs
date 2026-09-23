@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 fn send(tracker: &mut Tracker, source: &str, kind: &str, at: u64, extra: Value) {
     let mut payload = json!({
         "src": source, "hook_event_name": kind, "session_id": "session",
-        "cwd": "/project", "turn_id": "first"
+        "cwd": "/project", "project_dir": "/project", "turn_id": "first"
     });
     payload
         .as_object_mut()

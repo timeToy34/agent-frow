@@ -35,22 +35,28 @@ Do not infer hook delivery from a tool's call/output timestamps alone.
 
 ### KI-002: Lane binds to a subfolder instead of the launch folder
 
-**Status:** Historical open report from the 2026-08-18 release checklist;
-needs reproduction on the current build.
+**Status:** Cause identified 2026-09-22; launch-folder recovery implemented,
+with regression coverage and installed folder/lane verification. Automatic
+terminal selection still needs separate live verification.
 
-An agent launched from a project root was shown as belonging to its
-`frontend` subfolder. The prior change to take the main agent's
-`SessionStart.cwd` as authoritative and ignore subagent working directories
-was reported insufficient. The implementation docs describe that rule, but
-the original report contains no verified resolution.
+The main Claude session itself can change its working directory. A session
+launched in `ai-brand-dna` later reported `ai-brand-dna/backend`; after an app
+restart its first prompt supplied that subfolder. The old first-event fallback
+treated it as project identity, missing the saved project and offering `backend`
+to terminal matching. Ignoring subagent directories alone did not cover this.
 
 **Workaround:** None confirmed.
 
-**Next investigation:** Launch the app with `AGENT_FROW_DEBUG` set, reproduce
-the folder mismatch, and inspect the actual `cwd`, `agent_id`, and event
-sequence in `events.log` before changing [the tracker](app/src/tracker.rs).
-See [diagnostics](docs/how-it-works.md#diagnostics). Do not assume the hook's
-reported working directory matches the launch directory.
+The app now tracks launch and current folders separately, recovers Claude's
+launch folder from status/transcript metadata, and remembers established
+session identities across app restarts. Regression tests cover restarting in
+a subfolder, compaction/resume, missing metadata, and child activity before
+and after the parent. Lane journal records expose both folders; matching the
+launch folder does not by itself verify that a terminal tab belongs to it.
+
+The installed build recovered `ai-brand-dna` from the affected session's real
+transcript. Its subsequent actual `UserPromptSubmit` was recorded on saved
+lane 1 with `project_dir` at `ai-brand-dna` and `cwd` at `ai-brand-dna/backend`.
 
 ## Known limitations and workarounds
 

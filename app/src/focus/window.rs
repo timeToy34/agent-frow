@@ -14,7 +14,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::BOOL;
 
-use crate::event::Ancestor;
+use super::FocusTarget;
+use std::collections::BTreeMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use super::uia_tabs::{self, TERMINAL_WINDOW_CLASS};
 use super::{Key, Report};
@@ -92,7 +95,7 @@ fn own_process_id() -> u32 {
 /// process is gone or unreadable. This is the recycling check: the hook
 /// recorded what each ancestor pid was *named* at event time, and a pid that
 /// no longer resolves to that name belongs to some bystander now.
-fn exe_basename_of_pid(pid: u32) -> Option<String> {
+pub(super) fn exe_basename_of_pid(pid: u32) -> Option<String> {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{
         OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -133,197 +136,293 @@ fn visible_windows() -> Vec<Candidate> {
     collected
 }
 
-pub fn raise(ancestors: &[Ancestor], tab_names: &[String]) -> Report {
-    if ancestors.is_empty() {
-        // Older events carry no ancestry; the next one from that session will.
-        return Report::failed("this session has not reported where it is running");
+#[derive(Clone, Debug)]
+struct LocatedTab {
+    window: isize,
+    pid: u32,
+    born: Option<u64>,
+    tab: uia_tabs::Tab,
+}
+
+#[derive(Clone)]
+struct Binding {
+    window: isize,
+    pid: u32,
+    born: u64,
+    id: Vec<i32>,
+}
+
+static FOCUS: Mutex<()> = Mutex::new(());
+static BINDINGS: OnceLock<Mutex<BTreeMap<(String, String), Binding>>> = OnceLock::new();
+
+fn process_birth(pid: u32) -> Option<u64> {
+    use windows::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    // SAFETY: a query-only handle, closed on every path.
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut born = FILETIME::default();
+        let mut exit = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        let result = GetProcessTimes(process, &mut born, &mut exit, &mut kernel, &mut user);
+        let _ = CloseHandle(process);
+        result.ok()?;
+        Some((u64::from(born.dwHighDateTime) << 32) | u64::from(born.dwLowDateTime))
     }
+}
+
+/// A duplicate is ambiguous even if one matching tab is already selected.
+fn unique<'a>(mut matches: impl Iterator<Item = &'a LocatedTab>) -> Option<&'a LocatedTab> {
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
+}
+
+fn named<'a>(tabs: &'a [LocatedTab], name: Option<&str>) -> Option<&'a LocatedTab> {
+    let name = name.filter(|s| !s.trim().is_empty())?;
+    unique(tabs.iter().filter(|found| found.tab.name == name))
+}
+
+fn cached<'a>(tabs: &'a [LocatedTab], binding: &Binding) -> Option<&'a LocatedTab> {
+    unique(tabs.iter().filter(|found| {
+        found.window == binding.window
+            && found.pid == binding.pid
+            && found.born == Some(binding.born)
+            && found.tab.id == binding.id
+    }))
+}
+
+fn activate(found: &LocatedTab, method: &'static str) -> Report {
+    let hwnd = HWND(found.window as *mut c_void);
+    if !bring_forward(hwnd) {
+        // SAFETY: HWND came from the live enumeration.
+        let _ = unsafe { FlashWindow(hwnd, true) };
+        return Report::failed("Windows refused to bring the agent terminal forward");
+    }
+    if !settle_tab(hwnd, &found.tab.id) {
+        let mut report = Report::raised(
+            found.window,
+            "raised the terminal, but the agent tab could not be selected",
+        );
+        report.target_selected = false;
+        return report;
+    }
+    let mut report = Report::raised(
+        found.window,
+        format!("raised, showing the {} tab ({method})", found.tab.name),
+    );
+    report.tab_id = Some(found.tab.id.clone());
+    report.method = method;
+    report
+}
+
+pub fn raise(target: &FocusTarget) -> Report {
+    // A scan temporarily selects tabs. Serialize focus requests from all
+    // surfaces so they cannot scan, restore, or cache each other's selection.
+    let Ok(_focus) = FOCUS.lock() else {
+        return Report::failed("focus worker unavailable");
+    };
     let windows = visible_windows();
-    // What we raise is the agent's *host window* — the nearest ancestor that
-    // still is what it was when the event was recorded and owns a real window.
-    // Matching any window an ancestor owned went wrong three ways — it raised
-    // a transient Terminal helper (`PopupHost`); it raised an unrelated app
-    // whose pid a dead ancestor's had been recycled into (a summon once
-    // brought iCUE forward); and it could raise this app's own window, which
-    // is why a summon "did nothing" precisely when the app was focused.
-    //
-    // The first gate against all that was "terminal classes only", which also
-    // ruled out every agent living in a desktop app or an IDE. The gate now is
-    // identity: the hook records each ancestor's exe name at event time, and a
-    // window only counts while its pid still resolves to that name. Within a
-    // matching pid, a terminal-class window is preferred (keeps `PopupHost`
-    // out of Windows Terminal's own pid), else the topmost window that is not
-    // a tool window (keeps Electron splash screens and palettes out).
-    // Ancestors are walked nearest first, so an agent in VS Code's terminal
-    // raises VS Code, not whatever launched VS Code. `explorer.exe` is the one
-    // deliberate exception: it sits above nearly everything ever launched from
-    // the shell, and its windows are never the host.
-    //
-    // Identity finds the *process*, and Windows Terminal hosts every one of
-    // its windows in a single process — that is what lets a tab be dragged out
-    // into a window of its own. So a matching pid can own several terminal
-    // windows, and which of them holds the agent is not something any
-    // window-level API can say: their titles are whatever tab each has in
-    // front. Taking the topmost raised the wrong window whenever the tab had
-    // been torn out. All of the pid's terminal windows are kept, and the tab
-    // is what chooses between them, below.
     let own_pid = own_process_id();
-    let mut found: Option<(Vec<&Candidate>, Option<String>)> = None;
-    for ancestor in ancestors {
-        let of_this_pid =
-            |window: &&Candidate| window.process_id == ancestor.pid && window.process_id != own_pid;
-        let identity = match &ancestor.exe {
+    let mut hosts = Vec::new();
+    for ancestor in &target.ancestors {
+        let identified = match &ancestor.exe {
             Some(recorded) => {
                 if recorded.eq_ignore_ascii_case("explorer.exe") {
                     continue;
                 }
-                let Some(current) = exe_basename_of_pid(ancestor.pid) else {
-                    continue; // the process is gone
-                };
-                if !current.eq_ignore_ascii_case(recorded) {
-                    continue; // the pid was recycled onto something else
+                if !exe_basename_of_pid(ancestor.pid)
+                    .is_some_and(|exe| exe.eq_ignore_ascii_case(recorded))
+                {
+                    continue;
                 }
-                Some(current)
+                true
             }
-            // An old hook recorded no name, so there is no identity to check:
-            // exactly the old rule, terminal classes only.
-            None => None,
+            None => false,
         };
-        let hosts = hosts_of(windows.iter().filter(of_this_pid), identity.is_some());
+        hosts = hosts_of(
+            windows
+                .iter()
+                .filter(|w| w.process_id == ancestor.pid && w.process_id != own_pid),
+            identified,
+        );
         if !hosts.is_empty() {
-            found = Some((hosts, identity));
             break;
         }
     }
-    let Some((hosts, found_exe)) = found else {
-        return Report::failed(
-            "no window found for that agent — it may have closed, or its ancestry \
-             is stale (restart the agent to refresh it)",
-        );
-    };
-
-    // Several windows of one Terminal process: read each one's tabs, once, and
-    // let the tab decide which window is the agent's. One window — a console,
-    // a desktop app, a Terminal with nothing torn out — costs no UIA call here.
-    let snapshot: Vec<TabbedWindow> = if hosts.len() > 1 {
+    if hosts.is_empty() {
+        // Recover incomplete/stale WSL ancestry using unique evidence only.
+        // Never select a bystander's application or the first terminal window.
+        hosts = windows
+            .iter()
+            .filter(|w| {
+                w.class_name == TERMINAL_WINDOW_CLASS
+                    && exe_basename_of_pid(w.process_id)
+                        .is_some_and(|exe| exe.eq_ignore_ascii_case("WindowsTerminal.exe"))
+            })
+            .collect();
+    }
+    if hosts.is_empty() {
+        return Report::failed("no live terminal window found for this agent");
+    }
+    if hosts[0].class_name != TERMINAL_WINDOW_CLASS {
+        let host = hosts[0];
+        return if bring_forward(HWND(host.hwnd as *mut c_void)) {
+            Report::raised(host.hwnd, format!("raised {}", host.title))
+        } else {
+            Report::failed("Windows refused to bring the agent window forward")
+        };
+    }
+    let key = (
+        target.source.clone(),
+        target
+            .terminal_id
+            .as_ref()
+            .unwrap_or(&target.session_id)
+            .clone(),
+    );
+    let cache = BINDINGS.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let collect = || -> Vec<LocatedTab> {
         hosts
             .iter()
-            .enumerate()
-            .map(|(index, host)| {
-                let tabs = uia_tabs::tabs(HWND(host.hwnd as *mut c_void));
-                TabbedWindow {
-                    index,
-                    selected: tabs
-                        .iter()
-                        .find(|tab| tab.selected)
-                        .map(|tab| tab.name.clone()),
-                    tabs: tabs.into_iter().map(|tab| tab.name).collect(),
-                }
+            .flat_map(|host| {
+                let born = process_birth(host.process_id);
+                uia_tabs::tabs(HWND(host.hwnd as *mut c_void))
+                    .into_iter()
+                    .map(move |tab| LocatedTab {
+                        window: host.hwnd,
+                        pid: host.process_id,
+                        born,
+                        tab,
+                    })
             })
             .collect()
-    } else {
-        Vec::new()
     };
-    let found = hosts[choose(&snapshot, tab_names)];
-
-    let hwnd = HWND(found.hwnd as *mut c_void);
-    // Only Windows Terminal has tabs to select; a console host is one session
-    // in one window, so raising it is the whole job.
-    let tabbed = found.class_name == TERMINAL_WINDOW_CLASS;
-    // Name the host by the tab we are after: a terminal's title is whatever tab
-    // is in front, so its current title says nothing useful. A console keeps
-    // its own title.
-    let what = if tabbed {
-        tab_names
-            .first()
-            .cloned()
-            .unwrap_or_else(|| found.title.clone())
-    } else {
-        found.title.clone()
+    let tabs = collect();
+    let remember = |found: &LocatedTab, method| {
+        let report = activate(found, method);
+        if report.target_selected
+            && let Some(born) = found.born
+            && let Ok(mut cache) = cache.lock()
+        {
+            // Runtime ids and HWNDs never go on disk. A different Terminal
+            // process lifetime cannot inherit a previous association.
+            if cache.len() >= 256 {
+                cache.clear();
+            }
+            cache.insert(
+                key.clone(),
+                Binding {
+                    window: found.window,
+                    pid: found.pid,
+                    born,
+                    id: found.tab.id.clone(),
+                },
+            );
+        }
+        report
     };
-    if !bring_forward(hwnd) {
-        // Genuinely refused: flash the taskbar so the window can still be
-        // found, and say so rather than claiming it came forward.
-        // SAFETY: FFI with a handle from the enumeration above.
-        let _ = unsafe { FlashWindow(hwnd, true) };
-        let reason = if unsafe { IsIconic(hwnd) }.as_bool() {
-            format!("{what} would not restore from minimized — flashed it in the taskbar")
-        } else {
-            format!("Windows refused to bring {what} forward")
-        };
-        return Report::failed(reason);
+    if let Some(found) = named(&tabs, target.custom_name.as_deref()) {
+        return remember(found, "custom name");
+    }
+    let binding = cache.lock().ok().and_then(|cache| cache.get(&key).cloned());
+    if let Some(found) = binding.as_ref().and_then(|binding| cached(&tabs, binding)) {
+        return remember(found, "remembered tab");
+    }
+    if let Ok(mut cache) = cache.lock() {
+        cache.remove(&key);
+    }
+    let title = super::console::title(&target.ancestors);
+    if let Some(found) = named(&tabs, title.as_deref()) {
+        return remember(found, "console title");
     }
 
-    // A console host has one session and no tabs; raising it is everything.
-    // A desktop-app host (Claude, Codex, an IDE) likewise — there is no tab
-    // concept, so say what was raised, exe and all, and be done.
-    if !tabbed {
-        let detail = match &found_exe {
-            Some(exe) if !is_terminal_class(&found.class_name) => {
-                format!("raised {what} ({exe})")
+    // A custom Terminal tab label can hide the running console's title.
+    // Inspect the TermControl HelpText of each tab, not its text buffer. This
+    // happens only on an explicit summon, never on background hook traffic.
+    let original_foreground = unsafe { GetForegroundWindow() };
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let mut originals = Vec::new();
+    let mut inspected = Vec::new();
+    let mut matches = Vec::new();
+    let mut complete = true;
+    let mut count = 0;
+    for host in &hosts {
+        let hwnd = HWND(host.hwnd as *mut c_void);
+        let before = uia_tabs::tabs(hwnd).into_iter().find(|tab| tab.selected);
+        if !bring_forward(hwnd) {
+            complete = false;
+            continue;
+        }
+        let snapshot = settled_tabs(hwnd, None);
+        let original = before.or_else(|| snapshot.iter().find(|tab| tab.selected).cloned());
+        if let Some(original) = original {
+            originals.push((hwnd, original.id));
+        }
+        if snapshot.is_empty() {
+            complete = false;
+        }
+        for tab in snapshot {
+            let found = LocatedTab {
+                window: host.hwnd,
+                pid: host.process_id,
+                born: process_birth(host.process_id),
+                tab,
+            };
+            inspected.push(found.clone());
+            if let Some(title) = title.as_deref() {
+                if count >= 24 || Instant::now() >= deadline {
+                    complete = false;
+                    continue;
+                }
+                count += 1;
+                if !settle_tab(hwnd, &found.tab.id) {
+                    complete = false;
+                    continue;
+                }
+                // A fresh selection can retain the old accessibility tree for
+                // a frame. Require a stable selected id and title observation.
+                std::thread::sleep(TAB_RETRY_STEP);
+                let titles = uia_tabs::console_titles(hwnd);
+                if titles.len() == 1 && titles[0] == title {
+                    matches.push(found.clone());
+                }
             }
-            _ => format!("raised {what}"),
-        };
-        return Report::raised(found.hwnd, detail);
-    }
-    // Never skip the window raise. `GetForegroundWindow` can name a terminal
-    // that is still visibly behind another window, which made the old
-    // "already in front" shortcut a silent no-op. Once it is raised, read one
-    // coherent picture of its tabs and resolve the best name that is actually
-    // there. The order is strict: a selected project fallback must never beat
-    // the lane's own tab merely because it was already showing. That was the
-    // same-folder bug — Claude and Codex both accepted `ai-agent-keeb` and
-    // neither ever tried its unique lane name.
-    let tabs = settled_tabs(hwnd, tab_names.first().map(String::as_str));
-    let selected = tabs
-        .iter()
-        .find(|tab| tab.selected)
-        .map(|tab| tab.name.clone());
-    let present: Vec<String> = tabs.into_iter().map(|tab| tab.name).collect();
-    match resolve_tab(tab_names, &present, selected.as_deref()) {
-        TabResolution::Already(name) => {
-            return Report::raised(
-                found.hwnd,
-                format!("raised, already showing the {name} tab"),
-            );
         }
-        TabResolution::Select(name) => {
-            // Order matters: selecting a tab in a window nobody can see changes
-            // what is in front of nothing. Once the best present name is known,
-            // never fall through to a lower-priority name if selection fails.
-            if settle_tab(hwnd, name) {
-                return Report::raised(found.hwnd, format!("raised, showing the {name} tab"));
-            }
-            return Report::raised(
-                found.hwnd,
-                format!("raised the terminal and found the {name} tab, but could not select it"),
-            );
-        }
-        TabResolution::Missing => {}
     }
-    // Half of what was asked for, and worth saying: the user is looking at the
-    // right terminal showing the wrong agent. Naming the lane after its tab is
-    // what fixes it, which is why a lane has a name — so the message names the
-    // tabs that are actually there rather than leaving it to be guessed. With
-    // several windows the snapshot already holds every tab of every one of
-    // them; with one, read it now.
-    if snapshot.is_empty() {
-        if present.is_empty() {
-            return Report::raised(
-                found.hwnd,
-                "raised the terminal; its tabs could not be read",
-            );
-        }
-        return Report::raised(
-            found.hwnd,
-            format!(
-                "raised the terminal, but no tab is called {}. Its tabs: {}",
-                tab_names.join(" or "),
-                present.join(", ")
-            ),
-        );
+    for (hwnd, id) in &originals {
+        let _ = uia_tabs::select_tab(*hwnd, id);
     }
-    Report::raised(found.hwnd, no_such_tab(tab_names, &snapshot))
+    // Recheck a dynamic console title before trusting the completed scan.
+    let title_stable = title.is_some() && super::console::title(&target.ancestors) == title;
+    if complete
+        && title_stable
+        && let Some(found) = unique(matches.iter())
+    {
+        return remember(found, "live console");
+    }
+    // Minimized windows may only have exposed their tab labels during the
+    // scan. A custom name still wins once the full snapshot is available.
+    if let Some(found) = named(&inspected, target.custom_name.as_deref()) {
+        return remember(found, "custom name");
+    }
+    if matches.is_empty()
+        && let Some(found) = named(&inspected, target.project.as_deref())
+    {
+        return remember(found, "project");
+    }
+    if !original_foreground.0.is_null() {
+        let _ = bring_forward(original_foreground);
+    }
+    Report::failed(if matches.len() > 1 {
+        "multiple terminal tabs match this agent; no tab selected"
+    } else if !complete {
+        "terminal discovery was incomplete; press Focus again"
+    } else {
+        "the agent terminal could not be identified from its live console or project"
+    })
 }
 
 /// The windows of one ancestor worth raising, best first.
@@ -357,99 +456,6 @@ fn hosts_of<'a>(
         })
         .into_iter()
         .collect()
-}
-
-/// One terminal window's tabs, read once, for choosing between the several
-/// windows of a Terminal process.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct TabbedWindow {
-    /// Position in the host list, so choosing needs no window handle.
-    index: usize,
-    /// The tab in front, when it could be read.
-    selected: Option<String>,
-    /// Every tab, in the window's order. Empty means *unread*, not tabless: a
-    /// window that has not been drawn since it went to the back can answer
-    /// with nothing, and so can a minimized one.
-    tabs: Vec<String>,
-}
-
-/// What the post-raise tab snapshot says to do.
-///
-/// The references are into `tab_names`, whose order is the product contract:
-/// the lane's chosen name first, the project folder only as a fallback.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TabResolution<'a> {
-    Already(&'a str),
-    Select(&'a str),
-    Missing,
-}
-
-/// Resolves the highest-priority requested name that is actually present.
-///
-/// `selected` is considered only after that resolution. Looking at it first
-/// was subtly wrong: when two agents shared a folder, the wrong selected tab's
-/// project title matched the fallback and short-circuited the unique lane tab.
-fn resolve_tab<'a>(
-    tab_names: &'a [String],
-    present: &[String],
-    selected: Option<&str>,
-) -> TabResolution<'a> {
-    let Some(name) = tab_names.iter().find(|name| present.contains(name)) else {
-        return TabResolution::Missing;
-    };
-    if selected == Some(name.as_str()) {
-        TabResolution::Already(name)
-    } else {
-        TabResolution::Select(name)
-    }
-}
-
-/// Which of several terminal windows to raise for `tab_names`: its index.
-///
-/// Names are tried in order — the lane's first, since that is the one the user
-/// controls — and for each, a window already showing it beats one merely
-/// containing it, so the raise lands on a tab that needs no re-selecting. When
-/// nothing matches, the first window: it is the topmost, which is exactly the
-/// rule for a process that owns one window, and the report then says which
-/// tabs were there. An empty list — nothing read from any window — gives the
-/// same, for the same reason.
-fn choose(windows: &[TabbedWindow], tab_names: &[String]) -> usize {
-    for name in tab_names {
-        let showing = windows
-            .iter()
-            .find(|window| window.selected.as_deref() == Some(name.as_str()));
-        let holding = || windows.iter().find(|window| window.tabs.contains(name));
-        if let Some(window) = showing.or_else(holding) {
-            return window.index;
-        }
-    }
-    windows.first().map_or(0, |window| window.index)
-}
-
-/// The report for a raise that found no tab called any of `tab_names` in any
-/// of several windows: every tab of every window, so the user can see what is
-/// there — grouped by window, in the order they were stacked.
-fn no_such_tab(tab_names: &[String], windows: &[TabbedWindow]) -> String {
-    let readable: Vec<String> = windows
-        .iter()
-        .filter(|window| !window.tabs.is_empty())
-        .map(|window| window.tabs.join(", "))
-        .collect();
-    if readable.is_empty() {
-        return "raised the terminal; its tabs could not be read".to_owned();
-    }
-    let mut detail = format!(
-        "raised the terminal, but no tab is called {} in any of its {} windows. Their tabs: {}",
-        tab_names.join(" or "),
-        windows.len(),
-        readable.join("; ")
-    );
-    let unreadable = windows.len() - readable.len();
-    if unreadable > 0 {
-        let plural = if unreadable == 1 { "" } else { "s" };
-        detail.push_str(&format!("; {unreadable} window{plural} unreadable"));
-    }
-    detail
 }
 
 /// How often a restore is re-checked. Restoring is animated and runs on the
@@ -704,7 +710,7 @@ fn settled_tabs(hwnd: HWND, first_choice: Option<&str>) -> Vec<uia_tabs::Tab> {
 /// This blocks for as long as it runs, which is deliberate and bounded: focus
 /// is something a person does a few times a minute, and the alternative is
 /// reporting a success they can see is not one.
-fn settle_tab(hwnd: HWND, tab: &str) -> bool {
+fn settle_tab(hwnd: HWND, tab: &[i32]) -> bool {
     for attempt in 0..TAB_ATTEMPTS {
         if attempt > 0 {
             std::thread::sleep(TAB_RETRY_STEP);
@@ -716,6 +722,14 @@ fn settle_tab(hwnd: HWND, tab: &str) -> bool {
         // tab worth selecting for the next time it does.
         if !in_front && attempt + 1 < TAB_ATTEMPTS {
             continue;
+        }
+        // Selecting an already selected tab can move keyboard focus onto
+        // the tab strip, making the next answer key operate on tabs.
+        if uia_tabs::tabs(hwnd)
+            .iter()
+            .any(|found| found.selected && found.id == tab)
+        {
+            return true;
         }
         if uia_tabs::select_tab(hwnd, tab) {
             return true;
@@ -785,181 +799,56 @@ pub fn type_key(window: isize, key: Key) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{TabResolution, TabbedWindow, choose, no_such_tab, resolve_tab};
+    use super::*;
 
-    fn window(index: usize, tabs: &[&str], selected: Option<&str>) -> TabbedWindow {
-        TabbedWindow {
-            index,
-            selected: selected.map(str::to_owned),
-            tabs: tabs.iter().map(|tab| (*tab).to_owned()).collect(),
+    fn tab(window: isize, name: &str, id: i32) -> LocatedTab {
+        LocatedTab {
+            window,
+            pid: 100,
+            born: Some(10),
+            tab: uia_tabs::Tab {
+                name: name.to_owned(),
+                selected: false,
+                id: vec![id],
+            },
         }
     }
 
-    fn names(names: &[&str]) -> Vec<String> {
-        names.iter().map(|name| (*name).to_owned()).collect()
+    #[test]
+    fn duplicate_titles_are_ambiguous_even_in_different_windows() {
+        let mut tabs = vec![tab(1, "project", 1), tab(2, "project", 2)];
+        tabs[0].tab.selected = true;
+        assert!(named(&tabs, Some("project")).is_none());
+        assert!(named(&tabs, Some("missing")).is_none());
     }
 
     #[test]
-    fn a_selected_project_fallback_never_beats_the_lane_tab() {
-        let present = names(&["ai-agent-keeb", "Claude", "Codex"]);
+    fn live_title_does_not_require_a_lane_name() {
+        let tabs = vec![tab(1, "Claude: task | repo", 1), tab(2, "repo", 2)];
+        assert!(named(&tabs, None).is_none());
         assert_eq!(
-            resolve_tab(
-                &names(&["Claude", "ai-agent-keeb"]),
-                &present,
-                Some("ai-agent-keeb")
-            ),
-            TabResolution::Select("Claude")
-        );
-        assert_eq!(
-            resolve_tab(
-                &names(&["Codex", "ai-agent-keeb"]),
-                &present,
-                Some("ai-agent-keeb")
-            ),
-            TabResolution::Select("Codex")
+            named(&tabs, Some("Claude: task | repo")).map(|t| t.tab.id.clone()),
+            Some(vec![1])
         );
     }
 
     #[test]
-    fn the_best_available_tab_alone_can_be_already_showing() {
-        let present = names(&["ai-agent-keeb", "Claude"]);
-        assert_eq!(
-            resolve_tab(
-                &names(&["Claude", "ai-agent-keeb"]),
-                &present,
-                Some("Claude")
-            ),
-            TabResolution::Already("Claude")
-        );
-
-        let fallback_only = names(&["ai-agent-keeb"]);
-        assert_eq!(
-            resolve_tab(
-                &names(&["Claude", "ai-agent-keeb"]),
-                &fallback_only,
-                Some("ai-agent-keeb")
-            ),
-            TabResolution::Already("ai-agent-keeb")
-        );
-    }
-
-    #[test]
-    fn a_present_lane_tab_is_the_only_selection_target() {
-        let present = names(&["ai-agent-keeb", "Claude"]);
-        assert_eq!(
-            resolve_tab(
-                &names(&["Claude", "ai-agent-keeb"]),
-                &present,
-                Some("other")
-            ),
-            TabResolution::Select("Claude"),
-            "the caller tries only this result and never falls through"
-        );
-        assert_eq!(
-            resolve_tab(
-                &names(&["Claude", "ai-agent-keeb"]),
-                &names(&["other"]),
-                None,
-            ),
-            TabResolution::Missing
-        );
-    }
-
-    #[test]
-    fn one_window_is_the_window() {
-        let windows = [window(0, &["other"], Some("other"))];
-        assert_eq!(choose(&windows, &names(&["keeb"])), 0);
-    }
-
-    #[test]
-    fn nothing_read_falls_back_to_the_topmost() {
-        assert_eq!(choose(&[], &names(&["keeb"])), 0);
-        let windows = [window(0, &[], None), window(1, &[], None)];
-        assert_eq!(choose(&windows, &names(&["keeb"])), 0);
-    }
-
-    #[test]
-    fn no_match_falls_back_to_the_topmost() {
-        let windows = [window(0, &["a"], Some("a")), window(1, &["b"], Some("b"))];
-        assert_eq!(choose(&windows, &names(&["keeb"])), 0);
-        assert_eq!(choose(&windows, &[]), 0);
-    }
-
-    #[test]
-    fn a_window_holding_the_tab_beats_the_topmost() {
-        let windows = [
-            window(0, &["a"], Some("a")),
-            window(1, &["b", "keeb"], Some("b")),
-        ];
-        assert_eq!(choose(&windows, &names(&["keeb"])), 1);
-    }
-
-    #[test]
-    fn a_window_showing_the_tab_beats_one_merely_holding_it() {
-        // Two lanes on one project, unnamed, share a tab title: the one in
-        // front needs no re-selecting, so it wins.
-        let windows = [
-            window(0, &["keeb", "x"], Some("x")),
-            window(1, &["keeb"], Some("keeb")),
-        ];
-        assert_eq!(choose(&windows, &names(&["keeb"])), 1);
-    }
-
-    #[test]
-    fn the_lane_name_beats_the_project_name_in_another_window() {
-        // Window 0 shows the project; window 1 merely holds the lane's name.
-        // The lane's name is the one the user chose, so it wins anyway.
-        let windows = [
-            window(0, &["ai-agent-keeb"], Some("ai-agent-keeb")),
-            window(1, &["x", "keeb"], Some("x")),
-        ];
-        assert_eq!(choose(&windows, &names(&["keeb", "ai-agent-keeb"])), 1);
-    }
-
-    #[test]
-    fn a_later_window_with_the_first_name_beats_an_earlier_one_with_the_second() {
-        let windows = [
-            window(0, &["proj"], Some("proj")),
-            window(1, &["lane"], None),
-        ];
-        assert_eq!(choose(&windows, &names(&["lane", "proj"])), 1);
-    }
-
-    #[test]
-    fn report_lists_every_window_grouped() {
-        let windows = [
-            window(0, &["a", "b"], Some("a")),
-            window(1, &["c"], Some("c")),
-        ];
-        assert_eq!(
-            no_such_tab(&names(&["keeb", "proj"]), &windows),
-            "raised the terminal, but no tab is called keeb or proj in any of its 2 windows. \
-             Their tabs: a, b; c"
-        );
-    }
-
-    #[test]
-    fn report_counts_windows_it_could_not_read() {
-        let windows = [
-            window(0, &["a"], Some("a")),
-            window(1, &[], None),
-            window(2, &[], None),
-        ];
-        assert_eq!(
-            no_such_tab(&names(&["keeb"]), &windows),
-            "raised the terminal, but no tab is called keeb in any of its 3 windows. \
-             Their tabs: a; 2 windows unreadable"
-        );
-        let one = [window(0, &["a"], Some("a")), window(1, &[], None)];
-        assert!(no_such_tab(&names(&["keeb"]), &one).ends_with("; 1 window unreadable"));
-    }
-
-    #[test]
-    fn report_says_when_nothing_could_be_read() {
-        let windows = [window(0, &[], None), window(1, &[], None)];
-        assert_eq!(
-            no_such_tab(&names(&["keeb"]), &windows),
-            "raised the terminal; its tabs could not be read"
-        );
+    fn cached_identity_survives_rename_but_not_recycled_process_or_closed_tab() {
+        let tabs = vec![tab(1, "new title", 7)];
+        let mut binding = Binding {
+            window: 1,
+            pid: 100,
+            born: 10,
+            id: vec![7],
+        };
+        assert!(cached(&tabs, &binding).is_some());
+        binding.born = 9;
+        assert!(cached(&tabs, &binding).is_none());
+        binding.born = 10;
+        binding.id = vec![8];
+        assert!(cached(&tabs, &binding).is_none());
+        binding.id = vec![7];
+        binding.window = 2;
+        assert!(cached(&tabs, &binding).is_none());
     }
 }

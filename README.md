@@ -46,8 +46,8 @@ it.
   the agent it shows — send one Up, Down or Enter, only into a terminal that
   verifiably has the keyboard. The agents
   talk to it over loopback on your machine, and nothing leaves it. Of Claude's
-  status-line JSON, three percentages reach the app — context used, the
-  five-hour and seven-day limits — and the JSON goes on to your own status
+  status-line JSON, the current and launch folders and three percentages reach
+  the app — context used, the five-hour and seven-day limits — and the JSON goes on to your own status
   line untouched.
 
 ## What you see
@@ -63,12 +63,16 @@ means trouble, and red means Error and nothing else.
 | State | On the keys | Meaning |
 |---|---|---|
 | Connected | all keys, dim | alive, nothing run yet |
-| Running | one light sweeping along the lane | working |
+| Running | a group of lights sweeping along the lane, one per agent | working |
 | Waiting | first key full, the three after it double-pulsing — those are ▲ ▼ Enter | **needs you** — a permission prompt or a question |
 | Done | first key full, the rest dim | the turn finished |
 | Error | first key full, the rest dark red | the turn failed |
 | Idle | first key dim, the rest off | nothing heard for a while |
 | empty | off | no agent on this lane |
+
+Running counts the main agent plus its active subagents, capped at the lane's
+key count. The group moves through the keys and one extra off-lane slot, so
+four keys show `Oooo`, `OOoo`, `OOOo`, or `OOOO` at the start of each cycle.
 
 On the numpad an agent is one key, so the M column says the same thing with
 less: Connected and Idle rest dim, Running breathes, Waiting double-pulses,
@@ -105,6 +109,17 @@ starts it lands there if the lane is free, otherwise on another lane. The
 saved roster lists the ones that are not running, and is where you change a
 preference or forget it.
 
+Choose **Any lane** for no preferred position. **Add to lane** places a saved
+agent on a free lane as **Idle**, reserving that slot before the agent starts.
+Its matching session takes over the slot when it arrives. The reservation
+survives app restarts and returns to Idle when the session ends; **Release**
+frees it. If all lanes are occupied or reserved, free a slot or add more lanes.
+
+The project stays tied to the agent's launch folder when it works in a
+subfolder, including after the app restarts. Subagents cannot change their
+parent's project. Hover over the project label to see the launch folder and,
+when different, the current working folder.
+
 **Mini mode.** The *Mini mode* button, or a double-click on a lane or an
 off-keyboard card, folds the window down to a Stream Deck's picture of the
 agents: one row per agent with a session — lanes first, then the off-keyboard
@@ -127,9 +142,12 @@ came forward: the answer keys — on the keyboard or a Stream Deck — send thei
 one key only after Windows says the terminal has the keyboard, and otherwise
 say "press again".
 
-The tab it looks for is the lane's name, then the project folder — so naming a
-lane is a feature. If no tab matches, it says so and lists the tabs it found,
-rather than leaving you looking at the wrong agent.
+Focus discovers the running console automatically and remembers its live tab,
+including when the tab has a custom title. A lane name is an optional matching
+preference; the project folder is a fallback. Discovery can briefly inspect
+other tabs on the first press. If several tabs remain indistinguishable, the
+app reports that instead of choosing one. Answer keys require the agent's
+specific tab to be selected.
 
 **Waiting can remain after you respond**, until the agent reports more
 activity, and Error cannot be shown for Codex. The window states these
@@ -264,12 +282,29 @@ one; see [gauge limitations](KNOWN_ISSUES.md#known-limitations-and-workarounds).
 
 ## Building from source
 
-Rust on Windows. `cargo build --release`, then
-`target\release\agent-frow.exe install` — the app runs from `%LOCALAPPDATA%`,
-and only `install` puts a build there. For Corsair lighting, unzip Corsair's
-iCUE SDK (not committed; its own license) at `<repo>/iCUESDK`; Keychron needs
-nothing extra. `dist.ps1` builds `dist/agent-frow-<version>-win64.zip`,
-including the V0 Launcher keymap, and writes a `.zip.sha256` checksum beside it.
+Keep one source checkout and use the Windows toolchain. The build script takes
+an explicit output folder, separate from the source and installed app:
+
+```powershell
+.\build.ps1 -OutputRoot C:\dev\ai-agent-keeb
+```
+
+The default runs workspace tests, builds both release executables, installs
+them into `%LOCALAPPDATA%\agent-frow`, and restarts and verifies that copy.
+Use `-Mode Build` to compile without installing, or `-Mode Test` for tests only.
+Build outputs live under the output folder's `target`; versioned release ZIPs
+live under its `dist`. This folder must not contain another Git checkout.
+
+From WSL, run the same script with **Windows** PowerShell:
+
+```bash
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w ./build.ps1)" -OutputRoot 'C:\dev\ai-agent-keeb'
+```
+
+For Corsair lighting, keep the iCUE SDK (not committed; its own license) at
+`<source>/iCUESDK`; Keychron needs nothing extra. Package a new release with
+`.\dist.ps1 -OutputRoot C:\dev\ai-agent-keeb`. It includes the V0 keymap and
+a SHA256 checksum, and refuses to overwrite an existing release.
 
 How it all works — the hook, the state machine, lane placement, the lighting,
 focus — is in [docs/how-it-works.md](docs/how-it-works.md); the reasons behind

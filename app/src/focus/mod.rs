@@ -30,11 +30,26 @@
 //! "the right tab is in front", and the user can see which they got.
 
 #[cfg(windows)]
+mod console;
+#[cfg(windows)]
 mod input;
+#[cfg(windows)]
+mod journal;
 #[cfg(windows)]
 mod uia_tabs;
 #[cfg(windows)]
 mod window;
+
+/// A foreground agent's identity, shared by every focus/answer entry point.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FocusTarget {
+    pub source: String,
+    pub session_id: String,
+    pub terminal_id: Option<String>,
+    pub ancestors: Vec<crate::event::Ancestor>,
+    pub custom_name: Option<String>,
+    pub project: Option<String>,
+}
 
 /// How well a focus request went, in the user's words.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +59,11 @@ pub struct Report {
     /// keystroke may then be sent to, once it is verified to have the
     /// keyboard.
     pub window: Option<isize>,
+    /// The selected tab's live UIA identity. None for a non-tabbed host.
+    pub tab_id: Option<Vec<i32>>,
+    /// A raised window alone is not permission to send an answer.
+    pub target_selected: bool,
+    pub method: &'static str,
     pub detail: String,
 }
 
@@ -52,6 +72,9 @@ impl Report {
         Self {
             raised: false,
             window: None,
+            tab_id: None,
+            target_selected: false,
+            method: "unresolved",
             detail: detail.into(),
         }
     }
@@ -61,6 +84,9 @@ impl Report {
         Self {
             raised: true,
             window: Some(window),
+            tab_id: None,
+            target_selected: true,
+            method: "host",
             detail: detail.into(),
         }
     }
@@ -117,21 +143,52 @@ pub fn type_key(_window: isize, _key: Key) -> Result<String, String> {
     Err("typing is a Windows facility".to_owned())
 }
 
-/// Raises the host window that ran `ancestors`, and — when the host is a
-/// terminal — puts `tab_names` in front of it if one of them is a tab there.
-///
-/// `tab_names` are tried in order — the lane's name first, since that is the
-/// one the user chose and the one they can make match. Nothing here guesses
-/// from a window title: a name that matches nothing leaves the window raised
-/// and says the tab was not selected.
+/// Raises the agent's host and resolves its exact terminal tab automatically.
+/// A custom lane name is optional; a window-only result cannot receive keys.
 #[cfg(windows)]
-pub fn raise(ancestors: &[crate::event::Ancestor], tab_names: &[String]) -> Report {
-    window::raise(ancestors, tab_names)
+pub fn raise(target: &FocusTarget) -> Report {
+    let report = window::raise(target);
+    journal::record(target, &report);
+    report
 }
 
 #[cfg(not(windows))]
-pub fn raise(_ancestors: &[crate::event::Ancestor], _tab_names: &[String]) -> Report {
+pub fn raise(_target: &FocusTarget) -> Report {
     Report::failed("focus is a Windows facility")
+}
+
+/// Recheck the exact tab immediately before the existing input safeguards.
+pub fn answer(report: &Report, key: Key) -> Result<String, String> {
+    if !report.target_selected {
+        return Err("the agent tab was not identified — no answer sent".to_owned());
+    }
+    let Some(window) = report.window else {
+        return Err("no agent window selected".to_owned());
+    };
+    #[cfg(windows)]
+    if let Some(id) = &report.tab_id {
+        use windows::Win32::Foundation::HWND;
+        if !uia_tabs::tabs(HWND(window as *mut core::ffi::c_void))
+            .iter()
+            .any(|tab| tab.selected && &tab.id == id)
+        {
+            return Err("the selected tab changed — no answer sent".to_owned());
+        }
+    }
+    type_key(window, key)
+}
+
+/// Internal read-only helper; never called by an agent's hook registration.
+pub fn probe_console_command(args: &[&str]) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        console::command(args)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = args;
+        Err("console probing is a Windows facility".to_owned())
+    }
 }
 
 #[cfg(test)]
@@ -163,5 +220,20 @@ mod tests {
                 .contains("press again"),
             "the foreground is the first question"
         );
+    }
+
+    #[test]
+    fn a_raised_window_without_an_identified_tab_cannot_receive_an_answer() {
+        let report = Report {
+            raised: true,
+            window: Some(123),
+            tab_id: None,
+            target_selected: false,
+            method: "unresolved",
+            detail: String::new(),
+        };
+        for key in [Key::Up, Key::Down, Key::Enter] {
+            assert!(answer(&report, key).unwrap_err().contains("no answer sent"));
+        }
     }
 }

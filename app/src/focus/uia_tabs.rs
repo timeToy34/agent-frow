@@ -21,11 +21,15 @@ use windows::Win32::Foundation::{HWND, RPC_E_CHANGED_MODE};
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
 };
+use windows::Win32::System::Ole::{
+    SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetElement, SafeArrayGetLBound, SafeArrayGetUBound,
+};
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationSelectionItemPattern,
-    IUIAutomationVirtualizedItemPattern, TreeScope_Descendants, UIA_ControlTypePropertyId,
-    UIA_SelectionItemPatternId, UIA_TabItemControlTypeId, UIA_VirtualizedItemPatternId,
+    IUIAutomationVirtualizedItemPattern, TreeScope_Descendants, UIA_ClassNamePropertyId,
+    UIA_ControlTypePropertyId, UIA_SelectionItemPatternId, UIA_TabItemControlTypeId,
+    UIA_VirtualizedItemPatternId,
 };
 
 /// The window class Windows Terminal hosts its tabs in. Checked before any UIA
@@ -82,6 +86,37 @@ impl Drop for Apartment {
 pub struct Tab {
     pub name: String,
     pub selected: bool,
+    pub id: Vec<i32>,
+}
+
+fn runtime_id(element: &IUIAutomationElement) -> Option<Vec<i32>> {
+    // SAFETY: UIA owns the returned allocation until transferred to us;
+    // every path destroys it. Runtime ids are one-dimensional VT_I4 arrays.
+    unsafe {
+        let array = element.GetRuntimeId().ok()?;
+        if array.is_null() {
+            return None;
+        }
+        let result = (|| {
+            if SafeArrayGetDim(array) != 1 {
+                return None;
+            }
+            let lo = SafeArrayGetLBound(array, 1).ok()?;
+            let hi = SafeArrayGetUBound(array, 1).ok()?;
+            if !(0..64).contains(&hi.saturating_sub(lo)) {
+                return None;
+            }
+            let mut id = Vec::new();
+            for index in lo..=hi {
+                let mut value = 0i32;
+                SafeArrayGetElement(array, &index, (&mut value as *mut i32).cast()).ok()?;
+                id.push(value);
+            }
+            Some(id)
+        })();
+        let _ = SafeArrayDestroy(array);
+        result
+    }
 }
 
 /// Every tab in `hwnd`, in the order the window presents them.
@@ -124,17 +159,21 @@ pub fn tabs(hwnd: HWND) -> Vec<Tab> {
                     .and_then(|select| select.CurrentIsSelected())
                     .map(|selected| selected.as_bool())
                     .unwrap_or(false);
-                Some(Tab { name, selected })
+                Some(Tab {
+                    name,
+                    selected,
+                    id: runtime_id(tab)?,
+                })
             })
             .collect()
     }
 }
 
-/// Selects the tab named `name` in `hwnd`. Returns whether it was selected.
+/// Selects the tab with this runtime `id`, including duplicate/changed titles.
 ///
 /// The window still has to be raised separately; selecting a tab in a window
 /// nobody can see changes what is in front of nothing.
-pub fn select_tab(hwnd: HWND, name: &str) -> bool {
+pub fn select_tab(hwnd: HWND, id: &[i32]) -> bool {
     let Some(_apartment) = Apartment::enter() else {
         return false;
     };
@@ -149,12 +188,7 @@ pub fn select_tab(hwnd: HWND, name: &str) -> bool {
         };
         for tab in tab_elements(&automation, &window) {
             realize(&tab);
-            let Ok(tab_name) = tab.CurrentName() else {
-                continue;
-            };
-            // BSTR compares against &str directly; going through String
-            // would allocate a copy of every tab name just to throw it away.
-            if tab_name != name {
+            if runtime_id(&tab).as_deref() != Some(id) {
                 continue;
             }
             let Ok(select) = tab.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
@@ -176,6 +210,36 @@ pub fn select_tab(hwnd: HWND, name: &str) -> bool {
                 .unwrap_or(false);
         }
         false
+    }
+}
+
+/// The active pane's live console title, even when its tab was renamed.
+/// Read accessibility metadata only, never the terminal text buffer.
+pub fn console_titles(hwnd: HWND) -> Vec<String> {
+    let Some(_apartment) = Apartment::enter() else {
+        return Vec::new();
+    };
+    // SAFETY: ordinary fallible COM calls; all objects live in this apartment.
+    unsafe {
+        let read = || -> windows::core::Result<Vec<String>> {
+            let automation: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_ALL)?;
+            let window = automation.ElementFromHandle(hwnd)?;
+            let condition = automation
+                .CreatePropertyCondition(UIA_ClassNamePropertyId, &VARIANT::from("TermControl"))?;
+            let controls = window.FindAll(TreeScope_Descendants, &condition)?;
+            let mut titles = Vec::new();
+            for index in 0..controls.Length()?.min(32) {
+                let control = controls.GetElement(index)?;
+                if !control.CurrentIsOffscreen()?.as_bool() {
+                    let title = control.CurrentHelpText()?.to_string();
+                    if !title.trim().is_empty() {
+                        titles.push(title);
+                    }
+                }
+            }
+            Ok(titles)
+        };
+        read().unwrap_or_default()
     }
 }
 

@@ -59,7 +59,7 @@ pub enum Kind {
     Interrupt,
     SessionEnd,
     /// Not a hook: Claude's status line, as the hook's `--status` mode
-    /// reports it — numbers for a session we already hold, never a state.
+    /// reports it — launch identity and numbers, never a state.
     StatusLine,
 }
 
@@ -127,9 +127,14 @@ pub struct Event {
     pub source: String,
     pub kind: Kind,
     pub session_id: String,
+    /// Verified rollout relationship for a child with its own session id.
+    pub parent_session_id: Option<String>,
     /// Codex's main-turn identity, when supplied by the hook.
     pub turn_id: Option<String>,
+    /// Current working directory; it can change during the same session.
     pub cwd: Option<PathBuf>,
+    /// Launch directory recovered from agent metadata or our identity cache.
+    pub project_dir: Option<PathBuf>,
     pub tool_name: Option<String>,
     /// Locally verified evidence, never trusted directly from a hook payload.
     pub codex_approvals_reviewer: Option<ApprovalReviewer>,
@@ -189,6 +194,23 @@ pub enum Parsed {
 }
 
 impl Event {
+    /// Only a fresh main-session start can establish a project from `cwd`.
+    /// Resume and compaction can report a subfolder from the ongoing session.
+    pub fn launch_dir(&self) -> Option<&std::path::Path> {
+        if self.subagent || matches!(self.kind, Kind::SubagentStart | Kind::SubagentStop) {
+            return None;
+        }
+        self.project_dir.as_deref().or_else(|| {
+            (self.kind == Kind::SessionStart
+                && matches!(
+                    self.start_source.as_deref(),
+                    None | Some("startup" | "clear")
+                ))
+            .then_some(self.cwd.as_deref())
+            .flatten()
+        })
+    }
+
     /// Reads one projected payload. `received_ms` is the fallback clock for a
     /// payload with no timestamp of its own.
     pub fn parse(value: &Value, received_ms: u64) -> Parsed {
@@ -248,8 +270,10 @@ impl Event {
             source,
             kind,
             session_id,
+            parent_session_id: text("parent_session_id"),
             turn_id: text("turn_id"),
             cwd: text("cwd").map(PathBuf::from),
+            project_dir: text("project_dir").map(PathBuf::from),
             tool_name: text("tool_name"),
             codex_approvals_reviewer: ApprovalReviewer::parse(&value["codex_approvals_reviewer"]),
             start_source: text("source"),
@@ -258,7 +282,10 @@ impl Event {
                 .get("proposed_plan")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
-            subagent: text("agent_id").is_some() || text("agent_type").is_some(),
+            subagent: text("agent_id").is_some()
+                || text("agent_type").is_some()
+                || value.get("codex_subagent").and_then(Value::as_bool) == Some(true)
+                || text("parent_session_id").is_some(),
             agent: text("agent_id"),
             wt_session: text("wt_session"),
             codex_cli: value.get("codex_cli").and_then(Value::as_bool) == Some(true),

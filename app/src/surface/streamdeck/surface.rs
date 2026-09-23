@@ -159,8 +159,14 @@ pub fn role(col: usize, cols: usize) -> Role {
 /// The colours of one row — the F-row's, with the last key steadied: the
 /// state key holds the lane's resting glow through Waiting's pulse, Error's
 /// red and Done's marker. Everything else is the palette's.
-pub fn row_colors(state: Option<State>, colour: Rgb, cols: usize, elapsed_ms: u64) -> Vec<Rgb> {
-    let mut row = palette::lane_colors(state, colour, cols, elapsed_ms);
+pub fn row_colors(
+    state: Option<State>,
+    colour: Rgb,
+    cols: usize,
+    elapsed_ms: u64,
+    agent_count: usize,
+) -> Vec<Rgb> {
+    let mut row = palette::lane_colors(state, colour, cols, elapsed_ms, agent_count);
     if cols >= 2
         && let Some(last) = row.last_mut()
         && let Some(State::Waiting | State::Error | State::Done) = state
@@ -204,7 +210,7 @@ pub const FREE: &str = "free";
 /// way back to it.
 pub fn captions(tracker: &Tracker, now: u64) -> Vec<Caption> {
     let settings = &tracker.settings;
-    let next_free = (0..settings.lane_count).find(|lane| tracker.on_lane(*lane).is_none());
+    let next_free = (0..settings.lane_count).find(|lane| tracker.lane_state(*lane).is_none());
     (0..settings.lane_count)
         .map(|lane| {
             if let Some(preview) = tracker.preview {
@@ -223,6 +229,19 @@ pub fn captions(tracker: &Tracker, now: u64) -> Vec<Caption> {
                     elapsed: tracker::clock(session.effective_state(), session.since, now),
                     gauges: Some(session.gauges),
                     reason: session.failure,
+                },
+                None if tracker.reservation(lane).is_some() => Caption {
+                    name: settings.display_name(
+                        lane,
+                        tracker
+                            .reservation(lane)
+                            .map(|saved| saved.project())
+                            .as_deref(),
+                    ),
+                    state: Some(State::Idle.label()),
+                    elapsed: String::new(),
+                    gauges: None,
+                    reason: None,
                 },
                 None => Caption {
                     name: if settings.named(lane) {
@@ -275,7 +294,13 @@ pub fn faces(frame: &Frame<'_>, captions: &[Caption], rows: usize, cols: usize) 
             .unwrap_or(palette::OFF);
         let state = frame.states.get(row).copied().flatten();
         let caption = captions.get(row);
-        let colours = row_colors(state, colour, cols, frame.elapsed_ms);
+        let colours = row_colors(
+            state,
+            colour,
+            cols,
+            frame.elapsed_ms,
+            frame.agent_counts.get(row).copied().unwrap_or(0),
+        );
         for col in 0..cols {
             let key_colour = colours.get(col).copied().unwrap_or(palette::OFF);
             // A dark lane is labelled quietly; a lit one in the ink chosen
@@ -667,6 +692,7 @@ mod tests {
             session_id: format!("s{lane}"),
             agent: None,
             cwd: Some(PathBuf::from("C:\\dev\\agent-frow")),
+            current_cwd: None,
             state,
             waiting_reason: (state == State::Waiting).then_some(crate::state::WaitingReason::Other),
             since,

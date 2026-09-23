@@ -17,6 +17,7 @@ pub mod keys;
 pub mod lastseen;
 pub mod lifecycle;
 pub mod paths;
+pub mod projects;
 pub mod settings;
 pub mod state;
 pub mod surface;

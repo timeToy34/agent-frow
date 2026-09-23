@@ -123,6 +123,26 @@ pub fn rows(tracker: &Tracker, now: u64, elapsed_ms: u64) -> Vec<Row> {
     let mut rows = Vec::new();
     for lane in 0..settings.lane_count {
         let Some(session) = tracker.on_lane(lane) else {
+            if let Some(saved) = tracker.reservation(lane) {
+                let name = settings.display_name(lane, Some(&saved.project()));
+                let colour = settings.lanes[lane].color;
+                let state = tick.preview.unwrap_or(State::Idle);
+                let colours = row_colors(
+                    Some(state),
+                    colour,
+                    COLS,
+                    elapsed_ms,
+                    usize::from(tick.preview.is_some()),
+                );
+                rows.push(Row {
+                    keys: faces(state, colour, &name, "", None, None, &colours),
+                    name,
+                    state,
+                    colour,
+                    target: Target::Lane(lane),
+                    off_keyboard: false,
+                });
+            }
             continue;
         };
         let colour = settings
@@ -182,8 +202,15 @@ fn row_of(
         elapsed_ms,
         preview,
     } = tick;
+    let state = preview.unwrap_or_else(|| session.effective_state());
+    let agent_count = if preview.is_some() {
+        1
+    } else {
+        session.agent_count()
+    };
+    let colours = row_colors(Some(state), colour, COLS, elapsed_ms, agent_count);
     let keys = match preview {
-        Some(state) => faces(state, colour, &name, "", None, None, elapsed_ms),
+        Some(state) => faces(state, colour, &name, "", None, None, &colours),
         None => faces(
             session.effective_state(),
             colour,
@@ -191,7 +218,7 @@ fn row_of(
             &tracker::clock(session.effective_state(), session.since, now),
             Some(session.gauges),
             session.failure,
-            elapsed_ms,
+            &colours,
         ),
     };
     Row {
@@ -217,9 +244,8 @@ fn faces(
     elapsed: &str,
     gauges: Option<Gauges>,
     reason: Option<&str>,
-    elapsed_ms: u64,
+    colours: &[Rgb],
 ) -> Vec<Face> {
-    let colours = row_colors(Some(state), colour, COLS, elapsed_ms);
     (0..COLS)
         .map(|col| {
             let key_colour = colours.get(col).copied().unwrap_or(palette::OFF);
@@ -589,6 +615,7 @@ mod tests {
             session_id: format!("s-{}", cwd.replace('/', "-")),
             agent: None,
             cwd: Some(PathBuf::from(cwd)),
+            current_cwd: None,
             state,
             waiting_reason: (state == State::Waiting).then_some(crate::state::WaitingReason::Other),
             since: 0,

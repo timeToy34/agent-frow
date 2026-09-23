@@ -345,15 +345,14 @@ fn subagent_lifecycle_events_never_move_the_main_state() {
 }
 
 #[test]
-fn a_subagents_event_adopts_its_unknown_session_as_connected() {
-    // A background subagent outlives the turn that spawned it, so its events
-    // prove the session is alive and nothing about what the main agent is
-    // doing. The roster is what makes the lane read busy.
+fn a_subagents_event_cannot_adopt_a_foreground_session() {
+    // A child can precede or outlive its parent. Its activity must wait for
+    // a known foreground session instead of inventing a lane.
     let tool = event(
         "PostToolUse",
         json!({ "tool_name": "Grep", "agent_id": "sub-1" }),
     );
-    assert_eq!(state::adopt(&tool), Some(State::Connected));
+    assert_eq!(state::adopt(&tool), None);
 }
 
 #[test]

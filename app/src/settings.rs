@@ -114,9 +114,12 @@ impl AgentFilter {
 pub struct SavedAgent {
     pub agent: AgentFilter,
     pub folder: PathBuf,
-    /// Zero-based, like everything in the code; the file and the window count
-    /// from one.
-    pub lane: usize,
+    /// Preferred zero-based lane. None means Any lane; numbered lanes in the
+    /// file and the window count from one.
+    pub lane: Option<usize>,
+    /// Explicitly held slot, independent of the preferred lane. Remains idle
+    /// between sessions until the user releases it.
+    pub reserved_lane: Option<usize>,
 }
 
 impl SavedAgent {
@@ -335,12 +338,14 @@ impl Settings {
 
     /// Whether any saved agent would rather have this lane.
     pub fn prefers(&self, lane: usize) -> bool {
-        self.saved.iter().any(|entry| entry.lane == lane)
+        self.saved.iter().any(|entry| entry.lane == Some(lane))
     }
 
     /// The saved agents that would rather have this lane, by roster index.
     pub fn preferring(&self, lane: usize) -> impl Iterator<Item = &SavedAgent> {
-        self.saved.iter().filter(move |entry| entry.lane == lane)
+        self.saved
+            .iter()
+            .filter(move |entry| entry.lane == Some(lane))
     }
 
     /// Adds an entry unless an equal `(agent, folder)` is already there.
@@ -424,14 +429,24 @@ pub fn parse(text: &str) -> Result<Settings, String> {
     if let Some(saved) = object.get("saved").and_then(Value::as_array) {
         for entry in saved.iter().filter_map(Value::as_object) {
             // The file counts lanes from one, like the window does.
-            let Some(lane) = entry
-                .get("lane")
-                .and_then(Value::as_u64)
-                .filter(|lane| (1..=MAX_LANES as u64).contains(lane))
-            else {
-                continue;
+            let lane = match entry.get("lane") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(text)) if text.eq_ignore_ascii_case("any") => None,
+                Some(value) => match lane_index(value) {
+                    Some(lane) => Some(lane),
+                    None => continue,
+                },
             };
-            if let Some(entry) = saved_agent(entry, lane as usize - 1) {
+            if let Some(mut entry) = saved_agent(entry, lane) {
+                // A malformed file cannot reserve the same slot twice.
+                if entry.reserved_lane.is_some_and(|lane| {
+                    settings
+                        .saved
+                        .iter()
+                        .any(|saved| saved.reserved_lane == Some(lane))
+                }) {
+                    entry.reserved_lane = None;
+                }
                 settings.remember(entry);
             }
         }
@@ -455,7 +470,7 @@ pub fn parse(text: &str) -> Result<Settings, String> {
             if let Some(legacy) = lane
                 .get("bind")
                 .and_then(Value::as_object)
-                .and_then(|bind| saved_agent(bind, index))
+                .and_then(|bind| saved_agent(bind, Some(index)))
             {
                 settings.remember(legacy);
             }
@@ -466,7 +481,7 @@ pub fn parse(text: &str) -> Result<Settings, String> {
 
 /// One `{"agent": …, "folder": …}` object, preferring `lane`. A missing or
 /// empty folder is no entry at all.
-fn saved_agent(object: &Map<String, Value>, lane: usize) -> Option<SavedAgent> {
+fn saved_agent(object: &Map<String, Value>, lane: Option<usize>) -> Option<SavedAgent> {
     let folder = object.get("folder").and_then(Value::as_str)?;
     if folder.is_empty() {
         return None;
@@ -475,7 +490,15 @@ fn saved_agent(object: &Map<String, Value>, lane: usize) -> Option<SavedAgent> {
         agent: AgentFilter::parse(object.get("agent").and_then(Value::as_str).unwrap_or("any")),
         folder: PathBuf::from(folder),
         lane,
+        reserved_lane: object.get("reserved_lane").and_then(lane_index),
     })
+}
+
+fn lane_index(value: &Value) -> Option<usize> {
+    value
+        .as_u64()
+        .filter(|lane| (1..=MAX_LANES as u64).contains(lane))
+        .map(|lane| lane as usize - 1)
 }
 
 /// `brightness` and `color_gain`, from any object that carries them: the
@@ -559,7 +582,16 @@ pub fn to_json(settings: &Settings) -> String {
                 "folder".to_owned(),
                 Value::String(entry.folder.display().to_string()),
             );
-            out.insert("lane".to_owned(), Value::from(entry.lane + 1));
+            out.insert(
+                "lane".to_owned(),
+                entry
+                    .lane
+                    .map(|lane| Value::from(lane + 1))
+                    .unwrap_or(Value::Null),
+            );
+            if let Some(lane) = entry.reserved_lane {
+                out.insert("reserved_lane".to_owned(), Value::from(lane + 1));
+            }
             Value::Object(out)
         })
         .collect();
@@ -669,12 +701,14 @@ mod tests {
         settings.saved.push(SavedAgent {
             agent: AgentFilter::Codex,
             folder: PathBuf::from(r"C:\dev\thing"),
-            lane: 2,
+            lane: Some(2),
+            reserved_lane: None,
         });
         settings.saved.push(SavedAgent {
             agent: AgentFilter::Any,
             folder: PathBuf::from("/home/j/other"),
-            lane: 5,
+            lane: Some(5),
+            reserved_lane: None,
         });
         settings.settings_open = true;
         settings.mini = true;
@@ -716,7 +750,8 @@ mod tests {
             vec![SavedAgent {
                 agent: AgentFilter::Claude,
                 folder: PathBuf::from(r"C:\dev\thing"),
-                lane: 2,
+                lane: Some(2),
+                reserved_lane: None,
             }]
         );
         // Written back in the new shape only.
@@ -742,7 +777,7 @@ mod tests {
         // is nothing; "/A/" is "/a" again and the first entry keeps its lane.
         assert_eq!(settings.saved.len(), 1);
         assert_eq!(settings.saved[0].folder, PathBuf::from("/a"));
-        assert_eq!(settings.saved[0].lane, 0);
+        assert_eq!(settings.saved[0].lane, Some(0));
     }
 
     #[test]
@@ -807,7 +842,8 @@ mod tests {
         let saved = SavedAgent {
             agent: AgentFilter::Any,
             folder: PathBuf::from(r"C:\Dev\Thing\"),
-            lane: 0,
+            lane: Some(0),
+            reserved_lane: None,
         };
         assert!(saved.matches(crate::agents::Agent::Codex, Some(Path::new("c:/dev/thing"))));
         assert!(!saved.matches(crate::agents::Agent::Codex, Some(Path::new("c:/dev/other"))));

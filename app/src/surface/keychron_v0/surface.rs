@@ -228,6 +228,7 @@ fn render(tracker: &Mutex<Tracker>) {
                     guard.selected,
                     guard.locked,
                     frame.states,
+                    frame.agent_counts,
                     frame.settings,
                     frame.elapsed_ms,
                 )
@@ -267,6 +268,7 @@ fn compose(
     selected: Option<usize>,
     locked: bool,
     states: &[Option<State>],
+    agent_counts: &[usize],
     settings: &Settings,
     elapsed_ms: u64,
 ) -> Vec<(usize, Rgb)> {
@@ -282,9 +284,14 @@ fn compose(
 
     let top_state = selected.and_then(|lane| states.get(lane).copied().flatten());
     let top_color = selected.map(&lane_color).unwrap_or(palette::OFF);
-    for (index, color) in palette::lane_colors(top_state, top_color, TOP_KEYS, elapsed_ms)
-        .into_iter()
-        .enumerate()
+    let top_count = selected
+        .and_then(|lane| agent_counts.get(lane))
+        .copied()
+        .unwrap_or(0);
+    for (index, color) in
+        palette::lane_colors(top_state, top_color, TOP_KEYS, elapsed_ms, top_count)
+            .into_iter()
+            .enumerate()
     {
         keys.push((index, color));
     }
@@ -384,7 +391,7 @@ mod tests {
             None,
             None,
         ];
-        let frame = compose(Some(0), false, &states, &settings(6), 123);
+        let frame = compose(Some(0), false, &states, &[1; 6], &settings(6), 123);
         let mut named: Vec<usize> = frame.iter().map(|(key, _)| *key).collect();
         named.sort_unstable();
         assert_eq!(named, (0..KEYS).collect::<Vec<usize>>());
@@ -402,11 +409,11 @@ mod tests {
         ];
         let settings = settings(6);
         let lane_color = settings.lanes[0].color;
-        let frame = compose(Some(0), false, &states, &settings, 0);
-        let expected = palette::lane_colors(Some(State::Waiting), lane_color, TOP_KEYS, 0);
+        let frame = compose(Some(0), false, &states, &[1; 6], &settings, 0);
+        let expected = palette::lane_colors(Some(State::Waiting), lane_color, TOP_KEYS, 0, 1);
         assert_eq!(&colors_of(&frame)[..TOP_KEYS], &expected[..]);
         // Nothing displayed: the top line goes dark, the column stays lit.
-        let dark = compose(None, false, &states, &settings, 0);
+        let dark = compose(None, false, &states, &[1; 6], &settings, 0);
         assert!(
             colors_of(&dark)[..TOP_KEYS]
                 .iter()
@@ -416,6 +423,32 @@ mod tests {
             colors_of(&dark)[TOP_KEYS],
             palette::OFF,
             "M1 still shows its agent"
+        );
+    }
+
+    #[test]
+    fn subagents_widen_only_the_selected_lanes_top_line() {
+        let settings = settings(3);
+        let states = [Some(State::Running); 3];
+        let single = colors_of(&compose(Some(1), false, &states, &[1; 3], &settings, 0));
+        let group = colors_of(&compose(Some(1), false, &states, &[1, 4, 1], &settings, 0));
+        assert_eq!(
+            &single[TOP_KEYS..],
+            &group[TOP_KEYS..],
+            "M column stays unchanged"
+        );
+        assert_eq!(&group[..TOP_KEYS], &[settings.lanes[1].color; TOP_KEYS]);
+        assert_ne!(&single[..TOP_KEYS], &group[..TOP_KEYS]);
+        let other = colors_of(&compose(Some(0), false, &states, &[1, 4, 1], &settings, 0));
+        assert_eq!(
+            &other[..TOP_KEYS],
+            &palette::lane_colors(
+                Some(State::Running),
+                settings.lanes[0].color,
+                TOP_KEYS,
+                0,
+                1
+            )
         );
     }
 
@@ -430,7 +463,7 @@ mod tests {
             None,
         ];
         let settings = settings(3);
-        let frame = compose(None, false, &states, &settings, 7);
+        let frame = compose(None, false, &states, &[1; 6], &settings, 7);
         let keys = colors_of(&frame);
         assert_eq!(keys[TOP_KEYS], palette::base(settings.lanes[0].color));
         assert_eq!(keys[TOP_KEYS + 1], palette::OFF, "an empty lane is dark");
@@ -456,8 +489,22 @@ mod tests {
         let settings = settings(6);
         // Sample at the fade's peak so the locked key is unmistakably white.
         let elapsed = 1200;
-        let unlocked = colors_of(&compose(Some(0), false, &states, &settings, elapsed));
-        let locked = colors_of(&compose(Some(0), true, &states, &settings, elapsed));
+        let unlocked = colors_of(&compose(
+            Some(0),
+            false,
+            &states,
+            &[1; 6],
+            &settings,
+            elapsed,
+        ));
+        let locked = colors_of(&compose(
+            Some(0),
+            true,
+            &states,
+            &[1; 6],
+            &settings,
+            elapsed,
+        ));
         assert_eq!(
             locked[TOP_KEYS],
             palette::lock_blend(settings.lanes[0].color, elapsed)
@@ -475,7 +522,7 @@ mod tests {
         );
         // A locked selection whose lane is empty has nothing to fade.
         let empty = [None, None, None, None, None, None];
-        let idle = colors_of(&compose(Some(0), true, &empty, &settings, elapsed));
+        let idle = colors_of(&compose(Some(0), true, &empty, &[0; 6], &settings, elapsed));
         assert_eq!(idle[TOP_KEYS], palette::OFF);
     }
 
@@ -491,7 +538,7 @@ mod tests {
         ];
         let settings = settings(6);
         // Sampled off the beat: Done is still exactly its colour, Waiting is not.
-        let frame = colors_of(&compose(None, false, &states, &settings, 300));
+        let frame = colors_of(&compose(None, false, &states, &[1; 6], &settings, 300));
         assert_eq!(frame[TOP_KEYS], settings.lanes[0].color);
         assert_ne!(frame[TOP_KEYS + 1], settings.lanes[1].color);
     }

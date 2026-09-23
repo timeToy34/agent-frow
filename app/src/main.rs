@@ -18,6 +18,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let flags: Vec<&str> = args.iter().map(String::as_str).collect();
     let result = match flags.first().copied() {
+        Some("probe-console") => agent_frow::focus::probe_console_command(&flags[1..]),
         Some("doctor") => doctor(),
         Some("install") => install_command(&flags),
         Some("remove") => remove_command(&flags),
@@ -639,13 +640,19 @@ fn run(dialog_on_busy: bool, notice: Option<String>) -> Result<(), String> {
         // A Codex event names its rollout; its numbers are read from there,
         // here on the worker, never on the accept path.
         let mut rollouts = agent_frow::gauges::Rollouts::default();
+        let mut folders = agent_frow::projects::Folders::open(
+            paths::root().map(|root| root.join("session-projects.json")),
+        );
         for (mut value, now) in ingest_recv {
             // Diagnostic (only when AGENT_FROW_DEBUG is set): raw cwd/agent
             // per event, to see what an agent actually reports for its
             // working directory.
             rollouts.attach(&mut value);
             log_event(&value);
-            let parsed = event::Event::parse(&value, now);
+            let mut parsed = event::Event::parse(&value, now);
+            if let event::Parsed::Event(event) = &mut parsed {
+                folders.attach(event, value["transcript_path"].as_str());
+            }
             // Recorded on disk as well as in memory, so `doctor` can answer
             // "is it actually working?" with the app not running.
             if let Some(source) = value.get("src").and_then(serde_json::Value::as_str) {

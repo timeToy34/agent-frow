@@ -134,6 +134,7 @@ pub fn lane_colors(
     lane_color: Rgb,
     keys: usize,
     elapsed_ms: u64,
+    agent_count: usize,
 ) -> Vec<Rgb> {
     let Some(state) = state else {
         return vec![OFF; keys];
@@ -144,9 +145,19 @@ pub fn lane_colors(
         State::Connected => vec![base; keys],
         State::Running => (0..keys)
             .map(|index| {
-                // The runner rides over the resting glow: never below BASE, and
-                // 100% under the light itself.
-                let lit = scanner_weight(elapsed_ms, SCANNER_PERIOD_MS, index, keys);
+                // Consecutive highlights share the same n+1 circuit. Adding
+                // their eased edges keeps the interior of the group full,
+                // with a smooth leading/trailing edge and one off-lane slot.
+                let lit: f32 = (0..agent_count.max(1).min(keys))
+                    .map(|offset| {
+                        scanner_weight(
+                            elapsed_ms,
+                            SCANNER_PERIOD_MS,
+                            (index + keys + 1 - offset) % (keys + 1),
+                            keys,
+                        )
+                    })
+                    .sum();
                 scale(full, BASE.max(lit))
             })
             .collect(),
@@ -260,6 +271,7 @@ pub fn moves(state: State) -> bool {
 /// that device's own brightness and colour balance.
 pub fn frame(
     states: &[Option<State>],
+    agent_counts: &[usize],
     settings: &Settings,
     tuning: Tuning,
     elapsed_ms: u64,
@@ -274,9 +286,15 @@ pub fn frame(
             .map(|configured| configured.color)
             .unwrap_or(OFF);
         let state = states.get(lane).copied().flatten();
-        for (offset, color) in lane_colors(state, lane_color, KEYS_PER_LANE, elapsed_ms)
-            .into_iter()
-            .enumerate()
+        for (offset, color) in lane_colors(
+            state,
+            lane_color,
+            KEYS_PER_LANE,
+            elapsed_ms,
+            agent_counts.get(lane).copied().unwrap_or(0),
+        )
+        .into_iter()
+        .enumerate()
         {
             let key = lane * KEYS_PER_LANE + offset;
             if available.contains(&key) {
@@ -342,7 +360,7 @@ mod tests {
 
     #[test]
     fn idle_is_one_dim_key_and_darkness() {
-        let colors = lane_colors(Some(State::Idle), LANE, 4, 0);
+        let colors = lane_colors(Some(State::Idle), LANE, 4, 0, 1);
         assert_eq!(colors[0], scale(LANE, BASE), "leftmost holds the seat");
         for color in &colors[1..] {
             assert_eq!(*color, OFF, "the rest go dark");
@@ -356,7 +374,7 @@ mod tests {
         let available: Vec<usize> = (0..200).collect();
         for lanes in crate::settings::LANE_COUNTS {
             let states = vec![Some(State::Running); lanes];
-            let frame = frame(&states, &settings(lanes), FULL, 0, &available);
+            let frame = frame(&states, &[1; 6], &settings(lanes), FULL, 0, &available);
             assert_eq!(frame.len(), KEYS, "{lanes} lanes");
             for (key, _) in frame {
                 assert!(key < KEYS, "key {key} is not one of ours");
@@ -377,7 +395,7 @@ mod tests {
             Some(State::Error),
             Some(State::Running),
         ];
-        let frame = frame(&states, &settings(6), FULL, 0, &available);
+        let frame = frame(&states, &[1; 6], &settings(6), FULL, 0, &available);
         assert_eq!(frame.len(), KEYS);
         for (key, color) in frame {
             assert!(key < KEYS, "key {key} is not one of ours");
@@ -390,6 +408,7 @@ mod tests {
         let available = [0, 1, 2];
         let frame = frame(
             &[Some(State::Running); 4],
+            &[1; 4],
             &settings(4),
             FULL,
             0,
@@ -400,39 +419,42 @@ mod tests {
 
     #[test]
     fn an_empty_lane_is_dark() {
-        assert!(lane_colors(None, LANE, 4, 500).iter().all(|c| *c == OFF));
+        assert!(lane_colors(None, LANE, 4, 500, 1).iter().all(|c| *c == OFF));
     }
 
     #[test]
     fn connected_is_the_whole_lane_resting_in_its_own_colour() {
-        let colors = lane_colors(Some(State::Connected), LANE, 4, 987);
+        let colors = lane_colors(Some(State::Connected), LANE, 4, 987, 1);
         assert!(colors.iter().all(|c| *c == scale(LANE, BASE)), "{colors:?}");
     }
 
     #[test]
     fn reporting_states_mark_the_leftmost_key_at_full_and_quiet_states_do_not() {
         for state in [State::Waiting, State::Done, State::Error] {
-            let colors = lane_colors(Some(state), LANE, 4, 0);
+            let colors = lane_colors(Some(state), LANE, 4, 0, 1);
             assert_eq!(colors[0], LANE, "{state:?} leftmost");
         }
         // Connected and Running have nothing to report, so no marker: at t=0
         // Running's light is at slot 0 itself, so sample it with the light in
         // the off-lane slot — exactly four-fifths through, position 4.0 of 5,
         // a whole slot from key 3 ahead and from key 0 behind.
-        let connected = lane_colors(Some(State::Connected), LANE, 4, 0);
+        let connected = lane_colors(Some(State::Connected), LANE, 4, 0, 1);
         assert_ne!(connected[0], LANE);
         let gap = SCANNER_PERIOD_MS * 4 / 5;
-        let running = lane_colors(Some(State::Running), LANE, 4, gap);
+        let running = lane_colors(Some(State::Running), LANE, 4, gap, 1);
         assert_eq!(running[0], scale(LANE, BASE));
     }
 
     #[test]
     fn error_is_dark_red_whatever_the_lane_colour() {
         for lane_color in [LANE, Rgb::new(250, 190, 60), Rgb::new(90, 210, 130)] {
-            let error = lane_colors(Some(State::Error), lane_color, 4, 333);
+            let error = lane_colors(Some(State::Error), lane_color, 4, 333, 1);
             assert!(error[1..].iter().all(|c| *c == DARK_RED), "{error:?}");
             // And steady: trouble does not need to move to be seen.
-            assert_eq!(error, lane_colors(Some(State::Error), lane_color, 4, 999));
+            assert_eq!(
+                error,
+                lane_colors(Some(State::Error), lane_color, 4, 999, 1)
+            );
         }
     }
 
@@ -441,7 +463,7 @@ mod tests {
         let floor = scale(LANE, BASE);
         let mut bright_counts = Vec::new();
         for elapsed in (0..SCANNER_PERIOD_MS).step_by(50) {
-            let colors = lane_colors(Some(State::Running), LANE, 4, elapsed);
+            let colors = lane_colors(Some(State::Running), LANE, 4, elapsed, 1);
             // Never below the resting glow anywhere.
             for c in &colors {
                 assert!(
@@ -464,11 +486,144 @@ mod tests {
     }
 
     #[test]
+    fn running_groups_follow_the_four_key_examples_and_wrap_through_the_gap() {
+        let floor = base(LANE);
+        for (count, first) in [
+            (1, [LANE, floor, floor, floor]),
+            (2, [LANE, LANE, floor, floor]),
+            (3, [LANE, LANE, LANE, floor]),
+            (4, [LANE; 4]),
+            (99, [LANE; 4]),
+        ] {
+            assert_eq!(lane_colors(Some(State::Running), LANE, 4, 0, count), first);
+            // Five discrete positions, but always only four physical keys.
+            for head in 0..5 {
+                let colors = lane_colors(
+                    Some(State::Running),
+                    LANE,
+                    4,
+                    head as u64 * SCANNER_PERIOD_MS / 5,
+                    count,
+                );
+                let mut expected = vec![floor; 4];
+                for offset in 0..count.min(4) {
+                    let slot = (head + offset) % 5;
+                    if slot < 4 {
+                        expected[slot] = LANE;
+                    }
+                }
+                assert_eq!(colors, expected, "count {count}, position {head}");
+            }
+        }
+    }
+
+    #[test]
+    fn running_group_interiors_stay_full_and_edges_fade_smoothly() {
+        // Half a slot forward: the two interior keys hold full while the
+        // trailing and leading keys both sit halfway through their fade.
+        assert_eq!(
+            lane_colors(Some(State::Running), LANE, 4, 140, 3),
+            [scale(LANE, 0.5), LANE, LANE, scale(LANE, 0.5)]
+        );
+        for keys in [1, 3, 4, 5, 8] {
+            for count in [0, 1, 2, 4, 99] {
+                let mut previous = lane_colors(
+                    Some(State::Running),
+                    LANE,
+                    keys,
+                    SCANNER_PERIOD_MS - 1,
+                    count,
+                );
+                for elapsed in 0..SCANNER_PERIOD_MS {
+                    let colors = lane_colors(Some(State::Running), LANE, keys, elapsed, count);
+                    for (before, after) in previous.iter().zip(&colors) {
+                        for (old, new, full, floor) in [
+                            (before.r, after.r, LANE.r, base(LANE).r),
+                            (before.g, after.g, LANE.g, base(LANE).g),
+                            (before.b, after.b, LANE.b, base(LANE).b),
+                        ] {
+                            assert!((floor..=full).contains(&new));
+                            assert!(
+                                old.abs_diff(new) <= 3,
+                                "pop at {elapsed}ms: {keys} keys, count {count}"
+                            );
+                        }
+                    }
+                    previous = colors;
+                }
+            }
+        }
+        assert!(lane_colors(Some(State::Running), LANE, 0, 140, 3).is_empty());
+    }
+
+    #[test]
+    fn a_single_agent_keeps_the_original_scanner_at_every_phase() {
+        for keys in [1, 3, 4, 5, 8] {
+            for elapsed in 0..SCANNER_PERIOD_MS {
+                let original: Vec<_> = (0..keys)
+                    .map(|index| {
+                        scale(
+                            LANE,
+                            BASE.max(scanner_weight(elapsed, SCANNER_PERIOD_MS, index, keys)),
+                        )
+                    })
+                    .collect();
+                assert_eq!(
+                    lane_colors(Some(State::Running), LANE, keys, elapsed, 1),
+                    original
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn agent_count_does_not_change_other_state_patterns() {
+        for state in [
+            None,
+            Some(State::Connected),
+            Some(State::Waiting),
+            Some(State::Done),
+            Some(State::Error),
+            Some(State::Idle),
+        ] {
+            for elapsed in (0..PULSE_PERIOD_MS).step_by(25) {
+                let original = lane_colors(state, LANE, 4, elapsed, 1);
+                for count in [0, 2, 4, 99] {
+                    assert_eq!(lane_colors(state, LANE, 4, elapsed, count), original);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn each_keyboard_lane_uses_its_own_count() {
+        let settings = settings(3);
+        let available: Vec<_> = (0..KEYS).collect();
+        let colors = frame(
+            &[Some(State::Running); 3],
+            &[1, 2, 99],
+            &settings,
+            FULL,
+            0,
+            &available,
+        );
+        for (lane, lit) in [1, 2, 4].into_iter().enumerate() {
+            let full = settings.lanes[lane].color;
+            for offset in 0..KEYS_PER_LANE {
+                assert_eq!(
+                    colors[lane * KEYS_PER_LANE + offset].1,
+                    if offset < lit { full } else { base(full) }
+                );
+            }
+        }
+    }
+
+    #[test]
     fn waiting_beats_between_the_glow_and_full_and_its_marker_never_moves() {
         let mut seen_high = false;
         let mut seen_low = false;
         for elapsed in (0..PULSE_PERIOD_MS).step_by(25) {
-            let colors = lane_colors(Some(State::Waiting), LANE, 4, elapsed);
+            let colors = lane_colors(Some(State::Waiting), LANE, 4, elapsed, 1);
             assert_eq!(colors[0], LANE, "the marker moved at {elapsed}ms");
             // The beating keys all beat together.
             assert!(colors[1..].windows(2).all(|pair| pair[0] == pair[1]));
@@ -492,9 +647,9 @@ mod tests {
         };
         let available: Vec<usize> = (0..KEYS).collect();
         let states = vec![Some(State::Done); 4];
-        for ((_, full), (_, low)) in frame(&states, &settings, FULL, 0, &available)
+        for ((_, full), (_, low)) in frame(&states, &[1; 6], &settings, FULL, 0, &available)
             .into_iter()
-            .zip(frame(&states, &settings, dim, 0, &available))
+            .zip(frame(&states, &[1; 6], &settings, dim, 0, &available))
         {
             assert!(low.r <= full.r && low.g <= full.g && low.b <= full.b);
         }

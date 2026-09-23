@@ -267,18 +267,22 @@ pub fn step(current: State, event: &Event) -> Step {
 /// `None` means "do not create a session from this": a session ending, a
 /// status-line reading, or an interrupt without valid main-turn evidence.
 pub fn adopt(event: &Event) -> Option<State> {
+    // Completion and child activity cannot establish a foreground session.
+    // In particular, apply this before the subagent guard: a child's
+    // SessionEnd used to bypass the main SessionEnd exclusion below.
+    if event.subagent
+        || matches!(
+            event.kind,
+            Kind::SubagentStart | Kind::SubagentStop | Kind::SessionEnd | Kind::StatusLine
+        )
+    {
+        return None;
+    }
     if event.kind == Kind::Interrupt {
         return (!event.subagent
             && Agent::from_source(&event.source) == Some(Agent::Codex)
             && event.turn_id.is_some())
         .then_some(State::Connected);
-    }
-    // A subagent's event proves the session is alive, and proves nothing about
-    // what the main agent is doing — a background subagent outlives the turn
-    // that spawned it. Connected is the claim that can be stood behind; the
-    // subagent roster is what makes the lane read as busy.
-    if event.subagent {
-        return Some(State::Connected);
     }
     Some(match event.kind {
         // Mid-turn compaction, from a session we do not know: the guard above

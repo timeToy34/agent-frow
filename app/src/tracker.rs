@@ -1,8 +1,7 @@
 //! Every session we can currently see, and which lane each one is on.
 //!
-//! Sessions are never persisted. They come back on their next event, which is
-//! the same path an agent started before the app takes — one code path, so
-//! there is no second one to be wrong.
+//! Live sessions come back on their next event. Only their launch-folder
+//! identities are persisted, by the ingestion worker in `projects`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -101,7 +100,10 @@ pub struct Session {
     pub source: String,
     pub session_id: String,
     pub agent: Option<Agent>,
+    /// Stable launch folder, used for saved agents, labels and focus.
     pub cwd: Option<PathBuf>,
+    /// Latest main-agent working directory, never used as project identity.
+    pub current_cwd: Option<PathBuf>,
     pub state: State,
     /// Human attention currently requested; automatic review cannot dismiss it.
     pub waiting_reason: Option<state::WaitingReason>,
@@ -136,6 +138,11 @@ pub struct Session {
 }
 
 impl Session {
+    /// The main agent plus the children still present in its active roster.
+    pub fn agent_count(&self) -> usize {
+        self.subagents.len().saturating_add(1)
+    }
+
     fn from_event(event: &Event) -> Option<Self> {
         let state = state::adopt(event)?;
         let mut turns = CodexTurns::default();
@@ -150,7 +157,8 @@ impl Session {
             source: event.source.clone(),
             session_id: event.session_id.clone(),
             agent: Agent::from_source(&event.source),
-            cwd: (!event.subagent).then(|| event.cwd.clone()).flatten(),
+            cwd: event.launch_dir().map(Path::to_path_buf),
+            current_cwd: (!event.subagent).then(|| event.cwd.clone()).flatten(),
             state,
             waiting_reason: (state == State::Waiting).then(|| state::waiting_reason(event)),
             since: event.at,
@@ -177,6 +185,22 @@ impl Session {
             .as_ref()
             .and_then(|cwd| cwd.file_name())
             .map(|name| name.to_string_lossy().into_owned())
+    }
+
+    /// Learning a launch folder is one-way. Ordinary working-directory
+    /// changes and repeated starts/resumes cannot rename the project.
+    fn observe_folders(&mut self, event: &Event) -> bool {
+        if event.subagent || matches!(event.kind, Kind::SubagentStart | Kind::SubagentStop) {
+            return false;
+        }
+        let learned = self.cwd.is_none() && event.launch_dir().is_some();
+        if learned {
+            self.cwd = event.launch_dir().map(Path::to_path_buf);
+        }
+        if event.cwd.is_some() && event.at >= self.last_event {
+            self.current_cwd.clone_from(&event.cwd);
+        }
+        learned
     }
 
     /// Whether this agent can report Error at all. Codex has no failure event
@@ -329,6 +353,11 @@ pub struct Tracker {
     /// the M keys still do.
     pub locked: bool,
     terminals: BTreeMap<(String, String), Terminal>,
+    parents: BTreeMap<(String, String), String>,
+    /// Latest child activity awaiting a known foreground parent. Bounded;
+    /// completion records also prevent older activity from reviving a child.
+    children: Vec<Event>,
+    closed: BTreeMap<(String, String), u64>,
     /// A bounded, nonblocking handoff to the journal worker. Never disk I/O
     /// under the tracker lock; unset in tests that do not inspect the journal.
     pub lifecycle: Option<std::sync::mpsc::SyncSender<lifecycle::Change>>,
@@ -383,15 +412,25 @@ impl Tracker {
         };
         self.last_seen.insert(event.source.clone(), event.at);
 
-        // A status line is numbers for a session we hold, and nothing else:
+        // A status line supplies numbers and launch identity for a session:
         // not an event to count, not activity, not a session to introduce.
         // One for a session we do not hold is ordinary — Claude re-runs it
         // after a session has ended, and the app may have started late.
         if event.kind == Kind::StatusLine {
-            if let Some(gauges) = event.gauges
+            if !event.subagent
+                && !self
+                    .parents
+                    .contains_key(&(event.source.clone(), event.session_id.clone()))
                 && let Some(index) = self.find(&event.source, &event.session_id)
             {
-                self.sessions[index].gauges.merge(gauges);
+                let session = &mut self.sessions[index];
+                let learned = session.observe_folders(&event);
+                if let Some(gauges) = event.gauges {
+                    session.gauges.merge(gauges);
+                }
+                if learned {
+                    self.fill_lanes();
+                }
             }
             return;
         }
@@ -413,6 +452,46 @@ impl Tracker {
             return;
         }
 
+        if let Some(parent) = &event.parent_session_id {
+            self.parents.insert(
+                (event.source.clone(), event.session_id.clone()),
+                parent.clone(),
+            );
+            // Metadata can arrive after an unclassified child was adopted.
+            if let Some(index) = self.find(&event.source, &event.session_id) {
+                let removed = self.sessions.remove(index);
+                self.record_change(
+                    &removed,
+                    event.at,
+                    Action::Removed,
+                    None,
+                    "child_identified",
+                );
+                self.fill_lanes();
+            }
+        }
+        if event.subagent
+            || self
+                .parents
+                .contains_key(&(event.source.clone(), event.session_id.clone()))
+            || matches!(event.kind, Kind::SubagentStart | Kind::SubagentStop)
+        {
+            if event.kind != Kind::Interrupt {
+                self.accept_child(event);
+            }
+            return;
+        }
+        let identity = (event.source.clone(), event.session_id.clone());
+        if let Some(closed_at) = self.closed.get(&identity) {
+            if event.at <= *closed_at
+                || !matches!(event.kind, Kind::SessionStart | Kind::UserPromptSubmit)
+                || event.start_source.as_deref() == Some("compact")
+            {
+                return;
+            }
+            self.closed.remove(&identity);
+        }
+
         // Invalid interrupts cannot introduce a lane, change terminal routing,
         // or refresh an existing session. They still count as received events.
         if event.kind == Kind::Interrupt && state::adopt(&event).is_none() {
@@ -427,11 +506,116 @@ impl Tracker {
         }
 
         if self.route_terminal(&event) {
+            self.flush_children(event.at);
             return;
+        }
+        if event.kind == Kind::SessionEnd {
+            if self
+                .find(&event.source, &event.session_id)
+                .is_some_and(|index| event.at < self.sessions[index].first_seen)
+            {
+                return;
+            }
+            self.close_session(&event.source, &event.session_id, event.at);
         }
         match self.find(&event.source, &event.session_id) {
             Some(index) => self.update(index, &event),
             None => self.introduce(&event),
+        }
+        self.flush_children(event.at);
+    }
+
+    fn root_of(&self, source: &str, session_id: &str) -> Option<String> {
+        let mut root = session_id.to_owned();
+        let mut visited = BTreeSet::new();
+        for _ in 0..32 {
+            if !visited.insert(root.clone()) {
+                return None;
+            }
+            match self.parents.get(&(source.to_owned(), root.clone())) {
+                Some(parent) => root = parent.clone(),
+                None => return Some(root),
+            }
+        }
+        None
+    }
+
+    fn close_session(&mut self, source: &str, session_id: &str, at: u64) {
+        self.closed
+            .insert((source.to_owned(), session_id.to_owned()), at);
+        let children = std::mem::take(&mut self.children);
+        self.children = children
+            .into_iter()
+            .filter(|child| {
+                child.source != source
+                    || self.root_of(source, &child.session_id).as_deref() != Some(session_id)
+            })
+            .collect();
+    }
+
+    fn accept_child(&mut self, mut event: Event) {
+        event.subagent = true;
+        if self
+            .parents
+            .contains_key(&(event.source.clone(), event.session_id.clone()))
+        {
+            event.agent = Some(event.session_id.clone());
+        }
+        if event.kind == Kind::SessionEnd {
+            event.kind = Kind::SubagentStop;
+        }
+        let previous = self.children.iter().position(|old| {
+            old.source == event.source
+                && old.session_id == event.session_id
+                && old.agent == event.agent
+        });
+        if let Some(index) = previous {
+            let old = &self.children[index];
+            if event.at < old.at || (event.at == old.at && old.kind == Kind::SubagentStop) {
+                return;
+            }
+            self.children.remove(index);
+        }
+        let now = event.at;
+        if self.children.len() == 512 {
+            self.children.remove(0);
+        }
+        self.children.push(event);
+        self.flush_children(now);
+    }
+
+    fn flush_children(&mut self, now: u64) {
+        // Nested children can precede parents. Never guess from a folder or
+        // an inherited terminal id, which independent agents can share.
+        let mut children = std::mem::take(&mut self.children);
+        children.sort_by_key(|child| (child.at, child.kind == Kind::SubagentStop));
+        for child in children {
+            let Some(root) = self.root_of(&child.source, &child.session_id) else {
+                continue;
+            };
+            if self
+                .closed
+                .contains_key(&(child.source.clone(), root.clone()))
+                || now.saturating_sub(child.at) >= SUBAGENT_IDLE_MS
+                || self.terminals.iter().any(|(key, tab)| {
+                    key.0 == child.source
+                        && tab.known_sessions.contains(&root)
+                        && tab.session_id != root
+                })
+            {
+                continue;
+            }
+            if let Some(index) = self.find(&child.source, &root) {
+                let session = &mut self.sessions[index];
+                // Only roster/liveness belongs to the parent, never the child's
+                // cwd, gauges, note, failure, or host process information.
+                roster(session, &child);
+                session.last_event = session.last_event.max(child.at);
+                if child.agent.is_none() {
+                    continue;
+                }
+            }
+            self.children.push(child);
         }
     }
 
@@ -551,6 +735,8 @@ impl Tracker {
                 session_id: session.session_id.clone(),
                 previous_session_id,
                 lane: session.lane,
+                project_dir: session.cwd.clone(),
+                cwd: session.current_cwd.clone(),
                 reason,
             });
         }
@@ -559,10 +745,11 @@ impl Tracker {
     fn update(&mut self, index: usize, event: &Event) {
         self.sessions[index].turns.observe(event);
         let step = state::step(self.sessions[index].state, event);
-        let mut learned_cwd = false;
+        let learned_cwd;
         let mut moved: Option<usize> = None;
         {
             let session = &mut self.sessions[index];
+            learned_cwd = session.observe_folders(event);
             session.last_event = event.at;
             session.events += 1;
             // Automatic review must not replace a pending prompt's note.
@@ -576,34 +763,25 @@ impl Tracker {
                 session.note = event.note();
             }
             roster(session, event);
-            // The project directory is the *main* agent's, and `SessionStart`
-            // carries the authoritative launch directory. A subagent may be
-            // working in a subfolder (`…/frontend` under a project rooted at
-            // `…/`), and its cwd must never become the lane's project — that is
-            // exactly the "bound to the wrong folder" bug. A non-start event's
-            // cwd is only a fallback, used until a `SessionStart` pins it.
-            if !event.subagent
-                && event.cwd.is_some()
-                && (event.kind == Kind::SessionStart || session.cwd.is_none())
-            {
-                let first_cwd = session.cwd.is_none();
-                session.cwd.clone_from(&event.cwd);
-                // A session adopted from a subagent's event started without a
-                // cwd, so it could not be recognised as a saved agent and may
-                // be waiting off the keyboard. Now it can: give assignment
-                // another look.
-                if first_cwd && session.lane.is_none() {
-                    learned_cwd = true;
-                }
-            }
             // Other fields fill in whenever they show up, and are never cleared
             // by an event that omits them.
             if !event.subagent && event.wt_session.is_some() {
                 session.wt_session.clone_from(&event.wt_session);
             }
             session.codex_cli |= event.codex_cli && !event.subagent;
-            if !event.ancestors.is_empty() {
-                session.ancestors.clone_from(&event.ancestors);
+            if !event.subagent && !event.ancestors.is_empty() {
+                // A detached tool can report a shorter, unrelated chain.
+                // Prefer a complete chain that reaches the terminal host.
+                let has_host = |chain: &[Ancestor]| {
+                    chain.iter().any(|a| {
+                        a.exe
+                            .as_deref()
+                            .is_some_and(|exe| exe.eq_ignore_ascii_case("WindowsTerminal.exe"))
+                    })
+                };
+                if has_host(&event.ancestors) || !has_host(&session.ancestors) {
+                    session.ancestors.clone_from(&event.ancestors);
+                }
             }
             if let Some(gauges) = event.gauges {
                 session.gauges.merge(gauges);
@@ -710,6 +888,41 @@ impl Tracker {
                 session.lane = None;
             }
         }
+        // An explicit reservation wins as soon as its launch identity is
+        // known, including when that metadata arrived after the first hook.
+        for saved in &self.settings.saved {
+            let Some(lane) = saved.reserved_lane.filter(|lane| *lane < count) else {
+                continue;
+            };
+            if self
+                .sessions
+                .iter()
+                .any(|session| session.lane == Some(lane))
+            {
+                continue;
+            }
+            if let Some(session) = self
+                .sessions
+                .iter_mut()
+                .filter(|session| {
+                    session
+                        .agent
+                        .is_some_and(|agent| saved.matches(agent, session.cwd.as_deref()))
+                })
+                .filter(|session| {
+                    session.lane.is_none_or(|current| {
+                        !self
+                            .settings
+                            .saved
+                            .iter()
+                            .any(|entry| entry.reserved_lane == Some(current))
+                    })
+                })
+                .min_by_key(|session| session.first_seen)
+            {
+                session.lane = Some(lane);
+            }
+        }
         let mut order: Vec<usize> = (0..self.sessions.len()).collect();
         order.sort_by_key(|index| self.sessions[*index].first_seen);
         for index in order {
@@ -728,8 +941,15 @@ impl Tracker {
     ///
     /// `Err` is the reason there is nothing to focus, in the words the window
     /// shows for it.
-    pub fn summon_target(&self, lane: usize) -> Result<(Vec<Ancestor>, Vec<String>), String> {
+    pub fn summon_target(&self, lane: usize) -> Result<crate::focus::FocusTarget, String> {
         let Some(session) = self.on_lane(lane) else {
+            if let Some(saved) = self.reservation(lane) {
+                return Err(format!(
+                    "{} is reserved on lane {} — the agent has not started",
+                    saved.project(),
+                    lane + 1
+                ));
+            }
             return Err(format!("lane {} is empty — nothing to focus", lane + 1));
         };
         Ok(self.summon_of(session, Some(lane)))
@@ -742,7 +962,7 @@ impl Tracker {
         &self,
         source: &str,
         session_id: &str,
-    ) -> Result<(Vec<Ancestor>, Vec<String>), String> {
+    ) -> Result<crate::focus::FocusTarget, String> {
         let Some(index) = self.find(source, session_id) else {
             return Err("that session is gone — nothing to focus".to_owned());
         };
@@ -750,18 +970,17 @@ impl Tracker {
         Ok(self.summon_of(session, session.lane))
     }
 
-    fn summon_of(&self, session: &Session, lane: Option<usize>) -> (Vec<Ancestor>, Vec<String>) {
-        let project = session.project();
-        let mut names = Vec::new();
-        if let Some(lane) = lane {
-            names.push(self.settings.display_name(lane, project.as_deref()));
+    fn summon_of(&self, session: &Session, lane: Option<usize>) -> crate::focus::FocusTarget {
+        crate::focus::FocusTarget {
+            source: session.source.clone(),
+            session_id: session.session_id.clone(),
+            terminal_id: session.wt_session.clone(),
+            ancestors: session.ancestors.clone(),
+            custom_name: lane
+                .filter(|lane| self.settings.named(*lane))
+                .map(|lane| self.settings.lanes[lane].name.trim().to_owned()),
+            project: session.project(),
         }
-        if let Some(project) = project
-            && !names.contains(&project)
-        {
-            names.push(project);
-        }
-        (session.ancestors.clone(), names)
     }
 
     /// Swaps two lanes: name, colour, the saved agents that prefer each, and
@@ -784,7 +1003,8 @@ impl Tracker {
             }
         };
         for entry in &mut self.settings.saved {
-            entry.lane = swapped(entry.lane);
+            entry.lane = entry.lane.map(swapped);
+            entry.reserved_lane = entry.reserved_lane.map(swapped);
         }
         for session in &mut self.sessions {
             session.lane = session.lane.map(swapped);
@@ -797,17 +1017,24 @@ impl Tracker {
 
     /// Drops whatever session is on a lane, at the user's request.
     ///
-    /// Display-side only, which is what makes it always safe: if the agent is
-    /// actually still alive, its next event re-adopts it. What this really
+    /// Display-side only: a new main start or user prompt re-adopts it. What this really
     /// removes is a session whose agent died without a `SessionEnd` — a killed
     /// terminal, a crash — which otherwise sits until eviction.
-    pub fn dismiss(&mut self, lane: usize) {
+    pub fn dismiss(&mut self, lane: usize) -> bool {
+        let mut released = false;
+        for saved in &mut self.settings.saved {
+            if saved.reserved_lane == Some(lane) {
+                saved.reserved_lane = None;
+                released = true;
+            }
+        }
         if let Some(index) = self
             .sessions
             .iter()
             .position(|session| session.lane == Some(lane))
         {
             let removed = self.sessions.remove(index);
+            self.close_session(&removed.source, &removed.session_id, crate::now_ms());
             self.record_change(
                 &removed,
                 crate::now_ms(),
@@ -815,8 +1042,9 @@ impl Tracker {
                 None,
                 "dismissed",
             );
-            self.fill_lanes();
         }
+        self.fill_lanes();
+        released
     }
 
     /// Gives an off-keyboard session the bottom lane, at the user's request.
@@ -835,6 +1063,13 @@ impl Tracker {
             return;
         }
         let bottom = self.settings.lane_count - 1;
+        // Explicit promotion replaces the bottom slot, including any idle
+        // reservation there. Automatic assignment never does this.
+        for saved in &mut self.settings.saved {
+            if saved.reserved_lane == Some(bottom) {
+                saved.reserved_lane = None;
+            }
+        }
         for session in &mut self.sessions {
             if session.lane == Some(bottom) {
                 session.lane = None;
@@ -845,10 +1080,11 @@ impl Tracker {
 
     /// [`Self::dismiss`] for a session named by identity rather than by lane —
     /// how an off-keyboard card is dismissed. Same safety: if the agent is
-    /// actually still alive, its next event re-adopts it.
+    /// actually still alive, its next main start or prompt re-adopts it.
     pub fn dismiss_session(&mut self, source: &str, session_id: &str) {
         if let Some(index) = self.find(source, session_id) {
             let removed = self.sessions.remove(index);
+            self.close_session(&removed.source, &removed.session_id, crate::now_ms());
             self.record_change(
                 &removed,
                 crate::now_ms(),
@@ -888,11 +1124,8 @@ impl Tracker {
         if self.preview.is_some() {
             return (0..cap).collect();
         }
-        let mut lanes: Vec<usize> = self
-            .sessions
-            .iter()
-            .filter_map(|session| session.lane)
-            .filter(|lane| *lane < cap)
+        let mut lanes: Vec<usize> = (0..cap)
+            .filter(|lane| self.lane_state(*lane).is_some())
             .collect();
         lanes.sort_unstable();
         lanes.dedup();
@@ -987,6 +1220,67 @@ impl Tracker {
         self.fill_lanes();
     }
 
+    pub fn reservation(&self, lane: usize) -> Option<&SavedAgent> {
+        (lane < self.settings.lane_count)
+            .then(|| {
+                self.settings
+                    .saved
+                    .iter()
+                    .find(|saved| saved.reserved_lane == Some(lane))
+            })
+            .flatten()
+    }
+
+    pub fn lane_state(&self, lane: usize) -> Option<State> {
+        self.on_lane(lane)
+            .map(Session::effective_state)
+            .or_else(|| self.reservation(lane).map(|_| State::Idle))
+    }
+
+    /// Find a free slot without moving a live agent or another reservation.
+    pub fn reservation_target(&self, saved: usize) -> Result<usize, String> {
+        let entry = self
+            .settings
+            .saved
+            .get(saved)
+            .ok_or("Saved agent no longer exists")?;
+        if entry.reserved_lane.is_some() {
+            return Err("This agent already has a reserved lane".to_owned());
+        }
+        if self.running(entry) {
+            return Err("This saved agent is already running".to_owned());
+        }
+        let free = |lane: usize| lane < self.settings.lane_count && self.lane_state(lane).is_none();
+        entry
+            .lane
+            .filter(|lane| free(*lane))
+            .or_else(|| (0..self.settings.lane_count).find(|lane| free(*lane)))
+            .ok_or_else(|| {
+                "No free lane — release a reservation or increase the lane count".to_owned()
+            })
+    }
+
+    pub fn reserve_saved(&mut self, saved: usize) -> Result<usize, String> {
+        let lane = self.reservation_target(saved)?;
+        self.settings.saved[saved].reserved_lane = Some(lane);
+        self.fill_lanes();
+        Ok(lane)
+    }
+
+    pub fn release_reservation(&mut self, lane: usize) -> bool {
+        let mut changed = false;
+        for saved in &mut self.settings.saved {
+            if saved.reserved_lane == Some(lane) {
+                saved.reserved_lane = None;
+                changed = true;
+            }
+        }
+        if changed {
+            self.fill_lanes();
+        }
+        changed
+    }
+
     /// Whether any session we can see is this saved agent. The roster in the
     /// window lists only the ones that are not — a running one is shown where
     /// it runs.
@@ -1035,12 +1329,9 @@ fn roster(session: &mut Session, event: &Event) {
 /// and landing elsewhere never rewrites it; `settings` is read-only here so
 /// that cannot happen by accident.
 ///
-/// The one refinement: a session whose working directory is not known yet
-/// cannot be recognised as anybody's save. Hooks post concurrently, and a
-/// session adopted from a *subagent's* event deliberately carries no cwd —
-/// handing it a lane somebody else prefers is how two agents once came up
-/// reversed after an app restart, summoning each other's windows. So while its
-/// cwd is unknown it takes a lane nobody prefers when there is one, and any
+/// A session whose launch directory is not known yet cannot be recognised
+/// as anybody's save. While its launch identity is unknown it takes a lane
+/// nobody prefers when there is one, and any
 /// free lane when there is not.
 ///
 /// Nothing here can take a lane away from a session that already holds one.
@@ -1048,16 +1339,40 @@ fn roster(session: &mut Session, event: &Event) {
 /// lane 2 moves while you are looking at it.
 fn claim(settings: &Settings, taken: &[usize], session: &Session) -> Option<usize> {
     let count = settings.lane_count;
-    let free = |index: usize| index < count && !taken.contains(&index);
+    let matches = |entry: &SavedAgent| {
+        session
+            .agent
+            .is_some_and(|agent| entry.matches(agent, session.cwd.as_deref()))
+    };
+    let free = |index: usize| {
+        index < count
+            && !taken.contains(&index)
+            && settings
+                .saved
+                .iter()
+                .all(|entry| entry.reserved_lane != Some(index) || matches(entry))
+    };
+
+    if let Some(lane) = settings
+        .saved
+        .iter()
+        .filter(|entry| matches(entry))
+        .filter_map(|entry| entry.reserved_lane)
+        .find(|lane| free(*lane))
+    {
+        return Some(lane);
+    }
 
     if let Some(agent) = session.agent {
         let cwd: Option<&Path> = session.cwd.as_deref();
-        if let Some(entry) = settings
+        if let Some(lane) = settings
             .saved
             .iter()
-            .find(|entry| free(entry.lane) && entry.matches(agent, cwd))
+            .filter(|entry| entry.matches(agent, cwd))
+            .filter_map(|entry| entry.lane)
+            .find(|lane| free(*lane))
         {
-            return Some(entry.lane);
+            return Some(lane);
         }
     }
     if session.cwd.is_none()
@@ -1157,6 +1472,7 @@ mod tests {
             session_id: format!("s{lane}"),
             agent: None,
             cwd: None,
+            current_cwd: None,
             state: State::Connected,
             waiting_reason: None,
             since: 0,

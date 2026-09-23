@@ -33,6 +33,7 @@ fn send_with(
         "hook_event_name": name,
         "session_id": session,
         "cwd": cwd,
+        "project_dir": cwd,
     });
     if let (Some(target), Some(extra)) = (payload.as_object_mut(), extra.as_object()) {
         for (key, value) in extra {
@@ -56,7 +57,8 @@ fn saved(agent: AgentFilter, folder: &str, lane: usize) -> SavedAgent {
     SavedAgent {
         agent,
         folder: PathBuf::from(folder),
-        lane,
+        lane: Some(lane),
+        reserved_lane: None,
     }
 }
 
@@ -267,56 +269,34 @@ fn nothing_takes_a_lane_away_from_a_session_that_already_has_one() {
 }
 
 #[test]
-fn a_session_without_a_cwd_avoids_preferred_lanes_when_another_is_free() {
-    // Hooks post concurrently; a session adopted from a subagent's event has
-    // no cwd and so cannot be recognised as anybody's save. Handing it a lane
-    // somebody prefers is how two agents once came up reversed after an app
-    // restart, summoning each other's windows.
+fn children_wait_for_the_parent_before_claiming_a_saved_lane() {
     let mut settings = Settings::default();
-    settings.set_lane_count(3);
     settings
         .saved
-        .push(saved(AgentFilter::Any, "/home/j/beta", 0));
-    settings
-        .saved
-        .push(saved(AgentFilter::Any, "/home/j/gamma", 1));
+        .push(saved(AgentFilter::Any, "/home/j/beta", 1));
     let mut tracker = Tracker::new(settings, Default::default());
-
-    // Adopted from a subagent event: the cwd is deliberately not believed.
-    let subagent = |session: &str| -> Value {
-        json!({
-            "src": "claude-wsl",
-            "hook_event_name": "SubagentStart",
-            "session_id": session,
-            "cwd": "/home/j/beta/frontend",
-            "agent_id": "sub-1",
-        })
-    };
-    tracker.accept(Event::parse(&subagent("x"), 10), 10);
-
-    // Both preferred lanes are free, but lane 2 is the one nobody wants.
-    assert!(tracker.on_lane(2).is_some());
-    assert!(tracker.on_lane(0).is_none());
-    assert!(tracker.on_lane(1).is_none());
-
-    // With nothing else left, a preferred lane is a free lane like any other —
-    // a preference is not a reservation.
-    tracker.accept(Event::parse(&subagent("y"), 11), 11);
-    assert!(tracker.on_lane(0).is_some());
-    assert!(tracker.overflow().is_empty());
-
-    // The saved agent whose lane that was lands on the other one; the save
-    // still says lane 1.
+    for sid in ["x", "y"] {
+        tracker.accept(
+            Event::parse(
+                &json!({"src":"claude-wsl", "session_id":sid,
+            "hook_event_name":"SubagentStart", "agent_id":"child", "cwd":"/home/j/beta/frontend"}),
+                10,
+            ),
+            10,
+        );
+    }
+    assert!(tracker.sessions.is_empty());
     send(
         &mut tracker,
         "claude-wsl",
-        "b",
-        "UserPromptSubmit",
+        "x",
+        "SessionStart",
         "/home/j/beta",
         20,
     );
     assert_eq!(lane_project(&tracker, 1).as_deref(), Some("beta"));
-    assert_eq!(tracker.settings.saved[0].lane, 0);
+    assert_eq!(tracker.sessions.len(), 1);
+    assert_eq!(tracker.on_lane(1).unwrap().subagents.len(), 1);
 }
 
 #[test]
@@ -351,7 +331,8 @@ fn a_save_preferring_a_hidden_lane_survives_the_layout_change() {
 
     tracker.set_lane_count(4);
     assert_eq!(
-        tracker.settings.saved[0].lane, 3,
+        tracker.settings.saved[0].lane,
+        Some(3),
         "a save outlives layouts that hide its lane, unchanged"
     );
     send(
@@ -586,7 +567,7 @@ fn moving_a_lane_takes_its_session_name_colour_and_saved_preference_along() {
     assert_eq!(lane_project(&tracker, 1).as_deref(), Some("alpha"));
     assert_eq!(lane_project(&tracker, 0).as_deref(), Some("beta"));
     assert_eq!(tracker.settings.lanes[1].name, "First");
-    assert_eq!(tracker.settings.saved[0].lane, 0);
+    assert_eq!(tracker.settings.saved[0].lane, Some(0));
 
     // Out-of-range and self moves change nothing.
     tracker.move_lane(1, 9);
@@ -595,7 +576,7 @@ fn moving_a_lane_takes_its_session_name_colour_and_saved_preference_along() {
 }
 
 #[test]
-fn dismissing_a_lane_drops_its_session_and_the_next_event_brings_it_back() {
+fn dismissing_a_lane_holds_until_the_next_main_prompt() {
     let mut tracker = tracker(4);
     send(
         &mut tracker,
@@ -612,8 +593,7 @@ fn dismissing_a_lane_drops_its_session_and_the_next_event_brings_it_back() {
     assert!(tracker.on_lane(0).is_none());
     assert!(tracker.sessions.is_empty());
 
-    // Dismissing is display-side only: an agent that was actually alive is
-    // re-adopted from its very next event, in the right state.
+    // Background activity cannot undo dismissal; a new main prompt can.
     send(
         &mut tracker,
         "claude-wsl",
@@ -621,6 +601,15 @@ fn dismissing_a_lane_drops_its_session_and_the_next_event_brings_it_back() {
         "PostToolUse",
         "/home/j/api",
         20,
+    );
+    assert!(tracker.sessions.is_empty());
+    send(
+        &mut tracker,
+        "claude-wsl",
+        "a",
+        "UserPromptSubmit",
+        "/home/j/api",
+        agent_frow::now_ms() + 1,
     );
     assert_eq!(tracker.on_lane(0).map(|s| s.state), Some(State::Running));
 
@@ -646,9 +635,8 @@ fn a_subagents_folder_never_becomes_the_lanes_project() {
         "agent_type": "Explore",
     });
     tracker.accept(Event::parse(&subagent, 10), 10);
-    // It created the lane (liveness) but did not claim its folder.
-    assert!(tracker.on_lane(0).is_some());
-    assert!(tracker.on_lane(0).unwrap().cwd.is_none());
+    // Child activity waits until the foreground parent identifies itself.
+    assert!(tracker.sessions.is_empty());
 
     // The main agent's own event pins the project to the root.
     send(
@@ -673,29 +661,22 @@ fn a_subagents_folder_never_becomes_the_lanes_project() {
 }
 
 #[test]
-fn session_start_pins_the_launch_directory_over_a_fallback() {
-    // Adopted mid-turn from a tool event in a subfolder, then SessionStart —
-    // which carries the real launch directory — corrects it.
+fn a_mid_turn_directory_is_unknown_until_launch_identity_arrives() {
     let mut tracker = tracker(4);
-    send(
+    send_with(
         &mut tracker,
         "claude-wsl",
         "s1",
         "PostToolUse",
         "/home/j/ai-brand-dna/frontend",
         10,
+        json!({"project_dir":null}),
     );
-    assert_eq!(
-        tracker.on_lane(0).unwrap().project().as_deref(),
-        Some("frontend")
-    );
-
+    assert!(tracker.on_lane(0).unwrap().project().is_none());
     let start = json!({
-        "src": "claude-wsl",
-        "hook_event_name": "SessionStart",
-        "session_id": "s1",
-        "cwd": "/home/j/ai-brand-dna",
-        "source": "resume",
+        "src":"claude-wsl", "hook_event_name":"SessionStart", "session_id":"s1",
+        "cwd":"/home/j/ai-brand-dna/frontend", "source":"resume",
+        "project_dir":"/home/j/ai-brand-dna"
     });
     tracker.accept(Event::parse(&start, 20), 20);
     assert_eq!(
@@ -887,7 +868,13 @@ fn a_summon_target_carries_the_lane_name_then_the_project() {
         10,
     );
 
-    let (ancestors, names) = tracker.summon_target(0).unwrap();
+    let target = tracker.summon_target(0).unwrap();
+    let ancestors = target.ancestors;
+    let names: Vec<_> = target
+        .custom_name
+        .into_iter()
+        .chain(target.project)
+        .collect();
     // This synthetic event reported no ancestry; a real hook's would be here.
     assert!(ancestors.is_empty());
     // The name the user typed first — it is the one they can make match a
@@ -908,7 +895,7 @@ fn a_session_keeps_ancestor_identities_and_replaces_them_wholesale() {
         "ancestor_names": ["claude.exe", "explorer.exe"],
     });
     tracker.accept(Event::parse(&named, 10), 10);
-    let (ancestors, _) = tracker.summon_target(0).unwrap();
+    let ancestors = tracker.summon_target(0).unwrap().ancestors;
     assert_eq!(
         ancestors,
         vec![
@@ -932,7 +919,7 @@ fn a_session_keeps_ancestor_identities_and_replaces_them_wholesale() {
         "ancestors": [300],
     });
     tracker.accept(Event::parse(&bare, 20), 20);
-    let (ancestors, _) = tracker.summon_target(0).unwrap();
+    let ancestors = tracker.summon_target(0).unwrap().ancestors;
     assert_eq!(
         ancestors,
         vec![Ancestor {
@@ -1209,12 +1196,19 @@ fn summoning_an_off_keyboard_session_uses_its_project_name() {
         "hook_event_name": "UserPromptSubmit",
         "session_id": "d",
         "cwd": "/home/j/delta",
+        "project_dir": "/home/j/delta",
         "ancestors": [700],
         "ancestor_names": ["WindowsTerminal.exe"],
     });
     tracker.accept(Event::parse(&with_ancestry, 20), 20);
 
-    let (ancestors, names) = tracker.summon_session("claude-wsl", "d").unwrap();
+    let target = tracker.summon_session("claude-wsl", "d").unwrap();
+    let ancestors = target.ancestors;
+    let names: Vec<_> = target
+        .custom_name
+        .into_iter()
+        .chain(target.project)
+        .collect();
     assert_eq!(ancestors.len(), 1);
     assert_eq!(names, vec!["delta".to_owned()], "no lane, so no lane name");
 
