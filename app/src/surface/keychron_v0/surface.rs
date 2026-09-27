@@ -35,6 +35,10 @@ const FRAME: Duration = Duration::from_millis(33);
 /// How long to wait before looking for the board again.
 const RETRY: Duration = Duration::from_secs(10);
 
+/// How long after Windows reports a change to look. A keyboard arrives as
+/// several interfaces in a burst, and each one pushes this back.
+const SETTLE: Duration = Duration::from_secs(1);
+
 /// How long the quit path waits for the board to be handed back.
 const RESTORE_GRACE: Duration = Duration::from_millis(1500);
 
@@ -143,7 +147,7 @@ type Taken = (Board<Box<dyn Transport>>, Snapshot, String, hid::Claim);
 struct Live {
     board: Board<Box<dyn Transport>>,
     snapshot: Snapshot,
-    _claim: hid::Claim,
+    claim: hid::Claim,
 }
 
 fn render(tracker: &Mutex<Tracker>) {
@@ -158,6 +162,7 @@ fn render(tracker: &Mutex<Tracker>) {
     let mut next_attempt = Instant::now();
     let mut enabled = true;
     let mut journal = Journal::new(SURFACE);
+    let changes = hid::watch();
 
     while RUNNING.load(Ordering::SeqCst) {
         // The clock, board or no board. What it says about change is not
@@ -181,6 +186,30 @@ fn render(tracker: &Mutex<Tracker>) {
                     }
                 }
                 report(tracker, KeyboardStatus::off(SURFACE));
+            }
+        }
+        // Windows says a Keychron interface came or went: drop a board whose
+        // interface left, check one that may have lost its keyboard to the
+        // other link, and look soon rather than at the next retry.
+        for change in changes.try_iter() {
+            if !enabled {
+                continue;
+            }
+            let held = live.as_ref().map(|ready| &ready.claim);
+            let gone = match hid::respond(&change, held) {
+                hid::Response::Drop => Some("Windows reported its interface removed".to_owned()),
+                hid::Response::Check => live.as_mut().and_then(|ready| ready.board.answers().err()),
+                hid::Response::Look => {
+                    next_attempt = Instant::now() + SETTLE;
+                    None
+                }
+                hid::Response::Ignore => None,
+            };
+            if let Some(error) = gone {
+                journal.lost(&error);
+                report(tracker, unavailable("disconnected — reconnecting"));
+                live = None;
+                next_attempt = Instant::now() + SETTLE;
             }
         }
         if !enabled {
@@ -210,7 +239,7 @@ fn render(tracker: &Mutex<Tracker>) {
                     live = Some(Live {
                         board,
                         snapshot,
-                        _claim: claim,
+                        claim,
                     });
                     scene.invalidate();
                 }

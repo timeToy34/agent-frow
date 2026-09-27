@@ -524,6 +524,15 @@ keyboard's keymap, work over all three.
   handshake is used; switching between them reboots the keyboard, which is a
   reconnect like any other. `agent-frow doctor` lists what it finds and what
   each answers.
+- **Windows says when an interface comes or goes.** A steady F-row sends
+  nothing, so a write failing is no way to learn the keyboard has left. The
+  app registers once with `CM_Register_Notification` for HID interface
+  arrivals and removals (Keychron's vendor id only) and each Keychron surface
+  drains its own queue every loop: its interface removed drops the board at
+  once; an arrival while holding a board asks it one question (the protocol
+  version), because a receiver stays plugged in when the keyboard moves to
+  its cable; an arrival while holding nothing looks a second later instead
+  of at the ten-second retry. Nothing is sent to the keyboard on a timer.
 
 ### Keychron V0 Ultra, the numpad
 

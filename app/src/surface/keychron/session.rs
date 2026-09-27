@@ -302,6 +302,13 @@ impl<T: Transport> Board<T> {
         Ok(board)
     }
 
+    /// One question the keyboard always answers: for when the bus changed
+    /// and this board may no longer be behind its interface — a receiver
+    /// stays plugged in when the keyboard moves to its cable.
+    pub fn answers(&mut self) -> Result<(), String> {
+        self.ask(Command::ProtocolVersion).map(|_| ())
+    }
+
     fn ask(&mut self, command: Command) -> Result<Reply, String> {
         let report = command.encode()?;
         let reply = self.transport.exchange(&report)?;

@@ -65,6 +65,13 @@ pub struct Claim {
     path: String,
 }
 
+impl Claim {
+    /// Whether `change` is about the interface this claim holds.
+    pub fn is_about(&self, change: &Change) -> bool {
+        change.path().eq_ignore_ascii_case(&self.path)
+    }
+}
+
 impl Drop for Claim {
     fn drop(&mut self) {
         if let Ok(mut claimed) = CLAIMED.lock() {
@@ -93,6 +100,53 @@ pub fn find() -> Result<Vec<Found>, String> {
     platform::find()
 }
 
+/// A Keychron HID interface arriving or leaving, as Windows reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Change {
+    Arrived(String),
+    Removed(String),
+}
+
+impl Change {
+    /// The interface's OS path — the form [`Found::path`] holds.
+    pub fn path(&self) -> &str {
+        match self {
+            Self::Arrived(path) | Self::Removed(path) => path,
+        }
+    }
+}
+
+/// What a surface does about a [`Change`], given the claim it holds, if any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Response {
+    /// The interface its board was on has gone: drop the board.
+    Drop,
+    /// Something arrived while it holds a board — perhaps the keyboard on its
+    /// other link: make sure the board still answers.
+    Check,
+    /// It holds nothing and something arrived: look now, not at the retry.
+    Look,
+    Ignore,
+}
+
+pub fn respond(change: &Change, held: Option<&Claim>) -> Response {
+    match (change, held) {
+        (Change::Removed(_), Some(claim)) if claim.is_about(change) => Response::Drop,
+        (Change::Arrived(_), Some(_)) => Response::Check,
+        (Change::Arrived(_), None) => Response::Look,
+        (Change::Removed(_), _) => Response::Ignore,
+    }
+}
+
+/// Keychron interfaces arriving and leaving, pushed by Windows the moment it
+/// knows — a receiver unplugged, the keyboard switched to its cable, a device
+/// re-enumerated on wake — so a surface neither holds a board that has gone
+/// nor waits for its next retry to find one that came. Each caller gets its
+/// own queue; nothing is ever sent to the keyboard to learn this.
+pub fn watch() -> std::sync::mpsc::Receiver<Change> {
+    platform::watch()
+}
+
 pub fn open(found: &Found) -> Result<Box<dyn Transport>, String> {
     platform::open(found)
 }
@@ -100,14 +154,96 @@ pub fn open(found: &Found) -> Result<Box<dyn Transport>, String> {
 #[cfg(windows)]
 mod platform {
     use std::ffi::CString;
+    use std::sync::mpsc::{Receiver, Sender, channel};
+    use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
 
     use hidapi::{HidApi, HidDevice};
+    use windows::Win32::Devices::DeviceAndDriverInstallation::{
+        CM_NOTIFY_ACTION, CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL,
+        CM_NOTIFY_ACTION_DEVICEINTERFACEREMOVAL, CM_NOTIFY_EVENT_DATA, CM_NOTIFY_FILTER,
+        CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE, CM_Register_Notification, CR_SUCCESS,
+        HCMNOTIFICATION,
+    };
+    use windows::core::GUID;
 
     use super::{
-        ECHO_TIMEOUT_MS, Found, REPORT_LEN, Report, Transport, USAGE, USAGE_PAGE, VENDOR_ID,
-        is_echo,
+        Change, ECHO_TIMEOUT_MS, Found, REPORT_LEN, Report, Transport, USAGE, USAGE_PAGE,
+        VENDOR_ID, is_echo,
     };
+
+    /// The HID interface class — the GUID every HID path ends in.
+    const HID_INTERFACES: GUID = GUID::from_u128(0x4d1e55b2_f16f_11cf_88cb_001111000030);
+
+    /// Every queue handed out by [`watch`]; a queue whose receiver is gone is
+    /// dropped on the next change.
+    static WATCHERS: Mutex<Vec<Sender<Change>>> = Mutex::new(Vec::new());
+
+    pub fn watch() -> Receiver<Change> {
+        static REGISTERED: OnceLock<bool> = OnceLock::new();
+        let (send, receive) = channel();
+        if let Ok(mut watchers) = WATCHERS.lock() {
+            watchers.push(send);
+        }
+        REGISTERED.get_or_init(register);
+        receive
+    }
+
+    /// Asks Windows for every HID interface arrival and removal, for the life
+    /// of the process. `false` leaves the surfaces on their retry, as before.
+    fn register() -> bool {
+        let mut filter = CM_NOTIFY_FILTER {
+            cbSize: std::mem::size_of::<CM_NOTIFY_FILTER>() as u32,
+            FilterType: CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE,
+            ..Default::default()
+        };
+        filter.u.DeviceInterface.ClassGuid = HID_INTERFACES;
+        let mut handle = HCMNOTIFICATION::default();
+        // SAFETY: FFI; the filter is fully initialised and outlives the call,
+        // and the callback is a plain function valid for the whole process.
+        // The handle is never unregistered: the watch lasts as long as we do.
+        let result =
+            unsafe { CM_Register_Notification(&filter, None, Some(notified), &mut handle) };
+        result == CR_SUCCESS
+    }
+
+    /// SAFETY: called by Windows on a thread-pool thread with `data` pointing
+    /// at `size` bytes of `CM_NOTIFY_EVENT_DATA`, whose symbolic link is a
+    /// null-terminated UTF-16 string running to the end of that block.
+    unsafe extern "system" fn notified(
+        _handle: HCMNOTIFICATION,
+        _context: *const core::ffi::c_void,
+        action: CM_NOTIFY_ACTION,
+        data: *const CM_NOTIFY_EVENT_DATA,
+        size: u32,
+    ) -> u32 {
+        const HANDLED: u32 = 0;
+        if data.is_null() {
+            return HANDLED;
+        }
+        let start =
+            unsafe { std::ptr::addr_of!((*data).u.DeviceInterface.SymbolicLink) } as *const u16;
+        let offset = start as usize - data as usize;
+        let room = (size as usize).saturating_sub(offset) / 2;
+        let link = unsafe { std::slice::from_raw_parts(start, room) };
+        let length = link.iter().position(|&unit| unit == 0).unwrap_or(room);
+        let path = String::from_utf16_lossy(&link[..length]);
+        if !path
+            .to_ascii_uppercase()
+            .contains(&format!("VID_{VENDOR_ID:04X}"))
+        {
+            return HANDLED;
+        }
+        let change = match action {
+            CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL => Change::Arrived(path),
+            CM_NOTIFY_ACTION_DEVICEINTERFACEREMOVAL => Change::Removed(path),
+            _ => return HANDLED,
+        };
+        if let Ok(mut watchers) = WATCHERS.lock() {
+            watchers.retain(|watcher| watcher.send(change.clone()).is_ok());
+        }
+        HANDLED
+    }
 
     struct Device {
         device: HidDevice,
@@ -183,7 +319,12 @@ mod platform {
 
 #[cfg(not(windows))]
 mod platform {
-    use super::{Found, Transport};
+    use super::{Change, Found, Transport};
+
+    /// Nothing arrives where nothing is driven.
+    pub fn watch() -> std::sync::mpsc::Receiver<Change> {
+        std::sync::mpsc::channel().1
+    }
 
     pub fn find() -> Result<Vec<Found>, String> {
         Err("the keyboard is only driven on Windows".to_owned())
@@ -211,6 +352,39 @@ mod tests {
         drop(first);
         let again = claim(&found).expect("freed by the drop");
         drop(again);
+    }
+
+    #[test]
+    fn a_change_is_about_its_interface_whatever_the_case() {
+        let found = Found {
+            product_id: 0xD028,
+            product: "Keychron Ultra-Link 8K".to_owned(),
+            path: "\\\\?\\HID#VID_3434&PID_D028&MI_02#7&1de32dba&0&0000#{4d1e55b2}".to_owned(),
+        };
+        let held = claim(&found).expect("free to claim");
+        let lower = found.path.to_ascii_lowercase();
+        assert!(held.is_about(&Change::Removed(lower.clone())));
+        assert!(held.is_about(&Change::Arrived(lower)));
+        let cable = found.path.replace("PID_D028&MI_02", "PID_0C30&MI_01");
+        assert!(!held.is_about(&Change::Removed(cable)));
+    }
+
+    #[test]
+    fn a_surface_drops_only_its_own_interface_and_looks_when_empty() {
+        let receiver = Found {
+            product_id: 0xD028,
+            product: "Keychron Ultra-Link 8K".to_owned(),
+            path: "respond-receiver-path".to_owned(),
+        };
+        let held = claim(&receiver).expect("free to claim");
+        let own = Change::Removed(receiver.path.clone());
+        let other = Change::Removed("respond-keyboard-mi-00".to_owned());
+        let cable = Change::Arrived("respond-cable-path".to_owned());
+        assert_eq!(respond(&own, Some(&held)), Response::Drop);
+        assert_eq!(respond(&other, Some(&held)), Response::Ignore);
+        assert_eq!(respond(&cable, Some(&held)), Response::Check);
+        assert_eq!(respond(&cable, None), Response::Look);
+        assert_eq!(respond(&own, None), Response::Ignore);
     }
 
     #[test]
