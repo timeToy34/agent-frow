@@ -403,6 +403,23 @@ impl<T: Transport> Board<T> {
         Ok(true)
     }
 
+    /// Takes the board for the app: whether it is already set up decides what
+    /// it goes back to — `remembered` if so, a fresh snapshot if not — then
+    /// [`Self::take_over`]. An error names the step it stopped at.
+    pub fn settle(
+        &mut self,
+        remembered: Option<&Snapshot>,
+    ) -> Result<Snapshot, (&'static str, String)> {
+        let ours = self.is_ours().map_err(|error| ("is_ours", error))?;
+        let snapshot = match (ours, remembered) {
+            (true, Some(known)) => known.clone(),
+            _ => self.snapshot().map_err(|error| ("snapshot", error))?,
+        };
+        self.take_over(&snapshot)
+            .map_err(|error| ("take_over", error))?;
+        Ok(snapshot)
+    }
+
     /// Puts the keyboard in mixed mode with the F-row as the app's region and
     /// the rest of the board running what the user had. The effect is
     /// switched last: that is what makes the rest take.
@@ -972,6 +989,23 @@ mod tests {
         again.state = state;
         let mut board = Board::connect(again).unwrap();
         assert!(board.is_ours().unwrap());
+    }
+
+    #[test]
+    fn settling_a_board_already_ours_goes_back_to_what_was_remembered() {
+        let mut board = board();
+        let found = board.settle(None).unwrap();
+        assert_eq!(found.effect, EFFECT_OFF, "what the user had");
+        assert!(board.is_ours().unwrap());
+        let mut again = ScriptedKeyboard::new();
+        again.state = board.transport.state.clone();
+        let mut board = Board::connect(again).unwrap();
+        assert_eq!(board.settle(Some(&found)).unwrap(), found);
+        assert_eq!(
+            board.settle(None).unwrap().effect,
+            EFFECT_MIXED,
+            "without the memory, a snapshot would capture the app's own work"
+        );
     }
 
     #[test]

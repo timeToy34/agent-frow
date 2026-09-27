@@ -165,6 +165,20 @@ neither the ingress path nor the tracker lock waits for disk I/O. The file
 restarts at 256 KB, and an oversized record is skipped. Prompts, tool contents
 and credentials are never included.
 
+The Keychron surfaces (the Ultra's F-row and the V0 numpad) keep
+`~/.agent-frow/keychron-events.log`, the history behind their one-line status
+in the window. Each JSON line is a thread start, a connection (model,
+firmware, LED count), a failed attempt, a lost connection with its error, an
+untick or re-tick, or a hand-back. A failed attempt lists every Launcher
+interface it looked at (product, id, link, OS path) with the step it stopped
+at — `held` by the other surface, `open`, `handshake`, the other surface's
+board (`numpad`/`keyboard`), `is_ours`, `snapshot`, `take_over` — plus the
+error and milliseconds taken. A run of identical failures is written once,
+restated as `still_failing` about every ten minutes, and closed by a
+`failures_ended` line with its count, so a keyboard that is away all night
+costs a few lines. Same bounded worker and 256 KB restart as the lane
+journal; no lighting state or keystrokes are recorded.
+
 ### Codex terminal ownership
 
 Codex CLI lanes follow `(source, WT_SESSION)`, with one foreground agent per

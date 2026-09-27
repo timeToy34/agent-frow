@@ -19,6 +19,7 @@ use crate::paths;
 use crate::settings::{NUMPAD_LANES, Rgb, Settings};
 use crate::state::State;
 use crate::surface::keychron::hid::{self, Transport};
+use crate::surface::keychron::journal::{Journal, Try};
 use crate::surface::keychron::session::{self, Board, Snapshot};
 use crate::surface::palette;
 use crate::surface::scene::Scene;
@@ -156,6 +157,7 @@ fn render(tracker: &Mutex<Tracker>) {
     let mut remembered: Option<Snapshot> = recall();
     let mut next_attempt = Instant::now();
     let mut enabled = true;
+    let mut journal = Journal::new(SURFACE);
 
     while RUNNING.load(Ordering::SeqCst) {
         // The clock, board or no board. What it says about change is not
@@ -167,13 +169,16 @@ fn render(tracker: &Mutex<Tracker>) {
         let wanted = crate::surface::enabled(tracker, SURFACE);
         if wanted != enabled {
             enabled = wanted;
+            journal.ticked(enabled);
             if enabled {
                 next_attempt = Instant::now();
             } else {
-                if let Some(mut ready) = live.take()
-                    && ready.board.restore(&ready.snapshot).is_ok()
-                {
-                    forget();
+                if let Some(mut ready) = live.take() {
+                    let restored = ready.board.restore(&ready.snapshot);
+                    journal.handed_back(&restored);
+                    if restored.is_ok() {
+                        forget();
+                    }
                 }
                 report(tracker, KeyboardStatus::off(SURFACE));
             }
@@ -188,8 +193,10 @@ fn render(tracker: &Mutex<Tracker>) {
                 std::thread::sleep(Duration::from_millis(200));
                 continue;
             }
-            match connect(remembered.as_ref()) {
+            let mut tries = Vec::new();
+            match connect(remembered.as_ref(), &mut tries) {
                 Ok((board, snapshot, model, claim)) => {
+                    journal.connected(&model, &board.firmware, board.led_count, &tries);
                     remember(&snapshot);
                     remembered = Some(snapshot.clone());
                     report(
@@ -208,6 +215,7 @@ fn render(tracker: &Mutex<Tracker>) {
                     scene.invalidate();
                 }
                 Err(reason) => {
+                    journal.failed(&reason, &tries);
                     report(tracker, unavailable(reason));
                     next_attempt = Instant::now() + RETRY;
                 }
@@ -237,9 +245,10 @@ fn render(tracker: &Mutex<Tracker>) {
                 .into_iter()
                 .map(|(key, color)| (key, palette::tune(color, tuning)))
                 .collect();
-            if ready.board.paint(&colours).is_err() {
+            if let Err(error) = ready.board.paint(&colours) {
                 // Unplugged, switched transports, asleep: the board keeps
                 // whatever state it has and the next connect sorts out which.
+                journal.lost(&error);
                 report(tracker, unavailable("disconnected — reconnecting"));
                 live = None;
                 next_attempt = Instant::now() + RETRY;
@@ -250,10 +259,12 @@ fn render(tracker: &Mutex<Tracker>) {
         std::thread::sleep(FRAME);
     }
 
-    if let Some(mut ready) = live
-        && ready.board.restore(&ready.snapshot).is_ok()
-    {
-        forget();
+    if let Some(mut ready) = live {
+        let restored = ready.board.restore(&ready.snapshot);
+        journal.handed_back(&restored);
+        if restored.is_ok() {
+            forget();
+        }
     }
     report(tracker, KeyboardStatus::searching(SURFACE));
 }
@@ -316,22 +327,26 @@ fn compose(
 
 /// Finds a V0 Ultra, learns it, and takes the nine — remembering what was
 /// there first, unless the board turns out to be one the app already set up.
-fn connect(remembered: Option<&Snapshot>) -> Result<Taken, String> {
+/// Every interface looked at goes into `tries`, with the step it stopped at.
+fn connect(remembered: Option<&Snapshot>, tries: &mut Vec<Try>) -> Result<Taken, String> {
     let found = hid::find()?;
     if found.is_empty() {
         return Err("not detected".to_owned());
     }
     let mut last_error = String::new();
     for candidate in &found {
+        let started = Instant::now();
         // The Ultra surface shares this bus, and two threads on one
         // interface eat each other's echoes: claim first, skip what it holds
         // — somebody else's board is not a failure, just not ours.
         let Some(claim) = hid::claim(candidate) else {
+            tries.push(Try::new(candidate, "held", "", started));
             continue;
         };
         let transport = match hid::open(candidate) {
             Ok(transport) => transport,
             Err(error) => {
+                tries.push(Try::new(candidate, "open", &error, started));
                 last_error = error;
                 continue;
             }
@@ -339,17 +354,24 @@ fn connect(remembered: Option<&Snapshot>) -> Result<Taken, String> {
         let mut board = match Board::connect_with(transport, &session::V0_ULTRA) {
             Ok(board) => board,
             // The F-row's Ultra answers this handshake too: not ours.
-            Err(ref error) if error.ends_with(session::DIFFERENT_BOARD) => continue,
+            Err(ref error) if error.ends_with(session::DIFFERENT_BOARD) => {
+                tries.push(Try::new(candidate, "keyboard", "", started));
+                continue;
+            }
             Err(error) => {
+                tries.push(Try::new(candidate, "handshake", &error, started));
                 last_error = format!("{}: {error}", candidate.product);
                 continue;
             }
         };
-        let snapshot = match (board.is_ours()?, remembered) {
-            (true, Some(known)) => known.clone(),
-            _ => board.snapshot()?,
+        let snapshot = match board.settle(remembered) {
+            Ok(snapshot) => snapshot,
+            Err((step, error)) => {
+                tries.push(Try::new(candidate, step, &error, started));
+                return Err(error);
+            }
         };
-        board.take_over(&snapshot)?;
+        tries.push(Try::new(candidate, "taken", "", started));
         let model = format!("{} over {}", candidate.product, candidate.link());
         return Ok((board, snapshot, model, claim));
     }

@@ -13,6 +13,7 @@
 //! three.
 
 pub mod hid;
+pub mod journal;
 pub mod protocol;
 pub mod session;
 pub mod surface;
